@@ -847,13 +847,10 @@ async function renderDashboard() {
         <h3>Koszt (SMS × ${smsPrice.toFixed(2)} PLN)</h3>
         <div class="big-num">${cost} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
       </div>
-    </div>
-    <div class="card" style="margin-bottom:16px">
-      <h3>Stan konta Zadarma</h3>
-      <div id="zadarma-balance-val" style="font-size:24px;font-weight:700;margin-bottom:12px">
-        <span class="spinner"></span>
+      <div class="card">
+        <h3>Stan konta Zadarma <button class="btn btn-ghost btn-sm" style="margin-left:6px;padding:2px 8px;font-size:11px" onclick="loadZadarmaBalance()">↺</button></h3>
+        <div id="zadarma-balance-val" class="big-num"><span class="spinner"></span></div>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="loadZadarmaBalance()">Odśwież</button>
     </div>
   `;
 
@@ -872,7 +869,7 @@ async function loadZadarmaBalance() {
   el.innerHTML = '<span class="spinner"></span>';
   const data = await fetchZadarmaBalance();
   if (data && data.balance !== undefined) {
-    el.textContent = `${data.balance} ${data.currency || ''}`;
+    el.innerHTML = `${escHtml(String(data.balance))} <span style="font-size:16px;color:var(--muted)">${escHtml(data.currency || '')}</span>`;
   } else {
     el.textContent = '—';
   }
