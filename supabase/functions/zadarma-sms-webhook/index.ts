@@ -114,7 +114,7 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
           contents,
           systemInstruction: { parts: [{ text: system }] },
           tools: [{ google_search: {} }],
-          generationConfig: { maxOutputTokens: 60 },
+          generationConfig: { maxOutputTokens: 60, thinkingConfig: { thinkingBudget: 0 } },
         }),
       }
     );
