@@ -1,11 +1,11 @@
 # Brick AI — SMS Gateway
 
-AI asystent dostępny przez SMS. Użytkownik wysyła SMS z kodem → Gemini/DeepSeek odpowiada w 160 znakach.
+AI asystent dostępny przez SMS. Użytkownik wysyła SMS z kodem → Gemini odpowiada w 160 znakach.
 
 ## Jak to działa
 
 ```
-Użytkownik → SMS → Zadarma → webhook → Supabase Edge Function → Gemini/DeepSeek → SMS odpowiedź
+Użytkownik → SMS → Zadarma → webhook → Supabase Edge Function → Gemini → SMS odpowiedź
 ```
 
 **Format SMS od użytkownika:**
@@ -72,7 +72,6 @@ supabase secrets set \
   ZADARMA_API_KEY='...' \
   ZADARMA_API_SECRET='...' \
   GEMINI_API_KEY='...' \
-  DEEPSEEK_API_KEY='...' \
   SUPABASE_ANON_KEY='...' \
   SETUP_SECRET='...'
 ```
@@ -84,9 +83,10 @@ supabase secrets set \
 | `ZADARMA_API_KEY` | Zadarma → Ustawienia → Integracje i API → Klucze i API → pole **Key** (wymaga potwierdzenia przez email) |
 | `ZADARMA_API_SECRET` | j.w. → pole **Secret** |
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
-| `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) → API Keys |
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
 | `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
+
+> **Dlaczego tylko Gemini?** Gemini 2.0 Flash ma wbudowaną wyszukiwarkę Google (`googleSearch`) — jedyny darmowy model z dostępem do danych w czasie rzeczywistym (pogoda, kursy walut, aktualności) bez dodatkowych integracji.
 
 ### 5. Deploy
 
@@ -176,13 +176,12 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 | SMS wychodzący | 0.18 PLN/sms |
 | Supabase | Free tier |
 | Gemini API | Free tier (60 req/min) |
-| DeepSeek API | ~$0.001/1K tokenów |
 | GitHub Pages | Darmowe |
 
 ## Technologie
 
 - **Supabase** — PostgreSQL + Edge Functions (Deno)
 - **Zadarma** — bramka SMS
-- **Google Gemini** — główny model AI (fallback: DeepSeek)
+- **Google Gemini 2.0 Flash** — model AI z wbudowaną wyszukiwarką Google (dane w czasie rzeczywistym)
 - **GitHub Actions** — CI/CD
 - **GitHub Pages** — panel admina (vanilla HTML/JS)

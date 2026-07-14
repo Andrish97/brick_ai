@@ -310,10 +310,7 @@
       <div class="nav-item" onclick="showPage('prompt')" id="nav-prompt">
         <span class="nav-icon">🧠</span> Prompt
       </div>
-      <div class="nav-item" onclick="showPage('ai-config')" id="nav-ai-config">
-        <span class="nav-icon">🤖</span> Modele AI
-      </div>
-      <div class="nav-item" onclick="showPage('settings')" id="nav-settings">
+<div class="nav-item" onclick="showPage('settings')" id="nav-settings">
         <span class="nav-icon">⚙️</span> Ustawienia
       </div>
     </nav>
@@ -423,8 +420,7 @@ function showPage(page) {
     'send-sms':   renderSendSms,
     logs:         renderLogs,
     prompt:       renderPrompt,
-    'ai-config':  renderAiConfig,
-    settings:     renderSettings,
+settings:     renderSettings,
   };
   (pages[page] || (() => {}))();
 }
@@ -973,90 +969,6 @@ async function saveUserPrompt(userId) {
   const { error } = await sb.from('users').update({ system_prompt: value || null }).eq('id', userId);
   if (error) alert('Błąd: ' + error.message);
   else renderPrompt();
-}
-
-// ══════════════════════════════════════════════════════
-//  PAGE: MODELE AI
-// ══════════════════════════════════════════════════════
-const AI_MODELS = [
-  { id: 'gemini',   name: 'Gemini 2.0 Flash',  key: 'GEMINI_API_KEY',    url: 'https://aistudio.google.com' },
-  { id: 'claude',   name: 'Claude Haiku 4.5',   key: 'ANTHROPIC_API_KEY', url: 'https://console.anthropic.com' },
-  { id: 'deepseek', name: 'DeepSeek Chat',      key: 'DEEPSEEK_API_KEY',  url: 'https://platform.deepseek.com' },
-];
-
-let aiConfigState = [];
-
-async function renderAiConfig() {
-  const { data: rows } = await sb.from('settings').select('value').eq('key', 'ai_config').single();
-  try {
-    aiConfigState = rows?.value ? JSON.parse(rows.value) : AI_MODELS.map(m => ({ id: m.id, enabled: true }));
-  } catch {
-    aiConfigState = AI_MODELS.map(m => ({ id: m.id, enabled: true }));
-  }
-
-  document.getElementById('content').innerHTML = `
-    <div class="page-header">
-      <h1>Modele AI</h1>
-      <p>Kolejność i aktywność modeli — system próbuje każdy włączony model po kolei</p>
-    </div>
-    <div class="section-card">
-      <div id="ai-list" style="display:flex;flex-direction:column;gap:10px"></div>
-      <button class="btn btn-primary" style="margin-top:16px" onclick="saveAiConfig()">Zapisz kolejność</button>
-      <div class="response-box" id="ai-config-response"></div>
-    </div>
-    <div class="section-card" style="margin-top:16px">
-      <h2 style="font-size:13px;color:var(--muted);margin-bottom:12px">Wymagane klucze API (Supabase → Edge Functions → Secrets)</h2>
-      ${AI_MODELS.map(m => `
-        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
-          <code style="flex:1">${m.key}</code>
-          <a href="${m.url}" target="_blank" style="color:var(--accent2);font-size:12px">${m.name} →</a>
-        </div>
-      `).join('')}
-    </div>
-  `;
-  renderAiList();
-}
-
-function renderAiList() {
-  const container = document.getElementById('ai-list');
-  if (!container) return;
-  container.innerHTML = aiConfigState.map((entry, i) => {
-    const model = AI_MODELS.find(m => m.id === entry.id) || { name: entry.id, key: '' };
-    return `
-      <div style="display:flex;align-items:center;gap:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 16px">
-        <div style="display:flex;flex-direction:column;gap:4px">
-          <button class="btn btn-ghost btn-sm" style="padding:2px 6px" ${i === 0 ? 'disabled' : ''} onclick="moveAi(${i}, -1)">▲</button>
-          <button class="btn btn-ghost btn-sm" style="padding:2px 6px" ${i === aiConfigState.length - 1 ? 'disabled' : ''} onclick="moveAi(${i}, 1)">▼</button>
-        </div>
-        <div style="width:24px;height:24px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0">${i + 1}</div>
-        <div style="flex:1">
-          <div style="font-weight:500">${model.name}</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">Klucz: <code>${model.key}</code></div>
-        </div>
-        <label class="toggle">
-          <input type="checkbox" ${entry.enabled ? 'checked' : ''} onchange="toggleAi(${i}, this.checked)" />
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-    `;
-  }).join('');
-}
-
-function moveAi(i, dir) {
-  const j = i + dir;
-  if (j < 0 || j >= aiConfigState.length) return;
-  [aiConfigState[i], aiConfigState[j]] = [aiConfigState[j], aiConfigState[i]];
-  renderAiList();
-}
-
-function toggleAi(i, enabled) {
-  aiConfigState[i].enabled = enabled;
-}
-
-async function saveAiConfig() {
-  const value = JSON.stringify(aiConfigState);
-  const { error } = await sb.from('settings').upsert({ key: 'ai_config', value, updated_at: new Date().toISOString() });
-  showResponse('ai-config-response', !error, error ? error.message : 'Zapisano.');
 }
 
 // ══════════════════════════════════════════════════════
