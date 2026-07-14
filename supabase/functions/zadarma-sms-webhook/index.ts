@@ -125,7 +125,6 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
     }
     const data = JSON.parse(resText);
     const parts = data.candidates?.[0]?.content?.parts ?? [];
-    log("gemini_raw", { candidatesCount: data.candidates?.length, partsCount: parts.length, sample: JSON.stringify(parts).slice(0, 300) });
     const text = parts.filter((p: { thought?: boolean }) => !p.thought).map((p: { text?: string }) => p.text ?? "").join("").trim();
     return text || null;
   } catch (e) {
