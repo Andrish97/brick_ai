@@ -1384,78 +1384,175 @@ async function deletePhoneNumber(id) {
 //  PAGE: WYSYŁKA SMS (Wyślij + Test odbioru)
 // ══════════════════════════════════════════════════════
 let smsToolsMode = 'send'; // 'send' | 'test'
+let smsToMode = 'user';    // 'user' | 'other' (only send)
+let smsUsers = [];
+let smsAllConvs = {};      // userId -> [{id, code}]
+let _smsSendUserId = '';
+let _smsTestUserId = '';
 
 async function renderSmsTools(mode) {
   if (mode === 'send' || mode === 'test') smsToolsMode = mode;
   await loadPhoneNumbers();
 
-  const pnOpts = phoneNumbers.map((pn, i) => ({
+  const [{ data: users }, { data: convs }] = await Promise.all([
+    sb.from('users').select('id,code,phone_number').eq('active', true).order('code'),
+    sb.from('conversations').select('id,code,user_id').eq('status', 'active').order('last_activity_at', { ascending: false }),
+  ]);
+
+  smsUsers = users || [];
+  smsAllConvs = {};
+  for (const c of convs || []) {
+    if (!smsAllConvs[c.user_id]) smsAllConvs[c.user_id] = [];
+    smsAllConvs[c.user_id].push(c);
+  }
+
+  if (!_smsSendUserId) _smsSendUserId = smsUsers.find(u => u.phone_number)?.id || '';
+  if (!_smsTestUserId) _smsTestUserId = smsUsers[0]?.id || '';
+
+  renderSmsContent();
+}
+
+function _pnOpts() {
+  return phoneNumbers.map((pn, i) => ({
     value: pn.number,
     label: (i === 0 ? '★ ' : '') + pn.number + (pn.description ? ' — ' + pn.description : ''),
   }));
-  const defaultNum = phoneNumbers[0]?.number || '';
-  const noNumPlaceholder = 'Brak numerów — dodaj w sekcji Numery';
+}
 
+function _convOpts(userId, includeNew) {
+  const list = (smsAllConvs[userId] || []).map(c => ({ value: c.code, label: c.code }));
+  list.unshift({ value: '', label: includeNew ? '— Nowa rozmowa —' : '— Brak (zwykły SMS) —' });
+  return list;
+}
+
+function renderSmsContent() {
   const isSend = smsToolsMode === 'send';
+  const pnOpts = _pnOpts();
+  const defaultPn = phoneNumbers[0]?.number || '';
+  const noPn = 'Brak numerów — dodaj w sekcji Numery';
 
-  const sendHtml = `
-    <label>Numer odbiorcy</label>
-    <input type="tel" id="sms-to" placeholder="48573311779" />
-    <label>Numer nadawcy (Zadarma)</label>
-    ${uiSelectHtml('sms-from', pnOpts, { value: defaultNum, placeholder: noNumPlaceholder })}
-    <label>Treść wiadomości</label>
-    <textarea id="sms-body" placeholder="Wpisz treść wiadomości…"></textarea>
-    <button class="btn btn-primary" style="margin-top:14px" onclick="sendAdminSms()">Wyślij SMS</button>
-    <div class="response-box" id="sms-response"></div>
-  `;
+  let formHtml;
 
-  const testHtml = `
-    <label>Numer nadawcy (telefon użytkownika)</label>
-    <input type="tel" id="wh-from" placeholder="48573311779" />
-    <label>Numer odbiorcy (Zadarma)</label>
-    ${uiSelectHtml('wh-to', pnOpts, { value: defaultNum, placeholder: noNumPlaceholder })}
-    <label>Kod użytkownika</label>
-    <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
-    <label>Kod rozmowy (opcjonalny)</label>
-    <input type="text" id="wh-convcode" maxlength="6" placeholder="123456" />
-    <label>Treść wiadomości</label>
-    <textarea id="wh-body" placeholder="Wpisz treść wiadomości…"></textarea>
-    <div style="display:flex;align-items:center;gap:10px;margin-top:14px">
-      <label class="toggle" style="margin:0">
-        <input type="checkbox" id="wh-dryrun" checked />
-        <span class="toggle-slider"></span>
-      </label>
-      <span style="font-size:13px">Dry run <span style="color:var(--muted);font-size:12px">(test AI bez wysyłki SMS)</span></span>
-    </div>
-    <button class="btn btn-primary" style="margin-top:14px" onclick="sendWebhookTest()">Wyślij test</button>
-    <div class="response-box" id="wh-response"></div>
-  `;
+  if (isSend) {
+    const isUser = smsToMode === 'user';
+    const usersWithPhone = smsUsers.filter(u => u.phone_number);
+    const sendUserOpts = usersWithPhone.map(u => ({ value: u.id, label: u.phone_number + ' (' + u.code + ')' }));
+    const convOpts = isUser ? _convOpts(_smsSendUserId, false) : [];
+
+    formHtml = `
+      <label>Do</label>
+      <div style="display:flex;margin-bottom:10px">
+        <button class="prompt-mode-btn ${isUser ? 'active' : ''}" style="border-radius:6px 0 0 6px;flex:none;padding:7px 16px;font-size:12px" onclick="setSmsToMode('user')">Użytkownicy</button>
+        <button class="prompt-mode-btn ${!isUser ? 'active' : ''}" style="border-radius:0 6px 6px 0;flex:none;padding:7px 16px;font-size:12px" onclick="setSmsToMode('other')">Inny numer</button>
+      </div>
+      ${isUser
+        ? (sendUserOpts.length
+            ? uiSelectHtml('sms-user', sendUserOpts, { value: _smsSendUserId })
+            : '<p style="color:var(--muted);font-size:13px">Brak użytkowników z przypisanym numerem telefonu.</p>')
+        : '<input type="tel" id="sms-to" placeholder="48573311779" />'
+      }
+      ${isUser && sendUserOpts.length ? `
+        <label style="margin-top:12px">Kod rozmowy (opcjonalny)</label>
+        ${uiSelectHtml('sms-conv', convOpts, { value: '' })}
+        <div id="sms-dryrun-wrap"></div>
+      ` : ''}
+      <label style="margin-top:12px">Numer nadawcy (Zadarma)</label>
+      ${pnOpts.length ? uiSelectHtml('sms-from', pnOpts, { value: defaultPn }) : `<p style="color:var(--muted);font-size:13px">${noPn}</p>`}
+      <label style="margin-top:12px">Treść wiadomości</label>
+      <textarea id="sms-body" placeholder="Wpisz treść wiadomości…"></textarea>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="sendAdminSms()">Wyślij SMS</button>
+      <div class="response-box" id="sms-response"></div>
+    `;
+  } else {
+    const testUserOpts = smsUsers.map(u => ({ value: u.id, label: u.code + (u.phone_number ? ' — ' + u.phone_number : '') }));
+    const convOpts = _convOpts(_smsTestUserId, true);
+
+    formHtml = `
+      <label>Użytkownik</label>
+      ${testUserOpts.length ? uiSelectHtml('test-user', testUserOpts, { value: _smsTestUserId }) : '<p style="color:var(--muted);font-size:13px">Brak użytkowników.</p>'}
+      <label style="margin-top:12px">Numer Zadarma (odbiorca)</label>
+      ${pnOpts.length ? uiSelectHtml('wh-to', pnOpts, { value: defaultPn }) : `<p style="color:var(--muted);font-size:13px">${noPn}</p>`}
+      <label style="margin-top:12px">Kod rozmowy</label>
+      ${uiSelectHtml('test-conv', convOpts, { value: '' })}
+      <label style="margin-top:12px">Treść wiadomości</label>
+      <textarea id="wh-body" placeholder="Wpisz treść wiadomości…"></textarea>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:14px">
+        <label class="toggle" style="margin:0">
+          <input type="checkbox" id="wh-dryrun" checked />
+          <span class="toggle-slider"></span>
+        </label>
+        <span style="font-size:13px">Dry run <span style="color:var(--muted);font-size:12px">(test AI bez wysyłki SMS)</span></span>
+      </div>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="sendWebhookTest()">Wyślij test</button>
+      <div class="response-box" id="wh-response"></div>
+    `;
+  }
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
-      <h1>Wysyłka SMS</h1>
+      <h1>Testy</h1>
       <p>Wyślij wiadomość lub zasymuluj przychodzący SMS od użytkownika</p>
     </div>
     <div class="prompt-mode-bar" style="margin-bottom:20px">
       <button class="prompt-mode-btn ${isSend ? 'active' : ''}" onclick="renderSmsTools('send')">📤 Wyślij SMS</button>
       <button class="prompt-mode-btn ${!isSend ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
     </div>
-    <div class="section-card">
-      ${isSend ? sendHtml : testHtml}
-    </div>
+    <div class="section-card">${formHtml}</div>
   `;
+
   initAllUiSelects();
+  _wireSmsSelects();
+}
+
+function _wireSmsSelects() {
+  const isSend = smsToolsMode === 'send';
+  if (isSend) {
+    const userMenu = document.querySelector('[data-select-id="sms-user"] .ui-select-menu');
+    if (userMenu) userMenu.addEventListener('click', () => setTimeout(() => {
+      _smsSendUserId = getUiSelect('sms-user');
+      renderSmsContent();
+    }, 50));
+
+    const convMenu = document.querySelector('[data-select-id="sms-conv"] .ui-select-menu');
+    if (convMenu) convMenu.addEventListener('click', () => setTimeout(() => {
+      const convVal = getUiSelect('sms-conv');
+      const wrap = document.getElementById('sms-dryrun-wrap');
+      if (wrap) wrap.innerHTML = convVal ? `
+        <div style="display:flex;align-items:center;gap:10px;margin-top:12px">
+          <label class="toggle" style="margin:0">
+            <input type="checkbox" id="sms-dryrun" />
+            <span class="toggle-slider"></span>
+          </label>
+          <span style="font-size:13px">Dry run <span style="color:var(--muted);font-size:12px">(symulacja bez wysyłki)</span></span>
+        </div>` : '';
+    }, 50));
+  } else {
+    const userMenu = document.querySelector('[data-select-id="test-user"] .ui-select-menu');
+    if (userMenu) userMenu.addEventListener('click', () => setTimeout(() => {
+      _smsTestUserId = getUiSelect('test-user');
+      renderSmsContent();
+    }, 50));
+  }
+}
+
+function setSmsToMode(mode) {
+  smsToMode = mode;
+  renderSmsContent();
 }
 
 async function sendWebhookTest() {
-  const from     = document.getElementById('wh-from').value.trim();
-  const to       = getUiSelect('wh-to');
-  const userCode = document.getElementById('wh-usercode').value.trim();
-  const convCode = document.getElementById('wh-convcode').value.trim();
-  const body     = document.getElementById('wh-body').value.trim();
-  const dryRun   = document.getElementById('wh-dryrun').checked;
+  const userId = getUiSelect('test-user');
+  const user = smsUsers.find(u => u.id === userId);
+  if (!user) { showResponse('wh-response', false, 'Wybierz użytkownika.'); return; }
 
-  let msgBody = userCode;
+  const to      = getUiSelect('wh-to') || phoneNumbers[0]?.number || '';
+  const convCode = getUiSelect('test-conv') || '';
+  const body    = document.getElementById('wh-body')?.value.trim() || '';
+  const dryRun  = document.getElementById('wh-dryrun')?.checked ?? true;
+
+  if (!body) { showResponse('wh-response', false, 'Wpisz treść wiadomości.'); return; }
+
+  let msgBody = user.code;
   if (convCode) msgBody += '\n' + convCode;
   msgBody += '\n' + body;
 
@@ -1464,7 +1561,7 @@ async function sendWebhookTest() {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: 'incoming_sms', sms_from: from, sms_to: to, msg: msgBody }),
+      body: JSON.stringify({ event: 'incoming_sms', sms_from: user.phone_number || '48000000000', sms_to: to, msg: msgBody }),
     });
     showResponse('wh-response', res.ok, `HTTP ${res.status}\n${await res.text()}`);
   } catch (e) {
@@ -1473,11 +1570,38 @@ async function sendWebhookTest() {
 }
 
 async function sendAdminSms() {
-  const to   = document.getElementById('sms-to').value.trim();
-  const from = getUiSelect('sms-from') || phoneNumbers[0]?.number || '';
-  const body = document.getElementById('sms-body').value.trim();
+  const isUser = smsToMode === 'user';
+  const from   = getUiSelect('sms-from') || phoneNumbers[0]?.number || '';
+  const body   = document.getElementById('sms-body')?.value.trim() || '';
 
-  if (!to || !body) { showResponse('sms-response', false, 'Numer odbiorcy i treść są wymagane.'); return; }
+  let toPhone = '';
+  let convCode = '';
+
+  if (isUser) {
+    const user = smsUsers.find(u => u.id === _smsSendUserId);
+    toPhone  = user?.phone_number || '';
+    convCode = getUiSelect('sms-conv') || '';
+  } else {
+    toPhone = document.getElementById('sms-to')?.value.trim() || '';
+  }
+
+  if (!toPhone || !body) { showResponse('sms-response', false, 'Numer odbiorcy i treść są wymagane.'); return; }
+
+  const dryRun = isUser && !!convCode && (document.getElementById('sms-dryrun')?.checked ?? false);
+
+  if (dryRun) {
+    showResponse('sms-response', true, `[DRY RUN]\nDo: ${toPhone}\nRozmowa: ${convCode}\nTreść: ${body}`);
+    return;
+  }
+
+  // Zapisz wiadomość do rozmowy jeśli wybrano
+  if (isUser && convCode) {
+    const conv = Object.values(smsAllConvs).flat().find(c => c.code === convCode);
+    if (conv) {
+      await sb.from('messages').insert({ conversation_id: conv.id, direction: 'out', content: body });
+      await sb.from('conversations').update({ last_activity_at: new Date().toISOString() }).eq('id', conv.id);
+    }
+  }
 
   const session = await getSession();
   if (!session) { showResponse('sms-response', false, 'Brak sesji — zaloguj się ponownie.'); return; }
@@ -1486,7 +1610,7 @@ async function sendAdminSms() {
     const res = await fetch(`${SB_URL}/functions/v1/admin-send-sms`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
-      body: JSON.stringify({ phone: to, message: body, caller_id: from }),
+      body: JSON.stringify({ phone: toPhone, message: body, caller_id: from }),
     });
     showResponse('sms-response', res.ok, `HTTP ${res.status}\n${await res.text()}`);
   } catch (e) {
