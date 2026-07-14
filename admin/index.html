@@ -512,8 +512,8 @@ function phoneNumbersSelectHtml(selectedValue) {
   return `<select id="wh-to">${opts}</select>`;
 }
 
-function phoneNumbersSelectHtmlById(selectedId) {
-  if (!phoneNumbers.length) return '<input type="tel" id="sms-from" placeholder="np. 48100200300" />';
+function phoneNumbersSelectHtmlById(selectedId, inputId = 'sms-from') {
+  if (!phoneNumbers.length) return `<select id="${inputId}"><option value="" disabled selected>Brak numerów — dodaj w sekcji Numery</option></select>`;
   const defaultPn = phoneNumbers[0];
   const defaultDesc = defaultPn.description ? ` — ${defaultPn.description}` : '';
   let opts = `<option value="">★ ${escHtml(defaultPn.number)}${escHtml(defaultDesc)} (domyślny)</option>`;
@@ -522,7 +522,7 @@ function phoneNumbersSelectHtmlById(selectedId) {
     const sel = (selectedId && selectedId === pn.id) ? ' selected' : '';
     opts += `<option value="${escHtml(pn.number)}"${sel}>${escHtml(pn.number)}${escHtml(desc)}</option>`;
   }
-  return `<select id="sms-from">${opts}</select>`;
+  return `<select id="${inputId}">${opts}</select>`;
 }
 
 function userPhoneSelectHtml(userId, selectedPhoneNumberId) {
@@ -677,10 +677,12 @@ async function renderUsers() {
           <input type="text" id="new-code" maxlength="4" placeholder="1234" />
         </div>
         <div>
-          <label>Numer telefonu</label>
+          <label>Numer telefonu użytkownika</label>
           <input type="tel" id="new-phone" placeholder="+48123456789" />
         </div>
       </div>
+      <label>Numer wysyłkowy Zadarma (opcjonalny — puste = domyślny)</label>
+      ${phoneNumbersSelectHtmlById(null, 'new-phone-number-id')}
       <label>System Prompt (opcjonalny)</label>
       <textarea id="new-prompt" placeholder="Jesteś pomocnym asystentem..."></textarea>
       <div class="err-msg" id="add-user-err"></div>
@@ -718,10 +720,11 @@ async function saveSystemPrompt(id, value) {
 }
 
 async function addUser() {
-  const code   = document.getElementById('new-code').value.trim();
-  const phone  = document.getElementById('new-phone').value.trim();
-  const prompt = document.getElementById('new-prompt').value.trim();
-  const err    = document.getElementById('add-user-err');
+  const code          = document.getElementById('new-code').value.trim();
+  const phone         = document.getElementById('new-phone').value.trim();
+  const prompt        = document.getElementById('new-prompt').value.trim();
+  const phoneNumberId = document.getElementById('new-phone-number-id')?.value || '';
+  const err           = document.getElementById('add-user-err');
   err.textContent = '';
 
   if (!/^\d{4}$/.test(code)) {
@@ -729,10 +732,15 @@ async function addUser() {
     return;
   }
 
+  // phoneNumbersSelectHtmlById stores number strings as values, but we need the id
+  // Find the phone_number record by number
+  const selectedPn = phoneNumberId ? phoneNumbers.find(p => p.number === phoneNumberId) : null;
+
   const { error } = await sb.from('users').insert({
     code,
     phone_number: phone || null,
     system_prompt: prompt || null,
+    phone_number_id: selectedPn?.id || null,
     active: true,
   });
 
@@ -999,9 +1007,9 @@ async function renderReceiveTest() {
   const toField = phoneNumbers.length
     ? `<select id="wh-to">${phoneNumbers.map((pn, i) => {
         const desc = pn.description ? ` — ${pn.description}` : '';
-        return `<option value="${escHtml(pn.number)}">${escHtml(pn.number)}${escHtml(desc)}${i === 0 ? ' (domyślny)' : ''}</option>`;
+        return `<option value="${escHtml(pn.number)}">${i === 0 ? '★ ' : ''}${escHtml(pn.number)}${escHtml(desc)}${i === 0 ? ' (domyślny)' : ''}</option>`;
       }).join('')}</select>`
-    : '<input type="tel" id="wh-to" placeholder="np. 48100200300" />';
+    : `<select id="wh-to"><option value="" disabled selected>Brak numerów — dodaj w sekcji Numery</option></select>`;
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -1158,9 +1166,10 @@ async function renderLogs() {
 function renderLogsContent() {
   // Build distinct types
   const types = ['all', ...new Set(_logsCache.map(l => l.type))];
-  const filterOptions = types.map(t =>
-    `<option value="${escHtml(t)}" ${t === logFilterType ? 'selected' : ''}>${t === 'all' ? 'Wszystkie typy' : escHtml(t)}</option>`
-  ).join('');
+  const filterOptions = types.map(t => {
+    const label = t === 'all' ? 'Wszystkie typy' : (LOG_TYPE_STYLE[t]?.label || t);
+    return `<option value="${escHtml(t)}" ${t === logFilterType ? 'selected' : ''}>${escHtml(label)}</option>`;
+  }).join('');
 
   // Filter
   let filtered = logFilterType === 'all' ? _logsCache : _logsCache.filter(l => l.type === logFilterType);
@@ -1371,13 +1380,14 @@ const SETTING_LABELS = {
   sms_count:              'SMS wysłanych',
   sms_price:              'Cena za SMS (PLN)',
   system_prompt_default:  'Prompt systemowy (własny)',
-  zadarma_caller_id:      'Caller ID Zadarma',
 };
+// Keys hidden from Settings UI (managed elsewhere)
+const SETTING_HIDDEN = new Set(['zadarma_caller_id']);
 
 async function renderSettings() {
   const { data: rows } = await sb.from('settings').select('key,value').order('key');
 
-  const rowsHtml = (rows || []).map(r => {
+  const rowsHtml = (rows || []).filter(r => !SETTING_HIDDEN.has(r.key)).map(r => {
     const label = SETTING_LABELS[r.key] || r.key;
     return `
       <tr>
