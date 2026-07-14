@@ -265,7 +265,8 @@ Deno.serve(async (req: Request) => {
   let summary = conv.summary ?? null;
 
   // Zamknięcie rozmowy słowem kluczowym
-  const CLOSE_KEYWORDS = ["koniec", "stop", "zamknij", "end"];
+  const kwSettings = await sbGet(SB, KEY, `settings?key=eq.close_keywords&select=value`) as Array<{ value: string }>;
+  const CLOSE_KEYWORDS = (kwSettings[0]?.value ?? "koniec,stop,zamknij,end").split(",").map(k => k.trim().toLowerCase()).filter(Boolean);
   if (CLOSE_KEYWORDS.includes(effectiveContent.trim().toLowerCase())) {
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { status: "closed" });
     log("conv_closed", { convId, convCode: convCodeFinal, userId, trigger: effectiveContent.trim() });
