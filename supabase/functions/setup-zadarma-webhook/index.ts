@@ -44,7 +44,7 @@ Deno.serve(async (req: Request) => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const webhookUrl = `${supabaseUrl}/functions/v1/zadarma-sms-webhook`;
 
-  const urlResult = await zadarmaPut("/v1/pbx/webhooks/url/", { url: webhookUrl });
+  const urlResult = await zadarmaPost("/v1/pbx/webhooks/url/", { url: webhookUrl });
   const hooksResult = await zadarmaPost("/v1/pbx/webhooks/hooks/", { sms: "true" });
 
   return new Response(JSON.stringify({ webhookUrl, urlResult, hooksResult }), {
