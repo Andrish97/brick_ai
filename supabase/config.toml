@@ -35,3 +35,6 @@ enable_signup = true
 enabled = true
 policy = "oneshot"
 inspector_port = 8083
+
+[functions.zadarma-balance]
+verify_jwt = false

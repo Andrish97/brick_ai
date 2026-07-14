@@ -592,11 +592,7 @@ async function renderDashboard() {
       </div>
       <div class="card">
         <h3>SMS wysłanych</h3>
-        <div class="big-num" id="sms-count-display">${smsCount}</div>
-        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-          <input type="number" id="sms-count-input" value="${smsCount}" style="width:90px;padding:5px 8px;font-size:13px" />
-          <button class="btn btn-primary btn-sm" onclick="saveSmsCount()">Zapisz</button>
-        </div>
+        <div class="big-num">${smsCount}</div>
       </div>
       <div class="card">
         <h3>Koszt (SMS × ${smsPrice.toFixed(2)} PLN)</h3>
@@ -1371,16 +1367,26 @@ async function saveCustomPrompt() {
 // ══════════════════════════════════════════════════════
 //  PAGE: USTAWIENIA
 // ══════════════════════════════════════════════════════
+const SETTING_LABELS = {
+  sms_count:              'SMS wysłanych',
+  sms_price:              'Cena za SMS (PLN)',
+  system_prompt_default:  'Prompt systemowy (własny)',
+  zadarma_caller_id:      'Caller ID Zadarma',
+};
+
 async function renderSettings() {
   const { data: rows } = await sb.from('settings').select('key,value').order('key');
 
-  const rowsHtml = (rows || []).map(r => `
-    <tr>
-      <td><code>${escHtml(r.key)}</code></td>
-      <td><input type="text" value="${escHtml(r.value)}" id="setting-${escHtml(r.key)}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px" /></td>
-      <td><button class="btn btn-primary btn-sm" onclick="saveSetting('${escHtml(r.key)}')">Zapisz</button></td>
-    </tr>
-  `).join('');
+  const rowsHtml = (rows || []).map(r => {
+    const label = SETTING_LABELS[r.key] || r.key;
+    return `
+      <tr>
+        <td style="white-space:nowrap">${escHtml(label)}<br><code style="font-size:10px;color:var(--muted)">${escHtml(r.key)}</code></td>
+        <td><input type="text" value="${escHtml(r.value)}" id="setting-${escHtml(r.key)}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px" /></td>
+        <td><button class="btn btn-primary btn-sm" onclick="saveSetting('${escHtml(r.key)}')">Zapisz</button></td>
+      </tr>
+    `;
+  }).join('');
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -1389,18 +1395,9 @@ async function renderSettings() {
     </div>
     <div class="section-card">
       <table>
-        <thead><tr><th>Klucz</th><th>Wartość</th><th></th></tr></thead>
-        <tbody>${rowsHtml}</tbody>
+        <thead><tr><th>Ustawienie</th><th>Wartość</th><th></th></tr></thead>
+        <tbody>${rowsHtml || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak ustawień</td></tr>'}</tbody>
       </table>
-    </div>
-    <div class="section-card" style="margin-top:16px">
-      <h3 style="margin-bottom:12px">Dodaj ustawienie</h3>
-      <label>Klucz</label>
-      <input type="text" id="new-setting-key" placeholder="np. system_prompt_default" />
-      <label>Wartość</label>
-      <input type="text" id="new-setting-value" placeholder="wartość" />
-      <button class="btn btn-primary" style="margin-top:12px" onclick="addSetting()">Dodaj</button>
-      <div class="response-box" id="settings-response"></div>
     </div>
   `;
 }
@@ -1409,15 +1406,6 @@ async function saveSetting(key) {
   const value = document.getElementById(`setting-${key}`).value.trim();
   const { error } = await sb.from('settings').update({ value, updated_at: new Date().toISOString() }).eq('key', key);
   if (error) alert('Błąd: ' + error.message);
-  else renderSettings();
-}
-
-async function addSetting() {
-  const key   = document.getElementById('new-setting-key').value.trim();
-  const value = document.getElementById('new-setting-value').value.trim();
-  if (!key || !value) { showResponse('settings-response', false, 'Oba pola są wymagane.'); return; }
-  const { error } = await sb.from('settings').upsert({ key, value });
-  if (error) showResponse('settings-response', false, error.message);
   else renderSettings();
 }
 </script>
