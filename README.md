@@ -101,16 +101,46 @@ git push origin main
 1. **Authentication → Users → Add user** — wpisz email i hasło bezpośrednio (bez wysyłania linku)
 2. **Authentication → Providers → Email → wyłącz "Enable sign ups"** → Save — blokuje rejestrację nowych kont
 
-### 7. Zadarma webhook
+### 7. Zadarma — rejestracja i konfiguracja webhooka
 
-Zadarma **nie udostępnia opcji ustawienia webhooka SMS w panelu** (są tylko opcje: aplikacja, email, messenger). Nie można tego też zrobić przez API bez aktywnej Wirtualnej Centrali. Jedyna droga to **kontakt z supportem**.
+#### a) Rejestracja i weryfikacja
 
-1. Zaloguj się do Zadarma → otwórz czat z supportem (ikona czatu w panelu)
-2. Wyślij wiadomość:
+1. Zarejestruj się na [zadarma.com](https://zadarma.com)
+2. Zweryfikuj tożsamość — wymagane dla numerów polskich (dokument tożsamości przez panel)
+3. Doładuj konto (zakup numeru wymaga środków)
 
-> Chcę ustawić webhook HTTP dla przychodzących SMS na numer +48XXXXXXXXX. URL: `https://<REF>.supabase.co/functions/v1/zadarma-sms-webhook`
+#### b) Zakup wirtualnego numeru
 
-Support konfiguruje to po swojej stronie — zazwyczaj w kilka minut.
+1. Panel → **Numery** → **Kup numer** → wybierz Polska (+48)
+2. Upewnij się, że numer ma włączony **odbiór SMS** (opcja przy zakupie lub w ustawieniach numeru)
+
+#### c) Konfiguracja webhooka przez API
+
+Webhook ustawia się przez API Zadarma (sekcja [Informacja o połączeniach](https://zadarma.com/pl/support/api/#intro)).
+
+**Krok 1 — ustaw URL webhooka:**
+```bash
+curl -X PUT https://api.zadarma.com/v1/pbx/webhooks/url/ \
+  -H "Authorization: <KEY>:<SIGNATURE>" \
+  -d "url=https://<REF>.supabase.co/functions/v1/zadarma-sms-webhook"
+```
+
+**Krok 2 — włącz powiadomienia SMS:**
+```bash
+curl -X POST https://api.zadarma.com/v1/pbx/webhooks/hooks/ \
+  -H "Authorization: <KEY>:<SIGNATURE>" \
+  -d "sms=true"
+```
+
+**Sprawdź konfigurację:**
+```bash
+curl https://api.zadarma.com/v1/pbx/webhooks/ \
+  -H "Authorization: <KEY>:<SIGNATURE>"
+```
+
+Zamiast ręcznego budowania nagłówka `Authorization`, możesz użyć skryptu `scripts/test-zadarma.ts` (Deno) — zmień metodę i path odpowiednio.
+
+> Webhook musi odpowiadać na GET z `?zd_echo=...` zwracając tę samą wartość — Edge Function już to obsługuje.
 
 ### 8. Dodaj pierwszego użytkownika SMS
 
