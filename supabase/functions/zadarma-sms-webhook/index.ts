@@ -118,13 +118,15 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
         }),
       }
     );
+    const resText = await res.text();
     if (!res.ok) {
-      console.error("Gemini error:", res.status, await res.text());
+      console.error("Gemini error:", res.status, resText);
       return null;
     }
-    const data = await res.json();
+    const data = JSON.parse(resText);
+    console.log("Gemini raw:", JSON.stringify(data).slice(0, 500));
     const parts = data.candidates?.[0]?.content?.parts ?? [];
-    const text = parts.map((p: { text?: string }) => p.text ?? "").join("").trim();
+    const text = parts.filter((p: { thought?: boolean }) => !p.thought).map((p: { text?: string }) => p.text ?? "").join("").trim();
     return text || null;
   } catch (e) {
     console.error("Gemini exception:", e);
