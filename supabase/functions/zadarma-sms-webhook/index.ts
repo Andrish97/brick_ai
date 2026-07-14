@@ -270,9 +270,6 @@ Deno.serve(async (req: Request) => {
   if (CLOSE_KEYWORDS.includes(effectiveContent.trim().toLowerCase())) {
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { status: "closed" });
     log("conv_closed", { convId, convCode: convCodeFinal, userId, trigger: effectiveContent.trim() });
-    if (!dryRun) {
-      await sendSms(senderPhone, "Rozmowa zakończona.", recipientDid).catch(() => {});
-    }
     return new Response(JSON.stringify({ ok: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
