@@ -41,6 +41,10 @@ jobs:
             --project-ref "$SUPABASE_PROJECT_REF" \
             --no-verify-jwt
 
+          supabase functions deploy zadarma-balance \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --no-verify-jwt
+
       - name: Setup Zadarma webhook
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
