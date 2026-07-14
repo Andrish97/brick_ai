@@ -111,8 +111,11 @@ git push origin main
 
 #### b) Zakup wirtualnego numeru
 
-1. Panel → **Numery** → **Kup numer** → wybierz Polska (+48)
-2. Upewnij się, że numer ma włączony **odbiór SMS** (opcja przy zakupie lub w ustawieniach numeru)
+Zadarma zaproponuje podłączenie numeru już przy pierwszym logowaniu. Można to zrobić ręcznie: **Ustawienia → Numery wirtualne → Podłącz numer** → wybierz kraj i numer.
+
+Upewnij się, że numer ma włączony **odbiór SMS** (opcja przy zakupie lub w ustawieniach numeru).
+
+Instrukcja wideo (PL): [Jak dodać wirtualny numer w Zadarma](https://www.youtube.com/watch?v=lO4mKxmOVuU&list=PLPGEmuoHtxlJzl80Y3zy0VcXSAtDcM_2p&index=4)
 
 #### c) Konfiguracja webhooka przez API
 
