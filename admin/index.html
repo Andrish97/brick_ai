@@ -314,13 +314,6 @@
     .ui-select.is-disabled .ui-select-btn { opacity: 0.5; cursor: not-allowed; }
 
     /* ── CHART GRID ── */
-    .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 28px; }
-    @media (max-width: 700px) { .dash-grid { grid-template-columns: 1fr; } }
-    .dash-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
-    .dash-card h3 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
-    .dash-row { display: flex; align-items: baseline; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-    .dash-row:last-child { border-bottom: none; }
-    .dash-time { font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
 
     /* ── ADD ROW ── */
     .btn-add-row {
@@ -928,16 +921,6 @@ async function renderDashboard() {
       <div class="card">
         <h3>Stan konta Zadarma <button class="btn btn-ghost btn-sm" style="margin-left:6px;padding:2px 8px;font-size:11px" onclick="loadZadarmaBalance()">↺</button></h3>
         <div id="zadarma-balance-val" class="big-num"><span class="spinner"></span></div>
-      </div>
-    </div>
-    <div class="dash-grid">
-      <div class="dash-card">
-        <h3>Ostatnia aktywność</h3>
-        ${logRows}
-      </div>
-      <div class="dash-card">
-        <h3>Aktywne rozmowy</h3>
-        ${convRows}
       </div>
     </div>
   `;
