@@ -310,7 +310,7 @@ Deno.serve(async (req: Request) => {
   if (needsCompaction) {
     try {
       const json = JSON.parse(rawReply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-      summary = (json.summary ?? "").slice(0, 300);
+      summary = json.summary ?? "";
       aiReply = smartTrim(stripUrls(json.reply ?? rawReply), MAX_REPLY_CHARS);
       // Usuń stare wiadomości i zapisz summary PRZED zapisem nowych
       await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
