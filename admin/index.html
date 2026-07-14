@@ -178,7 +178,7 @@
     /* ── BADGE ── */
     .badge {
       display: inline-block; padding: 2px 8px; border-radius: 99px;
-      font-size: 11px; font-weight: 500;
+      font-size: 11px; font-weight: 500; white-space: nowrap;
     }
     .badge-green  { background: rgba(34,197,94,.15);  color: var(--success); }
     .badge-yellow { background: rgba(245,158,11,.15); color: var(--warning); }
@@ -1545,21 +1545,27 @@ async function sendAdminSms() {
 //  PAGE: LOGI
 // ══════════════════════════════════════════════════════
 const LOG_TYPE_STYLE = {
-  sms_in:       { label: 'SMS przych.', cls: 'badge-green' },
-  ai_response:  { label: 'AI odp.',     cls: 'badge-yellow' },
-  sms_sent:     { label: 'SMS wysł.',   cls: 'badge-green' },
-  sms_error:    { label: 'SMS błąd',    cls: 'badge-red' },
-  error:        { label: 'Błąd',        cls: 'badge-red' },
-  webhook:      { label: 'Webhook',     cls: 'badge-yellow' },
-  sms_debug:    { label: 'SMS debug',   cls: 'badge-yellow' },
-  gemini_error: { label: 'Gemini błąd', cls: 'badge-red' },
-  gemini_raw:   { label: 'Gemini raw',  cls: 'badge-yellow' },
+  sms_in:       { label: 'SMS przych.',  cls: 'badge-green' },
+  ai_response:  { label: 'AI odp.',      cls: 'badge-yellow' },
+  sms_sent:     { label: 'SMS wysł.',    cls: 'badge-green' },
+  sms_error:    { label: 'SMS błąd',     cls: 'badge-red' },
+  error:        { label: 'Błąd',         cls: 'badge-red' },
+  webhook:      { label: 'Webhook',      cls: 'badge-yellow' },
+  sms_debug:    { label: 'SMS debug',    cls: 'badge-yellow' },
+  gemini_error: { label: 'Gemini błąd',  cls: 'badge-red' },
+  gemini_raw:   { label: 'Gemini raw',   cls: 'badge-yellow' },
+  raw_webhook:  { label: 'Raw webhook',  cls: 'badge-yellow' },
+  conv_new:     { label: 'Nowa rozm.',   cls: 'badge-green' },
+  conv_closed:  { label: 'Rozm. zamkn.', cls: 'badge-yellow' },
+  user_created: { label: 'Nowy user',    cls: 'badge-green' },
+  balance:      { label: 'Saldo',        cls: 'badge-green' },
+  compaction:   { label: 'Kompakt.',     cls: 'badge-yellow' },
 };
 
 async function renderLogs() {
   const [{ data: logs }, { data: webhooks }] = await Promise.all([
     sb.from('logs').select('*').order('created_at', { ascending: false }).limit(200),
-    sb.from('webhook_logs').select('*').order('created_at', { ascending: false }).limit(50),
+    sb.from('webhook_logs').select('*').order('created_at', { ascending: false }).limit(100),
   ]);
 
   _logsCache = logs || [];
@@ -1569,11 +1575,24 @@ async function renderLogs() {
 }
 
 function renderLogsContent() {
-  // Build distinct types
-  const types = ['all', ...new Set(_logsCache.map(l => l.type))];
+  // Merge logs + webhook_logs into one unified list
+  const webhookEntries = _webhooksCache.map(w => ({
+    id: w.id,
+    created_at: w.created_at,
+    type: 'raw_webhook',
+    data: w.raw_payload || {},
+    _source: 'webhook',
+  }));
+  const combined = [
+    ..._logsCache.map(l => ({ ...l, _source: 'log' })),
+    ...webhookEntries,
+  ];
+
+  // Build distinct types from combined
+  const types = ['all', ...new Set(combined.map(l => l.type))];
 
   // Filter
-  let filtered = logFilterType === 'all' ? _logsCache : _logsCache.filter(l => l.type === logFilterType);
+  let filtered = logFilterType === 'all' ? combined : combined.filter(l => l.type === logFilterType);
 
   // Sort
   filtered = [...filtered].sort((a, b) => {
@@ -1596,31 +1615,14 @@ function renderLogsContent() {
     return logSortDir === 'asc' ? ' ↑' : ' ↓';
   }
 
-  const logRows = filtered.map(l => {
+  const rows = filtered.map(l => {
     const style = LOG_TYPE_STYLE[l.type] || { label: l.type, cls: 'badge-yellow' };
     const preview = JSON.stringify(l.data || {}).slice(0, 120);
     const jsonStr = escHtml(JSON.stringify(l.data || {}));
     return `
       <tr>
         <td style="white-space:nowrap">${fmtDate(l.created_at)}</td>
-        <td><span class="badge ${style.cls}">${escHtml(style.label)}</span></td>
-        <td>
-          <span style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
-            data-json='${jsonStr}'
-            onclick="showJsonFromRow(this)"
-          >${escHtml(preview)}${preview.length >= 120 ? '…' : ''}</span>
-        </td>
-      </tr>
-    `;
-  }).join('');
-
-  const webhookRows = _webhooksCache.map(l => {
-    const preview = JSON.stringify(l.raw_payload || {}).slice(0, 120);
-    const jsonStr = escHtml(JSON.stringify(l.raw_payload || {}));
-    return `
-      <tr>
-        <td style="white-space:nowrap">${fmtDate(l.created_at)}</td>
-        <td><span class="badge badge-yellow">Raw webhook</span></td>
+        <td style="white-space:nowrap"><span class="badge ${style.cls}">${escHtml(style.label)}</span></td>
         <td>
           <span style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
             data-json='${jsonStr}'
@@ -1634,15 +1636,18 @@ function renderLogsContent() {
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Logi</h1>
-      <p>Ostatnie 200 zdarzeń + 50 raw webhooków — kliknij wiersz, aby zobaczyć szczegóły</p>
+      <p>Ostatnie 200 zdarzeń systemowych + 100 raw webhooków — kliknij wiersz, aby zobaczyć szczegóły</p>
     </div>
     <div class="section-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
         <div style="display:flex;align-items:center;gap:8px">
-          <h2 style="font-size:14px;margin:0">Zdarzenia systemowe</h2>
+          <h2 style="font-size:14px;margin:0">Wszystkie zdarzenia</h2>
           <div style="width:200px">${uiSelectHtml('log-filter', types.map(t => ({ value: t, label: t === 'all' ? 'Wszystkie typy' : (LOG_TYPE_STYLE[t]?.label || t) })), { value: logFilterType })}</div>
         </div>
-        <button class="btn btn-danger btn-sm" onclick="clearLogs()">🗑 Wyczyść logi</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-danger btn-sm" onclick="clearLogs()">🗑 Wyczyść logi</button>
+          <button class="btn btn-danger btn-sm" onclick="clearWebhookLogs()">🗑 Wyczyść webhooki</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
@@ -1653,26 +1658,13 @@ function renderLogsContent() {
               <th>Dane</th>
             </tr>
           </thead>
-          <tbody>${logRows || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak logów</td></tr>'}</tbody>
-        </table>
-      </div>
-    </div>
-    <div class="section-card" style="margin-top:16px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <h2 style="font-size:14px;margin:0">Raw webhooki (Zadarma)</h2>
-        <button class="btn btn-danger btn-sm" onclick="clearWebhookLogs()">🗑 Wyczyść webhooki</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Czas</th><th>Typ</th><th>Payload</th></tr></thead>
-          <tbody>${webhookRows || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak webhooków</td></tr>'}</tbody>
+          <tbody>${rows || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak logów</td></tr>'}</tbody>
         </table>
       </div>
     </div>
   `;
 
   initAllUiSelects();
-  // Wire log filter
   const logFilterSel = _uiSelects['log-filter'];
   if (logFilterSel) {
     const menu = document.querySelector('[data-select-id="log-filter"] .ui-select-menu');
