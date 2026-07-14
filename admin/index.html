@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Brick AI — Admin Panel</title>
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -750,7 +752,7 @@ function renderWebhookTest() {
       <label>Od numeru (sms_from)</label>
       <input type="tel" id="wh-from" placeholder="+48123456789" />
       <label>Do numeru (sms_to / called_did)</label>
-      <input type="tel" id="wh-to" placeholder="+48987654321" />
+      <input type="tel" id="wh-to" value="48459569689" />
       <label>Kod użytkownika (pierwsza linia SMS)</label>
       <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
       <label>Kod rozmowy (opcjonalny)</label>
