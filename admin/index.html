@@ -1183,7 +1183,7 @@ async function renderConversations() {
       </td>
       <td onclick="event.stopPropagation()" style="text-align:right;display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
         ${c.status === 'active'
-          ? `<button class="btn btn-ghost btn-sm" onclick="closeConv('${c.id}')">Zamknij</button>`
+          ? `<button class="btn btn-ghost btn-icon" onclick="closeConv('${c.id}')" title="Zamknij" style="width:auto;padding:0 8px">Zamknij</button>`
           : ''
         }
         <button class="btn btn-danger btn-icon" onclick="deleteConv('${c.id}')" title="Usuń rozmowę">×</button>
@@ -1209,7 +1209,7 @@ async function renderConversations() {
               <th>Użytkownik</th>
               <th>Ostatnia aktywność</th>
               <th>Status</th>
-              <th>Akcja</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted);text-align:center">Brak rozmów</td></tr>'}</tbody>
