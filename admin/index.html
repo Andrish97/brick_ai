@@ -759,9 +759,9 @@ async function renderWebhookTest() {
       <p>Symuluje przychodzący SMS od Zadarmy</p>
     </div>
     <div class="section-card">
-      <label>Od numeru (sms_from)</label>
-      <input type="tel" id="wh-from" placeholder="48573311779" />
-      <label>Do numeru (sms_to / called_did)</label>
+      <label>Numer nadawcy — kto wysłał SMS i dostanie odpowiedź</label>
+      <input type="tel" id="wh-from" placeholder="np. 48573311779" />
+      <label>Twój numer Zadarmy — z którego zostanie wysłana odpowiedź</label>
       <input type="tel" id="wh-to" value="${callerId}" />
       <label>Kod użytkownika (pierwsza linia SMS)</label>
       <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
