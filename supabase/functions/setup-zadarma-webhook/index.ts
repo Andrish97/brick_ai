@@ -38,10 +38,20 @@ Deno.serve(async (req: Request) => {
   const webhookUrl = `${supabaseUrl}/functions/v1/zadarma-sms-webhook`;
 
   const getResult = await zadarmaReq("GET", "/v1/pbx/webhooks/", {});
-  const urlResult = await zadarmaReq("POST", "/v1/pbx/webhooks/url/", { url: webhookUrl });
-  const hooksResult = await zadarmaReq("POST", "/v1/pbx/webhooks/hooks/", { sms: "true" });
+  const current = getResult.body as { url?: string; hooks?: { sms?: string } };
 
-  return new Response(JSON.stringify({ webhookUrl, getResult, urlResult, hooksResult }, null, 2), {
+  const urlAlreadySet = current?.url === webhookUrl;
+  const smsAlreadyEnabled = current?.hooks?.sms === "true";
+
+  const urlResult = urlAlreadySet
+    ? { status: 200, body: { status: "skipped", message: "URL already set" } }
+    : await zadarmaReq("POST", "/v1/pbx/webhooks/url/", { url: webhookUrl });
+
+  const hooksResult = smsAlreadyEnabled
+    ? { status: 200, body: { status: "skipped", message: "SMS hooks already enabled" } }
+    : await zadarmaReq("POST", "/v1/pbx/webhooks/hooks/", { sms: "true" });
+
+  return new Response(JSON.stringify({ webhookUrl, urlResult, hooksResult }, null, 2), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
