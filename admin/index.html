@@ -1545,21 +1545,15 @@ async function sendAdminSms() {
 //  PAGE: LOGI
 // ══════════════════════════════════════════════════════
 const LOG_TYPE_STYLE = {
-  sms_in:       { label: 'SMS przych.',  cls: 'badge-green' },
-  ai_response:  { label: 'AI odp.',      cls: 'badge-yellow' },
-  sms_sent:     { label: 'SMS wysł.',    cls: 'badge-green' },
-  sms_error:    { label: 'SMS błąd',     cls: 'badge-red' },
-  error:        { label: 'Błąd',         cls: 'badge-red' },
-  webhook:      { label: 'Webhook',      cls: 'badge-yellow' },
+  sms_in:       { label: 'SMS przych.',  cls: 'badge-green'  },
+  sms_sent:     { label: 'SMS wysł.',    cls: 'badge-green'  },
+  sms_error:    { label: 'SMS błąd',     cls: 'badge-red'    },
   sms_debug:    { label: 'SMS debug',    cls: 'badge-yellow' },
-  gemini_error: { label: 'Gemini błąd',  cls: 'badge-red' },
+  ai_response:  { label: 'AI odp.',      cls: 'badge-yellow' },
   gemini_raw:   { label: 'Gemini raw',   cls: 'badge-yellow' },
+  gemini_error: { label: 'Gemini błąd',  cls: 'badge-red'    },
+  error:        { label: 'Błąd',         cls: 'badge-red'    },
   raw_webhook:  { label: 'Raw webhook',  cls: 'badge-yellow' },
-  conv_new:     { label: 'Nowa rozm.',   cls: 'badge-green' },
-  conv_closed:  { label: 'Rozm. zamkn.', cls: 'badge-yellow' },
-  user_created: { label: 'Nowy user',    cls: 'badge-green' },
-  balance:      { label: 'Saldo',        cls: 'badge-green' },
-  compaction:   { label: 'Kompakt.',     cls: 'badge-yellow' },
 };
 
 async function renderLogs() {
@@ -1663,21 +1657,15 @@ function renderLogsContent() {
         <div style="display:flex;flex-wrap:wrap;gap:8px 20px">
           ${Object.entries(LOG_TYPE_STYLE).map(([key, s]) => {
             const desc = {
-              sms_in:       'przychodzący SMS od użytkownika',
-              sms_sent:     'SMS wysłany przez system do użytkownika',
-              sms_error:    'błąd podczas wysyłki SMS',
-              sms_debug:    'diagnostyka wywołania API SMS',
-              ai_response:  'odpowiedź wygenerowana przez AI',
-              gemini_raw:   'surowa odpowiedź modelu Gemini',
-              gemini_error: 'błąd wywołania API Gemini',
-              error:        'ogólny błąd systemowy',
-              webhook:      'zdarzenie przychodzące z Zadarmy',
-              raw_webhook:  'surowy payload webhooka przed przetworzeniem',
-              conv_new:     'utworzenie nowej rozmowy',
-              conv_closed:  'zamknięcie rozmowy',
-              user_created: 'rejestracja nowego użytkownika',
-              balance:      'odpytanie salda konta Zadarma',
-              compaction:   'kompaktowanie historii rozmowy (>20 wiad.)',
+              sms_in:       'przychodzący SMS — nadawca, kod użytkownika, treść',
+              sms_sent:     'SMS wysłany — odbiorca, nadawca, długość',
+              sms_error:    'błąd wysyłki SMS przez API Zadarma',
+              sms_debug:    'diagnostyka przed wysyłką — klucze API, długość wiadomości',
+              ai_response:  'odpowiedź AI — treść, id rozmowy, liczba znaków',
+              gemini_raw:   'surowa odpowiedź Gemini — model, finishReason, podgląd',
+              gemini_error: 'błąd API Gemini — kod HTTP lub wyjątek',
+              error:        'błąd logiczny — np. nieznany kod użytkownika',
+              raw_webhook:  'surowy payload z Zadarmy przed jakimkolwiek przetworzeniem',
             }[key] || '';
             return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
               <span class="badge ${s.cls}">${escHtml(s.label)}</span>
