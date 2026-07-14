@@ -1011,10 +1011,10 @@ async function renderUsers() {
   const rows = (users || []).map(u => {
     const promptText = u.system_prompt ? (u.system_prompt.length > 40 ? escHtml(u.system_prompt.slice(0, 40)) + '…' : escHtml(u.system_prompt)) : '<span style="color:var(--muted)">—</span>';
     return `
-    <tr>
+    <tr class="tr-clickable" onclick="openUserModal('${u.id}')">
       <td><code>${escHtml(u.code)}</code></td>
       <td>${escHtml(u.phone_number || '—')}</td>
-      <td>
+      <td onclick="event.stopPropagation()">
         <label class="toggle">
           <input type="checkbox" ${u.active ? 'checked' : ''} onchange="toggleUserActive('${u.id}', this.checked)" />
           <span class="toggle-slider"></span>
@@ -1022,8 +1022,7 @@ async function renderUsers() {
       </td>
       <td>${phoneLabel(u.phone_number_id)}</td>
       <td>${promptText}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-ghost btn-sm" onclick="openUserModal('${u.id}')">Edytuj</button>
+      <td onclick="event.stopPropagation()">
         <button class="btn btn-icon btn-danger" onclick="deleteUser('${u.id}')" title="Usuń">×</button>
       </td>
     </tr>
@@ -1042,8 +1041,8 @@ async function renderUsers() {
               <th>Kod</th>
               <th>Telefon</th>
               <th>Aktywny</th>
-              <th>Numer wysyłkowy</th>
-              <th>System Prompt</th>
+              <th>Numer</th>
+              <th>Prompt</th>
               <th></th>
             </tr>
           </thead>
