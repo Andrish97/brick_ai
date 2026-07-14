@@ -244,6 +244,83 @@
     .prompt-mode-btn:hover:not(.active) { background: rgba(255,255,255,.04); color: var(--text); }
     select { cursor: pointer; }
     select:focus { border-color: var(--accent); }
+
+    /* ── CUSTOM MODAL ── */
+    .uni-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.75);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000;
+      animation: fadeIn .15s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .uni-modal {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 0;
+      width: 420px;
+      max-width: 95vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,.5);
+      animation: slideUp .15s ease;
+    }
+    @keyframes slideUp { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .uni-head {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 20px 24px 0;
+    }
+    .uni-title { font-size: 16px; font-weight: 600; }
+    .uni-close {
+      background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 18px; line-height: 1; padding: 4px;
+      border-radius: 4px; transition: color .15s;
+    }
+    .uni-close:hover { color: var(--text); }
+    .uni-body { padding: 12px 24px 20px; color: var(--muted); font-size: 14px; line-height: 1.5; white-space: pre-line; }
+    .uni-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 0 24px 20px; }
+
+    /* ── CUSTOM SELECT ── */
+    .ui-select { position: relative; display: block; }
+    .ui-select-btn {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 8px 32px 8px 12px;
+      font-size: 14px;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .15s;
+      position: relative;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .ui-select-btn:hover, .ui-select.open .ui-select-btn { border-color: var(--accent); }
+    .ui-select-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ui-select-arrow { color: var(--muted); font-size: 11px; margin-left: 8px; flex-shrink: 0; transition: transform .15s; }
+    .ui-select.open .ui-select-arrow { transform: rotate(180deg); }
+    .ui-select-menu {
+      display: none;
+      position: fixed;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.4);
+      overflow-y: auto;
+      max-height: 260px;
+      z-index: 1500;
+    }
+    .ui-select.open .ui-select-menu { display: block; }
+    .ui-select-item {
+      width: 100%; text-align: left; background: none; border: none;
+      padding: 9px 14px; font-size: 13px; color: var(--text);
+      cursor: pointer; display: block; transition: background .1s;
+    }
+    .ui-select-item:hover { background: rgba(124,58,237,.15); }
+    .ui-select-item[aria-selected="true"] { color: var(--accent2); font-weight: 500; }
+    .ui-select-item:first-child { border-radius: 8px 8px 0 0; }
+    .ui-select-item:last-child { border-radius: 0 0 8px 8px; }
+    .ui-select.is-disabled .ui-select-btn { opacity: 0.5; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -491,6 +568,181 @@ function showResponse(boxId, ok, text) {
 }
 
 // ══════════════════════════════════════════════════════
+//  CUSTOM MODALS
+// ══════════════════════════════════════════════════════
+function openUniModal({ title, text, okText = 'OK', cancelText = 'Anuluj', showCancel = true } = {}) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'uni-overlay';
+    overlay.innerHTML = `
+      <div class="uni-modal" role="dialog" aria-modal="true">
+        <div class="uni-head">
+          <div class="uni-title">${escHtml(title || (showCancel ? 'Potwierdź' : 'Informacja'))}</div>
+          <button class="uni-close" type="button" aria-label="Zamknij">✕</button>
+        </div>
+        <div class="uni-body">${escHtml(text || '')}</div>
+        <div class="uni-foot">
+          ${showCancel ? `<button class="btn btn-ghost" type="button" data-action="cancel">${escHtml(cancelText)}</button>` : ''}
+          <button class="btn btn-primary" type="button" data-action="ok">${escHtml(okText)}</button>
+        </div>
+      </div>
+    `;
+    let done = false;
+    const finish = val => {
+      if (done) return; done = true;
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(val);
+    };
+    const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+    overlay.addEventListener('click', e => { if (e.target === overlay) finish(false); });
+    overlay.querySelector('[data-action="ok"]').addEventListener('click', () => finish(true));
+    overlay.querySelector('[data-action="cancel"]')?.addEventListener('click', () => finish(false));
+    overlay.querySelector('.uni-close').addEventListener('click', () => finish(false));
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+    setTimeout(() => overlay.querySelector('[data-action="ok"]')?.focus(), 0);
+  });
+}
+
+function confirmModal(text, title) {
+  return openUniModal({ title, text, okText: 'Tak', cancelText: 'Nie', showCancel: true });
+}
+
+function alertModal(text, title) {
+  return openUniModal({ title, text, okText: 'OK', showCancel: false });
+}
+
+// ══════════════════════════════════════════════════════
+//  CUSTOM SELECTS
+// ══════════════════════════════════════════════════════
+const _uiSelects = {};
+
+function uiSelectHtml(id, options, { value = '', placeholder = '— wybierz —' } = {}) {
+  const optsData = escHtml(JSON.stringify(options));
+  return `<div class="ui-select" data-select-id="${id}" data-value="${escHtml(String(value))}" data-placeholder="${escHtml(placeholder)}" data-options='${optsData}'></div>`;
+}
+
+function initAllUiSelects() {
+  document.querySelectorAll('.ui-select[data-select-id]').forEach(el => {
+    const id = el.dataset.selectId;
+    if (_uiSelects[id]) { try { _uiSelects[id].destroy(); } catch {} }
+    const options = JSON.parse(el.dataset.options || '[]');
+    const value = el.dataset.value || '';
+    const placeholder = el.dataset.placeholder || '— wybierz —';
+    _uiSelects[id] = _buildUiSelect(el, options, value, placeholder);
+  });
+}
+
+function _buildUiSelect(container, options, initialValue, placeholder) {
+  let currentValue = '';
+  let destroyed = false;
+  let currentOptions = [];
+
+  container.innerHTML = `
+    <button type="button" class="ui-select-btn">
+      <span class="ui-select-label"></span>
+      <span class="ui-select-arrow">▾</span>
+    </button>
+    <div class="ui-select-menu" role="listbox"></div>
+  `;
+  const btn = container.querySelector('.ui-select-btn');
+  const label = container.querySelector('.ui-select-label');
+  const menu = container.querySelector('.ui-select-menu');
+
+  const close = () => {
+    if (destroyed) return;
+    container.classList.remove('open');
+    btn.setAttribute('aria-expanded', 'false');
+    menu.style.cssText = '';
+  };
+  const positionMenu = () => {
+    const rect = btn.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom - 6;
+    const spaceAbove = rect.top - 6;
+    menu.style.position = 'fixed';
+    menu.style.left = rect.left + 'px';
+    menu.style.width = rect.width + 'px';
+    menu.style.zIndex = '1500';
+    if (spaceBelow >= Math.min(260, spaceAbove) || spaceBelow >= spaceAbove) {
+      menu.style.top = (rect.bottom + 4) + 'px';
+      menu.style.bottom = 'auto';
+      menu.style.maxHeight = Math.max(spaceBelow, 80) + 'px';
+    } else {
+      menu.style.top = 'auto';
+      menu.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+      menu.style.maxHeight = Math.max(spaceAbove, 80) + 'px';
+    }
+  };
+  const open = () => {
+    if (destroyed) return;
+    container.classList.add('open');
+    btn.setAttribute('aria-expanded', 'true');
+    positionMenu();
+  };
+
+  const setValue = (val, { silent = false } = {}) => {
+    currentValue = String(val ?? '');
+    const match = currentOptions.find(o => o.value === currentValue);
+    label.textContent = match ? match.label : placeholder;
+    label.style.color = match ? '' : 'var(--muted)';
+    menu.querySelectorAll('.ui-select-item').forEach(item => {
+      item.setAttribute('aria-selected', item.dataset.value === currentValue ? 'true' : 'false');
+    });
+  };
+
+  const setOptions = opts => {
+    currentOptions = opts.map(o => ({ value: String(o.value ?? ''), label: String(o.label ?? '') }));
+    menu.innerHTML = '';
+    currentOptions.forEach(opt => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'ui-select-item';
+      item.dataset.value = opt.value;
+      item.textContent = opt.label;
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', 'false');
+      menu.appendChild(item);
+    });
+    if (!currentOptions.some(o => o.value === currentValue)) {
+      currentValue = currentOptions[0]?.value ?? '';
+    }
+    setValue(currentValue, { silent: true });
+  };
+
+  btn.addEventListener('click', e => {
+    e.preventDefault();
+    container.classList.contains('open') ? close() : open();
+  });
+  menu.addEventListener('click', e => {
+    const item = e.target.closest('.ui-select-item');
+    if (!item) return;
+    setValue(item.dataset.value);
+    close();
+  });
+  const docClick = e => { if (destroyed) return; if (!container.contains(e.target)) close(); };
+  const docKey = e => { if (destroyed) return; if (e.key === 'Escape') close(); };
+  document.addEventListener('click', docClick);
+  document.addEventListener('keydown', docKey);
+
+  setOptions(options);
+  setValue(initialValue, { silent: true });
+
+  return {
+    getValue: () => currentValue,
+    setValue,
+    setOptions,
+    destroy: () => {
+      destroyed = true;
+      document.removeEventListener('click', docClick);
+      document.removeEventListener('keydown', docKey);
+    },
+  };
+}
+
+function getUiSelect(id) { return _uiSelects[id]?.getValue() ?? ''; }
+
+// ══════════════════════════════════════════════════════
 //  PHONE NUMBERS HELPER
 // ══════════════════════════════════════════════════════
 async function loadPhoneNumbers() {
@@ -528,14 +780,11 @@ function phoneNumbersSelectHtmlById(selectedId, inputId = 'sms-from') {
 function userPhoneSelectHtml(userId, selectedPhoneNumberId) {
   if (!phoneNumbers.length) return '<span style="color:var(--muted);font-size:12px">—</span>';
   const defaultPn = phoneNumbers[0];
-  const defaultDesc = defaultPn.description ? ` — ${defaultPn.description}` : '';
-  let opts = `<option value="">★ ${escHtml(defaultPn.number)}${escHtml(defaultDesc)} (domyślny)</option>`;
-  for (const pn of phoneNumbers) {
-    const desc = pn.description ? ` — ${pn.description}` : '';
-    const sel = (selectedPhoneNumberId && selectedPhoneNumberId === pn.id) ? ' selected' : '';
-    opts += `<option value="${escHtml(pn.id)}"${sel}>${escHtml(pn.number)}${escHtml(desc)}</option>`;
-  }
-  return `<select onchange="updateUserPhone('${userId}', this.value)" style="font-size:12px">${opts}</select>`;
+  const opts = [
+    { value: '', label: '★ ' + defaultPn.number + (defaultPn.description ? ' — ' + defaultPn.description : '') + ' (domyślny)' },
+    ...phoneNumbers.map(pn => ({ value: pn.id, label: pn.number + (pn.description ? ' — ' + pn.description : '') }))
+  ];
+  return uiSelectHtml('user-phone-' + userId, opts, { value: selectedPhoneNumberId || '' });
 }
 
 async function updateUserPhone(userId, phoneNumberId) {
@@ -682,7 +931,13 @@ async function renderUsers() {
         </div>
       </div>
       <label>Numer wysyłkowy Zadarma (opcjonalny — puste = domyślny)</label>
-      ${phoneNumbersSelectHtmlById(null, 'new-phone-number-id')}
+      ${(() => {
+        const newUserPhoneOpts = phoneNumbers.length ? [
+          { value: '', label: '(domyślny)' },
+          ...phoneNumbers.map(pn => ({ value: pn.number, label: pn.number + (pn.description ? ' — ' + pn.description : '') }))
+        ] : [];
+        return uiSelectHtml('new-user-phone', newUserPhoneOpts, { placeholder: 'Brak numerów — dodaj w Numery' });
+      })()}
       <label>System Prompt (opcjonalny)</label>
       <textarea id="new-prompt" placeholder="Jesteś pomocnym asystentem..."></textarea>
       <div class="err-msg" id="add-user-err"></div>
@@ -709,6 +964,18 @@ async function renderUsers() {
       </div>
     </div>
   `;
+
+  initAllUiSelects();
+
+  // Wire up user phone selects
+  (users || []).forEach(u => {
+    const menu = document.querySelector(`[data-select-id="user-phone-${u.id}"] .ui-select-menu`);
+    if (menu) {
+      menu.addEventListener('click', () => {
+        setTimeout(() => updateUserPhone(u.id, getUiSelect('user-phone-' + u.id)), 0);
+      });
+    }
+  });
 }
 
 async function toggleUserActive(id, active) {
@@ -723,7 +990,7 @@ async function addUser() {
   const code          = document.getElementById('new-code').value.trim();
   const phone         = document.getElementById('new-phone').value.trim();
   const prompt        = document.getElementById('new-prompt').value.trim();
-  const phoneNumberId = document.getElementById('new-phone-number-id')?.value || '';
+  const phoneNumberId = getUiSelect('new-user-phone');
   const err           = document.getElementById('add-user-err');
   err.textContent = '';
 
@@ -752,7 +1019,7 @@ async function addUser() {
 }
 
 async function deleteUser(id) {
-  if (!confirm('Usunąć użytkownika? To usunie też wszystkie jego rozmowy i wiadomości.')) return;
+  if (!await confirmModal('Usunąć użytkownika? To usunie też wszystkie jego rozmowy i wiadomości.')) return;
   await sb.from('users').delete().eq('id', id);
   renderUsers();
 }
@@ -820,14 +1087,14 @@ async function closeConv(id) {
 }
 
 async function deleteConv(id) {
-  if (!confirm('Usunąć rozmowę i wszystkie jej wiadomości?')) return;
+  if (!await confirmModal('Usunąć rozmowę i wszystkie jej wiadomości?')) return;
   await sb.from('messages').delete().eq('conversation_id', id);
   await sb.from('conversations').delete().eq('id', id);
   renderConversations();
 }
 
 async function deleteAllConvs() {
-  if (!confirm('Usunąć WSZYSTKIE rozmowy i wiadomości? Tej operacji nie można cofnąć.')) return;
+  if (!await confirmModal('Usunąć WSZYSTKIE rozmowy i wiadomości? Tej operacji nie można cofnąć.')) return;
   await sb.from('messages').delete().neq('id', '00000000-0000-0000-0000-000000000000');
   await sb.from('conversations').delete().neq('id', '00000000-0000-0000-0000-000000000000');
   renderConversations();
@@ -994,7 +1261,7 @@ async function addPhoneNumber() {
 }
 
 async function deletePhoneNumber(id) {
-  if (!confirm('Usunąć numer? Użytkownicy przypisani do tego numeru zostaną bez przypisania.')) return;
+  if (!await confirmModal('Usunąć numer? Użytkownicy przypisani do tego numeru wrócą do domyślnego.')) return;
   await sb.from('phone_numbers').delete().eq('id', id);
   renderPhoneNumbers();
 }
@@ -1004,12 +1271,8 @@ async function deletePhoneNumber(id) {
 // ══════════════════════════════════════════════════════
 async function renderReceiveTest() {
   await loadPhoneNumbers();
-  const toField = phoneNumbers.length
-    ? `<select id="wh-to">${phoneNumbers.map((pn, i) => {
-        const desc = pn.description ? ` — ${pn.description}` : '';
-        return `<option value="${escHtml(pn.number)}">${i === 0 ? '★ ' : ''}${escHtml(pn.number)}${escHtml(desc)}${i === 0 ? ' (domyślny)' : ''}</option>`;
-      }).join('')}</select>`
-    : `<select id="wh-to"><option value="" disabled selected>Brak numerów — dodaj w sekcji Numery</option></select>`;
+  const toOpts = phoneNumbers.map((pn, i) => ({ value: pn.number, label: (i === 0 ? '★ ' : '') + pn.number + (pn.description ? ' — ' + pn.description : '') + (i === 0 ? ' (domyślny)' : '') }));
+  const toField = uiSelectHtml('wh-to', toOpts, { value: phoneNumbers[0]?.number || '', placeholder: 'Brak numerów — dodaj w Numery' });
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -1038,12 +1301,12 @@ async function renderReceiveTest() {
       <div class="response-box" id="wh-response"></div>
     </div>
   `;
+  initAllUiSelects();
 }
 
 async function sendWebhookTest() {
   const from     = document.getElementById('wh-from').value.trim();
-  const toEl     = document.getElementById('wh-to');
-  const to       = toEl ? (toEl.value || toEl.options?.[0]?.value || '') : '';
+  const to       = getUiSelect('wh-to');
   const userCode = document.getElementById('wh-usercode').value.trim();
   const convCode = document.getElementById('wh-convcode').value.trim();
   const body     = document.getElementById('wh-body').value.trim();
@@ -1080,7 +1343,8 @@ async function sendWebhookTest() {
 // ══════════════════════════════════════════════════════
 async function renderSendSms() {
   await loadPhoneNumbers();
-  const fromField = phoneNumbersSelectHtmlById(null).replace('id="sms-from"', 'id="sms-from"');
+  const fromOpts = phoneNumbers.map((pn, i) => ({ value: pn.number, label: (i === 0 ? '★ ' : '') + pn.number + (pn.description ? ' — ' + pn.description : '') }));
+  const fromField = uiSelectHtml('sms-from', fromOpts, { value: phoneNumbers[0]?.number || '', placeholder: 'Brak numerów — dodaj w Numery' });
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -1098,12 +1362,12 @@ async function renderSendSms() {
       <div class="response-box" id="sms-response"></div>
     </div>
   `;
+  initAllUiSelects();
 }
 
 async function sendAdminSms() {
   const to      = document.getElementById('sms-to').value.trim();
-  const fromEl  = document.getElementById('sms-from');
-  const from    = fromEl ? fromEl.value.trim() : '';
+  const from    = getUiSelect('sms-from');
   const body    = document.getElementById('sms-body').value.trim();
 
   if (!to || !body) {
@@ -1166,10 +1430,6 @@ async function renderLogs() {
 function renderLogsContent() {
   // Build distinct types
   const types = ['all', ...new Set(_logsCache.map(l => l.type))];
-  const filterOptions = types.map(t => {
-    const label = t === 'all' ? 'Wszystkie typy' : (LOG_TYPE_STYLE[t]?.label || t);
-    return `<option value="${escHtml(t)}" ${t === logFilterType ? 'selected' : ''}>${escHtml(label)}</option>`;
-  }).join('');
 
   // Filter
   let filtered = logFilterType === 'all' ? _logsCache : _logsCache.filter(l => l.type === logFilterType);
@@ -1239,9 +1499,7 @@ function renderLogsContent() {
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
         <div style="display:flex;align-items:center;gap:8px">
           <h2 style="font-size:14px;margin:0">Zdarzenia systemowe</h2>
-          <select onchange="applyLogsFilter(this.value)" style="width:auto;padding:5px 10px;font-size:12px">
-            ${filterOptions}
-          </select>
+          <div style="width:200px">${uiSelectHtml('log-filter', types.map(t => ({ value: t, label: t === 'all' ? 'Wszystkie typy' : (LOG_TYPE_STYLE[t]?.label || t) })), { value: logFilterType })}</div>
         </div>
         <button class="btn btn-danger btn-sm" onclick="clearLogs()">🗑 Wyczyść logi</button>
       </div>
@@ -1271,6 +1529,14 @@ function renderLogsContent() {
       </div>
     </div>
   `;
+
+  initAllUiSelects();
+  // Wire log filter
+  const logFilterSel = _uiSelects['log-filter'];
+  if (logFilterSel) {
+    const menu = document.querySelector('[data-select-id="log-filter"] .ui-select-menu');
+    if (menu) menu.addEventListener('click', () => setTimeout(() => applyLogsFilter(getUiSelect('log-filter')), 0));
+  }
 }
 
 function applyLogsFilter(type) {
@@ -1289,13 +1555,13 @@ function applyLogsSort(col) {
 }
 
 async function clearLogs() {
-  if (!confirm('Usunąć wszystkie logi systemowe?')) return;
+  if (!await confirmModal('Usunąć wszystkie logi systemowe?')) return;
   await sb.from('logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
   renderLogs();
 }
 
 async function clearWebhookLogs() {
-  if (!confirm('Usunąć wszystkie raw webhooki?')) return;
+  if (!await confirmModal('Usunąć wszystkie raw webhooki?')) return;
   await sb.from('webhook_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
   renderLogs();
 }
@@ -1351,7 +1617,7 @@ async function renderPrompt() {
 
 async function setPromptMode(mode) {
   if (mode === 'system') {
-    if (!confirm('Przywrócić wbudowany prompt systemowy? Własny prompt zostanie usunięty z bazy.')) return;
+    if (!await confirmModal('Usunąć własny prompt i przywrócić systemowy?')) return;
     await sb.from('settings').delete().eq('key', 'system_prompt_default');
   } else {
     // custom: check if exists, if not insert HARDCODED_PROMPT
@@ -1415,7 +1681,7 @@ async function renderSettings() {
 async function saveSetting(key) {
   const value = document.getElementById(`setting-${key}`).value.trim();
   const { error } = await sb.from('settings').update({ value, updated_at: new Date().toISOString() }).eq('key', key);
-  if (error) alert('Błąd: ' + error.message);
+  if (error) await alertModal('Błąd: ' + error.message);
   else renderSettings();
 }
 </script>
