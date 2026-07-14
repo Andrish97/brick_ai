@@ -314,6 +314,7 @@ Deno.serve(async (req: Request) => {
   try {
     await sendSms(senderPhone, `${safeReply}${suffix}`, recipientDid);
     log("sms_sent", { to: senderPhone, from: recipientDid, chars: safeReply.length + suffix.length });
+    sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
   } catch (e) {
     log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
     return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });

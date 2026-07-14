@@ -55,7 +55,7 @@
     /* ── FORMS ── */
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; margin-top: 14px; }
     input[type="text"], input[type="email"], input[type="password"], input[type="tel"],
-    textarea, select {
+    input[type="number"], textarea, select {
       width: 100%;
       background: var(--bg);
       border: 1px solid var(--border);
@@ -86,6 +86,7 @@
     .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
     .btn-sm { padding: 5px 10px; font-size: 12px; }
     .btn-full { width: 100%; justify-content: center; margin-top: 20px; }
+    .btn-icon { padding: 3px 7px; font-size: 13px; min-width: 26px; justify-content: center; }
 
     /* ── LAYOUT ── */
     #app { display: none; height: 100vh; }
@@ -232,12 +233,23 @@
     .prompt-input { font-size: 12px; min-height: 50px; }
 
     .hidden { display: none !important; }
+
+    /* ── NEW ADDITIONS ── */
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: var(--text); }
+    textarea[readonly] { opacity: 0.5; cursor: not-allowed; }
+    .prompt-mode-bar { display: flex; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .prompt-mode-btn { flex: 1; padding: 9px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: all .15s; background: var(--bg); color: var(--muted); }
+    .prompt-mode-btn.active { background: var(--accent); color: #fff; }
+    .prompt-mode-btn:hover:not(.active) { background: rgba(255,255,255,.04); color: var(--text); }
+    select { cursor: pointer; }
+    select:focus { border-color: var(--accent); }
   </style>
 </head>
 <body>
 
-<!-- ── SETUP MODAL ── -->
-<div class="overlay" id="setup-overlay">
+<!-- ── SETUP MODAL (hidden — hardcoded creds) ── -->
+<div class="overlay hidden" id="setup-overlay">
   <div class="modal">
     <h2>⚙️ Konfiguracja</h2>
     <p>Pierwsze uruchomienie — wprowadź dane projektu Supabase. Zostaną zapisane lokalnie w przeglądarce.</p>
@@ -261,9 +273,6 @@
     <input type="password" id="login-pass" placeholder="••••••••" />
     <div class="err-msg" id="login-err"></div>
     <button class="btn btn-primary btn-full" id="login-btn" onclick="doLogin()">Zaloguj</button>
-    <p style="text-align:center;margin-top:12px;font-size:12px;color:var(--muted)">
-      <a href="#" onclick="resetSetup()" style="color:var(--accent)">Zmień konfigurację</a>
-    </p>
   </div>
 </div>
 
@@ -295,11 +304,11 @@
       <div class="nav-item" onclick="showPage('conversations')" id="nav-conversations">
         <span class="nav-icon">💬</span> Rozmowy
       </div>
-      <div class="nav-item" onclick="showPage('messages')" id="nav-messages">
-        <span class="nav-icon">✉️</span> Wiadomości
+      <div class="nav-item" onclick="showPage('phone-numbers')" id="nav-phone-numbers">
+        <span class="nav-icon">📱</span> Numery
       </div>
-      <div class="nav-item" onclick="showPage('webhook-test')" id="nav-webhook-test">
-        <span class="nav-icon">🧪</span> Test webhooka
+      <div class="nav-item" onclick="showPage('receive-test')" id="nav-receive-test">
+        <span class="nav-icon">🧪</span> Test odbioru
       </div>
       <div class="nav-item" onclick="showPage('send-sms')" id="nav-send-sms">
         <span class="nav-icon">📤</span> Wyślij SMS
@@ -310,7 +319,7 @@
       <div class="nav-item" onclick="showPage('prompt')" id="nav-prompt">
         <span class="nav-icon">🧠</span> Prompt
       </div>
-<div class="nav-item" onclick="showPage('settings')" id="nav-settings">
+      <div class="nav-item" onclick="showPage('settings')" id="nav-settings">
         <span class="nav-icon">⚙️</span> Ustawienia
       </div>
     </nav>
@@ -334,12 +343,19 @@ let currentUser = null;
 let currentPage = 'dashboard';
 let selectedConvId = null;
 let selectedConvCode = null;
+let phoneNumbers = [];
+let _logsCache = [];
+let _webhooksCache = [];
+let logFilterType = 'all';
+let logSortCol = 'created_at';
+let logSortDir = 'desc';
 
 // ══════════════════════════════════════════════════════
 //  CONFIG
 // ══════════════════════════════════════════════════════
 const SB_URL  = 'https://rjnqpenbjyeiygedjvzk.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqbnFwZW5ianllaXlnZWRqdnprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0NzUwNjcsImV4cCI6MjA5NzA1MTA2N30.EvAtFPW4o7f3HAxJvvPA1bqQjuoZ-3D-3cwnAFQ96UU';
+const HARDCODED_PROMPT = `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE 153 ZNAKI. Żadnych linków URL. Tylko fakty, zero wstępów.`;
 
 // ══════════════════════════════════════════════════════
 //  INIT
@@ -366,7 +382,6 @@ function onLoggedIn(user) {
   document.getElementById('user-email-label').textContent = user.email;
   showPage('dashboard');
 }
-
 
 // ══════════════════════════════════════════════════════
 //  AUTH
@@ -399,6 +414,9 @@ async function doLogout() {
   document.getElementById('login-overlay').classList.remove('hidden');
 }
 
+function saveSetup() {}
+function resetSetup() {}
+
 // ══════════════════════════════════════════════════════
 //  NAVIGATION
 // ══════════════════════════════════════════════════════
@@ -412,15 +430,16 @@ function showPage(page) {
   content.innerHTML = '<p style="color:var(--muted);padding:20px">Ładowanie...</p>';
 
   const pages = {
-    dashboard:    renderDashboard,
-    users:        renderUsers,
-    conversations: renderConversations,
-    messages:     renderMessages,
-    'webhook-test': renderWebhookTest,
-    'send-sms':   renderSendSms,
-    logs:         renderLogs,
-    prompt:       renderPrompt,
-settings:     renderSettings,
+    dashboard:       renderDashboard,
+    users:           renderUsers,
+    conversations:   renderConversations,
+    messages:        renderMessages,
+    'phone-numbers': renderPhoneNumbers,
+    'receive-test':  renderReceiveTest,
+    'send-sms':      renderSendSms,
+    logs:            renderLogs,
+    prompt:          renderPrompt,
+    settings:        renderSettings,
   };
   (pages[page] || (() => {}))();
 }
@@ -438,12 +457,17 @@ function escHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function showJsonModal(obj) {
   document.getElementById('json-content').textContent = JSON.stringify(obj, null, 2);
   document.getElementById('json-overlay').classList.remove('hidden');
+}
+
+function showJsonFromRow(el) {
+  showJsonModal(JSON.parse(el.dataset.json));
 }
 
 function closeJsonModal(e) {
@@ -459,6 +483,7 @@ async function getSession() {
 
 function showResponse(boxId, ok, text) {
   const box = document.getElementById(boxId);
+  if (!box) return;
   box.classList.add('visible');
   box.classList.remove('response-ok', 'response-err');
   box.classList.add(ok ? 'response-ok' : 'response-err');
@@ -466,22 +491,90 @@ function showResponse(boxId, ok, text) {
 }
 
 // ══════════════════════════════════════════════════════
+//  PHONE NUMBERS HELPER
+// ══════════════════════════════════════════════════════
+async function loadPhoneNumbers() {
+  const { data } = await sb.from('phone_numbers').select('*').order('sort_order', { ascending: true });
+  phoneNumbers = data || [];
+  return phoneNumbers;
+}
+
+function phoneNumbersSelectHtml(selectedValue) {
+  if (!phoneNumbers.length) return '<input type="tel" id="wh-to" placeholder="np. 48100200300" />';
+  const defaultPn = phoneNumbers[0];
+  const defaultDesc = defaultPn.description ? ` — ${defaultPn.description}` : '';
+  let opts = `<option value="">★ ${escHtml(defaultPn.number)}${escHtml(defaultDesc)} (domyślny)</option>`;
+  for (const pn of phoneNumbers) {
+    const desc = pn.description ? ` — ${pn.description}` : '';
+    const sel = (selectedValue && selectedValue === pn.number) ? ' selected' : '';
+    opts += `<option value="${escHtml(pn.number)}"${sel}>${escHtml(pn.number)}${escHtml(desc)}</option>`;
+  }
+  return `<select id="wh-to">${opts}</select>`;
+}
+
+function phoneNumbersSelectHtmlById(selectedId) {
+  if (!phoneNumbers.length) return '<input type="tel" id="sms-from" placeholder="np. 48100200300" />';
+  const defaultPn = phoneNumbers[0];
+  const defaultDesc = defaultPn.description ? ` — ${defaultPn.description}` : '';
+  let opts = `<option value="">★ ${escHtml(defaultPn.number)}${escHtml(defaultDesc)} (domyślny)</option>`;
+  for (const pn of phoneNumbers) {
+    const desc = pn.description ? ` — ${pn.description}` : '';
+    const sel = (selectedId && selectedId === pn.id) ? ' selected' : '';
+    opts += `<option value="${escHtml(pn.number)}"${sel}>${escHtml(pn.number)}${escHtml(desc)}</option>`;
+  }
+  return `<select id="sms-from">${opts}</select>`;
+}
+
+function userPhoneSelectHtml(userId, selectedPhoneNumberId) {
+  if (!phoneNumbers.length) return '<span style="color:var(--muted);font-size:12px">—</span>';
+  const defaultPn = phoneNumbers[0];
+  const defaultDesc = defaultPn.description ? ` — ${defaultPn.description}` : '';
+  let opts = `<option value="">★ ${escHtml(defaultPn.number)}${escHtml(defaultDesc)} (domyślny)</option>`;
+  for (const pn of phoneNumbers) {
+    const desc = pn.description ? ` — ${pn.description}` : '';
+    const sel = (selectedPhoneNumberId && selectedPhoneNumberId === pn.id) ? ' selected' : '';
+    opts += `<option value="${escHtml(pn.id)}"${sel}>${escHtml(pn.number)}${escHtml(desc)}</option>`;
+  }
+  return `<select onchange="updateUserPhone('${userId}', this.value)" style="font-size:12px">${opts}</select>`;
+}
+
+async function updateUserPhone(userId, phoneNumberId) {
+  const val = phoneNumberId === '' ? null : phoneNumberId;
+  await sb.from('users').update({ phone_number_id: val }).eq('id', userId);
+}
+
+// ══════════════════════════════════════════════════════
 //  PAGE: DASHBOARD
 // ══════════════════════════════════════════════════════
+async function fetchZadarmaBalance() {
+  try {
+    const session = await getSession();
+    if (!session) return null;
+    const res = await fetch(`${SB_URL}/functions/v1/zadarma-balance`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 async function renderDashboard() {
   const [
     { count: uCount },
     { count: cCount },
-    { data: msgs }
+    { data: settingsRows },
   ] = await Promise.all([
     sb.from('users').select('id', { count: 'exact', head: true }),
     sb.from('conversations').select('id', { count: 'exact', head: true }),
-    sb.from('messages').select('direction'),
+    sb.from('settings').select('key,value'),
   ]);
 
-  const mCount = msgs ? msgs.length : 0;
-  const outCount = msgs ? msgs.filter(m => m.direction === 'out').length : 0;
-  const cost = (outCount * 0.18).toFixed(2);
+  const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
+  const smsCount = parseInt(settings['sms_count'] || '0', 10);
+  const smsPrice = parseFloat(settings['sms_price'] || '0.18');
+  const cost = (smsCount * smsPrice).toFixed(2);
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -498,21 +591,53 @@ async function renderDashboard() {
         <div class="big-num">${cCount ?? 0}</div>
       </div>
       <div class="card">
-        <h3>Wiadomości</h3>
-        <div class="big-num">${mCount}</div>
+        <h3>SMS wysłanych</h3>
+        <div class="big-num" id="sms-count-display">${smsCount}</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <input type="number" id="sms-count-input" value="${smsCount}" style="width:90px;padding:5px 8px;font-size:13px" />
+          <button class="btn btn-primary btn-sm" onclick="saveSmsCount()">Zapisz</button>
+        </div>
       </div>
       <div class="card">
-        <h3>Koszt (wych. × 0,18 PLN)</h3>
+        <h3>Koszt (SMS × ${smsPrice.toFixed(2)} PLN)</h3>
         <div class="big-num">${cost} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
       </div>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <h3>Stan konta Zadarma</h3>
+      <div id="zadarma-balance-val" style="font-size:24px;font-weight:700;margin-bottom:12px">
+        <span class="spinner"></span>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="loadZadarmaBalance()">Odśwież</button>
+    </div>
   `;
+
+  loadZadarmaBalance();
+}
+
+async function saveSmsCount() {
+  const val = document.getElementById('sms-count-input').value;
+  await sb.from('settings').upsert({ key: 'sms_count', value: String(parseInt(val, 10) || 0), updated_at: new Date().toISOString() });
+  renderDashboard();
+}
+
+async function loadZadarmaBalance() {
+  const el = document.getElementById('zadarma-balance-val');
+  if (!el) return;
+  el.innerHTML = '<span class="spinner"></span>';
+  const data = await fetchZadarmaBalance();
+  if (data && data.balance !== undefined) {
+    el.textContent = `${data.balance} ${data.currency || ''}`;
+  } else {
+    el.textContent = '—';
+  }
 }
 
 // ══════════════════════════════════════════════════════
 //  PAGE: USERS
 // ══════════════════════════════════════════════════════
 async function renderUsers() {
+  await loadPhoneNumbers();
   const { data: users, error } = await sb
     .from('users')
     .select('*')
@@ -528,6 +653,7 @@ async function renderUsers() {
           <span class="toggle-slider"></span>
         </label>
       </td>
+      <td>${userPhoneSelectHtml(u.id, u.phone_number_id)}</td>
       <td>
         <input class="prompt-input" type="text"
           value="${escHtml(u.system_prompt || '')}"
@@ -575,11 +701,12 @@ async function renderUsers() {
               <th>Kod</th>
               <th>Telefon</th>
               <th>Aktywny</th>
+              <th>Numer wysyłkowy</th>
               <th>System Prompt</th>
               <th>Akcja</th>
             </tr>
           </thead>
-          <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted);text-align:center">Brak użytkowników</td></tr>'}</tbody>
+          <tbody>${rows || '<tr><td colspan="6" style="color:var(--muted);text-align:center">Brak użytkowników</td></tr>'}</tbody>
         </table>
       </div>
     </div>
@@ -736,54 +863,163 @@ async function renderMessages() {
     </div>
   `).join('');
 
-  // Find last outgoing message
-  const lastOut = [...(msgs || [])].reverse().find(m => m.direction === 'out');
-
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Wiadomości</h1>
       <p>Rozmowa: <code>${escHtml(selectedConvCode)}</code></p>
     </div>
     <button class="btn btn-ghost btn-sm" style="margin-bottom:16px" onclick="showPage('conversations')">← Wróć</button>
-    ${lastOut ? `<button class="btn btn-ghost btn-sm" style="margin-bottom:16px;margin-left:8px" onclick="resendLast('${escHtml(lastOut.id)}')">↩ Wyślij ponownie ostatnią (out)</button>` : ''}
     <div class="section-card">
       <div class="chat-wrap" id="chat-wrap">
         ${bubbles || '<p style="color:var(--muted);text-align:center">Brak wiadomości</p>'}
       </div>
     </div>
-    <div class="response-box" id="resend-response"></div>
   `;
 
-  // scroll to bottom
   const cw = document.getElementById('chat-wrap');
   if (cw) cw.scrollTop = cw.scrollHeight;
 }
 
-async function resendLast(msgId) {
-  showResponse('resend-response', true, 'Funkcja "wyślij ponownie" wymaga znajomości numeru telefonu nadawcy — dostępna przez admin-send-sms.');
-}
+// ══════════════════════════════════════════════════════
+//  PAGE: PHONE NUMBERS
+// ══════════════════════════════════════════════════════
+async function renderPhoneNumbers() {
+  await loadPhoneNumbers();
 
-// ══════════════════════════════════════════════════════
-//  PAGE: TEST WEBHOOKA
-// ══════════════════════════════════════════════════════
-async function renderWebhookTest() {
-  const { data: settingsRows } = await sb.from('settings').select('key,value');
-  const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
-  const callerId = settings['zadarma_caller_id'] || '';
+  const rows = phoneNumbers.map((pn, idx) => {
+    const isFirst = idx === 0;
+    const isLast  = idx === phoneNumbers.length - 1;
+    const desc = pn.description ? escHtml(pn.description) : '<span style="color:var(--muted)">—</span>';
+    return `
+      <tr>
+        <td style="white-space:nowrap">
+          <button class="btn btn-ghost btn-icon btn-sm" onclick="movePhoneNumber('${pn.id}', 'up')" ${isFirst ? 'disabled' : ''}>↑</button>
+          <button class="btn btn-ghost btn-icon btn-sm" onclick="movePhoneNumber('${pn.id}', 'down')" ${isLast ? 'disabled' : ''}>↓</button>
+          ${isFirst ? '<span class="badge badge-yellow" style="margin-left:4px">★</span>' : ''}
+        </td>
+        <td><code>${escHtml(pn.number)}</code></td>
+        <td>${desc}</td>
+        <td>
+          <button class="btn btn-danger btn-sm" onclick="deletePhoneNumber('${pn.id}')">Usuń</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
-      <h1>Test webhooka</h1>
-      <p>Symuluje przychodzący SMS od Zadarmy</p>
+      <h1>Numery</h1>
+      <p>Wirtualne numery Zadarma używane do wysyłania SMS. Pierwszy numer jest domyślny (★).</p>
     </div>
     <div class="section-card">
-      <label>Numer nadawcy — kto wysłał SMS i dostanie odpowiedź</label>
+      <h2>Dodaj numer</h2>
+      <div class="form-row">
+        <div>
+          <label>Numer (np. 48100200300)</label>
+          <input type="text" id="new-pn-number" placeholder="48100200300" />
+        </div>
+        <div>
+          <label>Opis (opcjonalny)</label>
+          <input type="text" id="new-pn-desc" placeholder="np. Numer główny" />
+        </div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="addPhoneNumber()">Dodaj numer</button>
+      <div class="err-msg" id="pn-err"></div>
+    </div>
+    <div class="section-card">
+      <h2>Lista numerów</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Kolejność</th>
+              <th>Numer</th>
+              <th>Opis</th>
+              <th>Akcja</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="4" style="color:var(--muted);text-align:center">Brak numerów</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function movePhoneNumber(id, direction) {
+  const idx = phoneNumbers.findIndex(pn => pn.id === id);
+  if (idx < 0) return;
+  const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= phoneNumbers.length) return;
+
+  const a = phoneNumbers[idx];
+  const b = phoneNumbers[swapIdx];
+
+  await Promise.all([
+    sb.from('phone_numbers').update({ sort_order: b.sort_order }).eq('id', a.id),
+    sb.from('phone_numbers').update({ sort_order: a.sort_order }).eq('id', b.id),
+  ]);
+
+  renderPhoneNumbers();
+}
+
+async function addPhoneNumber() {
+  const number = document.getElementById('new-pn-number').value.trim();
+  const desc   = document.getElementById('new-pn-desc').value.trim();
+  const errEl  = document.getElementById('pn-err');
+  errEl.textContent = '';
+
+  if (!number) {
+    errEl.textContent = 'Numer jest wymagany.';
+    return;
+  }
+
+  const maxOrder = phoneNumbers.reduce((m, pn) => Math.max(m, pn.sort_order), -1);
+
+  const { error } = await sb.from('phone_numbers').insert({
+    number,
+    description: desc || null,
+    sort_order: maxOrder + 1,
+  });
+
+  if (error) {
+    errEl.textContent = error.message;
+    return;
+  }
+
+  renderPhoneNumbers();
+}
+
+async function deletePhoneNumber(id) {
+  if (!confirm('Usunąć numer? Użytkownicy przypisani do tego numeru zostaną bez przypisania.')) return;
+  await sb.from('phone_numbers').delete().eq('id', id);
+  renderPhoneNumbers();
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: TEST ODBIORU (formerly webhook-test)
+// ══════════════════════════════════════════════════════
+async function renderReceiveTest() {
+  await loadPhoneNumbers();
+  const toField = phoneNumbers.length
+    ? `<select id="wh-to">${phoneNumbers.map((pn, i) => {
+        const desc = pn.description ? ` — ${pn.description}` : '';
+        return `<option value="${escHtml(pn.number)}">${escHtml(pn.number)}${escHtml(desc)}${i === 0 ? ' (domyślny)' : ''}</option>`;
+      }).join('')}</select>`
+    : '<input type="tel" id="wh-to" placeholder="np. 48100200300" />';
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Test odbioru SMS</h1>
+      <p>Symuluje wysyłkę SMS od użytkownika do systemu</p>
+    </div>
+    <div class="section-card">
+      <label>Numer nadawcy — telefon użytkownika (skąd przyszedł SMS)</label>
       <input type="tel" id="wh-from" placeholder="np. 48573311779" />
-      <label>Twój numer Zadarmy — z którego zostanie wysłana odpowiedź</label>
-      <input type="tel" id="wh-to" value="${callerId}" />
+      <label>Numer odbiorcy — Twój wirtualny numer Zadarma</label>
+      ${toField}
       <label>Kod użytkownika (pierwsza linia SMS)</label>
       <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
-      <label>Kod rozmowy (opcjonalny)</label>
+      <label>Kod rozmowy (opcjonalny — puste = nowa rozmowa)</label>
       <input type="text" id="wh-convcode" maxlength="6" placeholder="123456" />
       <label>Treść wiadomości</label>
       <textarea id="wh-body" placeholder="Twoja treść..."></textarea>
@@ -802,7 +1038,8 @@ async function renderWebhookTest() {
 
 async function sendWebhookTest() {
   const from     = document.getElementById('wh-from').value.trim();
-  const to       = document.getElementById('wh-to').value.trim();
+  const toEl     = document.getElementById('wh-to');
+  const to       = toEl ? (toEl.value || toEl.options?.[0]?.value || '') : '';
   const userCode = document.getElementById('wh-usercode').value.trim();
   const convCode = document.getElementById('wh-convcode').value.trim();
   const body     = document.getElementById('wh-body').value.trim();
@@ -837,17 +1074,20 @@ async function sendWebhookTest() {
 // ══════════════════════════════════════════════════════
 //  PAGE: WYŚLIJ SMS
 // ══════════════════════════════════════════════════════
-function renderSendSms() {
+async function renderSendSms() {
+  await loadPhoneNumbers();
+  const fromField = phoneNumbersSelectHtmlById(null).replace('id="sms-from"', 'id="sms-from"');
+
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Wyślij SMS</h1>
       <p>Wysyła SMS przez Zadarma API (wymaga zalogowania)</p>
     </div>
     <div class="section-card">
-      <label>Numer docelowy</label>
+      <label>Numer odbiorcy — do kogo wysłać SMS</label>
       <input type="tel" id="sms-to" placeholder="+48123456789" />
-      <label>Numer nadawcy (caller_id)</label>
-      <input type="tel" id="sms-from" placeholder="+48987654321" />
+      <label>Numer nadawcy — Twój wirtualny numer Zadarma</label>
+      ${fromField}
       <label>Treść wiadomości</label>
       <textarea id="sms-body" placeholder="Treść SMS..."></textarea>
       <button class="btn btn-primary" style="margin-top:14px" onclick="sendAdminSms()">Wyślij SMS</button>
@@ -858,11 +1098,12 @@ function renderSendSms() {
 
 async function sendAdminSms() {
   const to      = document.getElementById('sms-to').value.trim();
-  const from    = document.getElementById('sms-from').value.trim();
+  const fromEl  = document.getElementById('sms-from');
+  const from    = fromEl ? fromEl.value.trim() : '';
   const body    = document.getElementById('sms-body').value.trim();
 
-  if (!to || !from || !body) {
-    showResponse('sms-response', false, 'Wszystkie pola są wymagane.');
+  if (!to || !body) {
+    showResponse('sms-response', false, 'Numer odbiorcy i treść są wymagane.');
     return;
   }
 
@@ -872,16 +1113,17 @@ async function sendAdminSms() {
     return;
   }
 
-  const sbUrl = SB_URL;
+  // Use first phone number as default if none selected
+  const callerIdFinal = from || (phoneNumbers[0]?.number || '');
 
   try {
-    const res = await fetch(`${sbUrl}/functions/v1/admin-send-sms`, {
+    const res = await fetch(`${SB_URL}/functions/v1/admin-send-sms`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${session.access_token}`,
       },
-      body: JSON.stringify({ phone: to, message: body, caller_id: from }),
+      body: JSON.stringify({ phone: to, message: body, caller_id: callerIdFinal }),
     });
     const text = await res.text();
     showResponse('sms-response', res.ok, `HTTP ${res.status}\n${text}`);
@@ -900,39 +1142,83 @@ const LOG_TYPE_STYLE = {
   sms_error:    { label: 'SMS błąd',    cls: 'badge-red' },
   error:        { label: 'Błąd',        cls: 'badge-red' },
   webhook:      { label: 'Webhook',     cls: 'badge-yellow' },
+  sms_debug:    { label: 'SMS debug',   cls: 'badge-yellow' },
+  gemini_error: { label: 'Gemini błąd', cls: 'badge-red' },
+  gemini_raw:   { label: 'Gemini raw',  cls: 'badge-yellow' },
 };
 
 async function renderLogs() {
   const [{ data: logs }, { data: webhooks }] = await Promise.all([
-    sb.from('logs').select('*').order('created_at', { ascending: false }).limit(100),
-    sb.from('webhook_logs').select('*').order('created_at', { ascending: false }).limit(20),
+    sb.from('logs').select('*').order('created_at', { ascending: false }).limit(200),
+    sb.from('webhook_logs').select('*').order('created_at', { ascending: false }).limit(50),
   ]);
 
-  const logRows = (logs || []).map(l => {
+  _logsCache = logs || [];
+  _webhooksCache = webhooks || [];
+
+  renderLogsContent();
+}
+
+function renderLogsContent() {
+  // Build distinct types
+  const types = ['all', ...new Set(_logsCache.map(l => l.type))];
+  const filterOptions = types.map(t =>
+    `<option value="${escHtml(t)}" ${t === logFilterType ? 'selected' : ''}>${t === 'all' ? 'Wszystkie typy' : escHtml(t)}</option>`
+  ).join('');
+
+  // Filter
+  let filtered = logFilterType === 'all' ? _logsCache : _logsCache.filter(l => l.type === logFilterType);
+
+  // Sort
+  filtered = [...filtered].sort((a, b) => {
+    let va = a[logSortCol] ?? '';
+    let vb = b[logSortCol] ?? '';
+    if (logSortCol === 'created_at') {
+      va = new Date(va).getTime();
+      vb = new Date(vb).getTime();
+    } else {
+      va = String(va).toLowerCase();
+      vb = String(vb).toLowerCase();
+    }
+    if (va < vb) return logSortDir === 'asc' ? -1 : 1;
+    if (va > vb) return logSortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  function sortIndicator(col) {
+    if (col !== logSortCol) return '';
+    return logSortDir === 'asc' ? ' ↑' : ' ↓';
+  }
+
+  const logRows = filtered.map(l => {
     const style = LOG_TYPE_STYLE[l.type] || { label: l.type, cls: 'badge-yellow' };
     const preview = JSON.stringify(l.data || {}).slice(0, 120);
+    const jsonStr = escHtml(JSON.stringify(l.data || {}));
     return `
       <tr>
         <td style="white-space:nowrap">${fmtDate(l.created_at)}</td>
-        <td><span class="badge ${style.cls}">${style.label}</span></td>
+        <td><span class="badge ${style.cls}">${escHtml(style.label)}</span></td>
         <td>
           <span style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
-            onclick='showJsonModal(${escHtml(JSON.stringify(l.data || {}))})'
+            data-json='${jsonStr}'
+            onclick="showJsonFromRow(this)"
           >${escHtml(preview)}${preview.length >= 120 ? '…' : ''}</span>
         </td>
       </tr>
     `;
   }).join('');
 
-  const webhookRows = (webhooks || []).map(l => {
-    const preview = JSON.stringify(l.raw_payload).slice(0, 120);
+  const webhookRows = _webhooksCache.map(l => {
+    const preview = JSON.stringify(l.raw_payload || {}).slice(0, 120);
+    const jsonStr = escHtml(JSON.stringify(l.raw_payload || {}));
     return `
       <tr>
         <td style="white-space:nowrap">${fmtDate(l.created_at)}</td>
         <td><span class="badge badge-yellow">Raw webhook</span></td>
         <td>
           <span style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
-            onclick='showJsonModal(${escHtml(JSON.stringify(l.raw_payload))})'
+            data-json='${jsonStr}'
+            onclick="showJsonFromRow(this)"
           >${escHtml(preview)}${preview.length >= 120 ? '…' : ''}</span>
         </td>
       </tr>
@@ -942,16 +1228,27 @@ async function renderLogs() {
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Logi</h1>
-      <p>Ostatnie 100 zdarzeń + 20 raw webhooków — kliknij wiersz, aby zobaczyć szczegóły</p>
+      <p>Ostatnie 200 zdarzeń + 50 raw webhooków — kliknij wiersz, aby zobaczyć szczegóły</p>
     </div>
     <div class="section-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <h2 style="font-size:14px;margin:0">Zdarzenia systemowe</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <h2 style="font-size:14px;margin:0">Zdarzenia systemowe</h2>
+          <select onchange="applyLogsFilter(this.value)" style="width:auto;padding:5px 10px;font-size:12px">
+            ${filterOptions}
+          </select>
+        </div>
         <button class="btn btn-danger btn-sm" onclick="clearLogs()">🗑 Wyczyść logi</button>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Czas</th><th>Typ</th><th>Dane</th></tr></thead>
+          <thead>
+            <tr>
+              <th class="sortable" onclick="applyLogsSort('created_at')">Czas${sortIndicator('created_at')}</th>
+              <th class="sortable" onclick="applyLogsSort('type')">Typ${sortIndicator('type')}</th>
+              <th>Dane</th>
+            </tr>
+          </thead>
           <tbody>${logRows || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak logów</td></tr>'}</tbody>
         </table>
       </div>
@@ -971,6 +1268,21 @@ async function renderLogs() {
   `;
 }
 
+function applyLogsFilter(type) {
+  logFilterType = type;
+  renderLogsContent();
+}
+
+function applyLogsSort(col) {
+  if (col === logSortCol) {
+    logSortDir = logSortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    logSortCol = col;
+    logSortDir = 'desc';
+  }
+  renderLogsContent();
+}
+
 async function clearLogs() {
   if (!confirm('Usunąć wszystkie logi systemowe?')) return;
   await sb.from('logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
@@ -987,59 +1299,73 @@ async function clearWebhookLogs() {
 //  PAGE: PROMPT
 // ══════════════════════════════════════════════════════
 async function renderPrompt() {
-  const DEFAULT_PROMPT = `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie 153 znaki. Bądź zwięzły i konkretny.`;
-
-  const [{ data: settingsRows }, { data: users }] = await Promise.all([
-    sb.from('settings').select('key,value'),
-    sb.from('users').select('id,code,phone_number,system_prompt,active').order('code'),
-  ]);
-
+  const { data: settingsRows } = await sb.from('settings').select('key,value');
   const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
-  const globalPrompt = settings['system_prompt_default'] || DEFAULT_PROMPT;
 
-  const usersHtml = (users || []).map(u => `
-    <div class="section-card" style="margin-top:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <strong>Użytkownik ${u.code}</strong>
-        <span style="color:var(--muted);font-size:12px">${u.phone_number || ''}</span>
-      </div>
-      <label>Prompt (puste = globalny)</label>
-      <textarea id="prompt-user-${u.id}" style="min-height:80px" placeholder="${globalPrompt}">${u.system_prompt || ''}</textarea>
-      <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="saveUserPrompt('${u.id}')">Zapisz</button>
+  const hasCustom = 'system_prompt_default' in settings;
+  const isCustomMode = hasCustom;
+  const customValue = settings['system_prompt_default'] || '';
+
+  const modeBar = `
+    <div class="prompt-mode-bar">
+      <button class="prompt-mode-btn ${!isCustomMode ? 'active' : ''}" onclick="setPromptMode('system')">🔒 Systemowy</button>
+      <button class="prompt-mode-btn ${isCustomMode ? 'active' : ''}" onclick="setPromptMode('custom')">✏️ Własny</button>
     </div>
-  `).join('');
+  `;
+
+  let promptContent;
+  if (!isCustomMode) {
+    promptContent = `
+      <textarea readonly style="min-height:100px;font-size:13px">${escHtml(HARDCODED_PROMPT)}</textarea>
+      <p style="color:var(--muted);font-size:12px;margin-top:8px">
+        Przełącz na Własny aby edytować. Powrót do Systemowy zawsze przywraca wbudowany prompt.
+      </p>
+    `;
+  } else {
+    promptContent = `
+      <textarea id="prompt-custom" style="min-height:100px;font-size:13px">${escHtml(customValue)}</textarea>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
+        <button class="btn btn-primary" onclick="saveCustomPrompt()">Zapisz</button>
+        <span style="color:var(--muted);font-size:12px">Limit AI: 153 znaki odpowiedzi</span>
+      </div>
+      <div class="response-box" id="prompt-response"></div>
+    `;
+  }
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Prompt systemowy</h1>
-      <p>Domyślny prompt dla wszystkich + nadpisanie per użytkownik</p>
+      <p>Wybierz tryb promptu dla całego systemu</p>
     </div>
     <div class="section-card">
-      <h3 style="margin-bottom:12px">Globalny prompt domyślny</h3>
-      <label>Prompt (zapisywany w tabeli settings jako <code>system_prompt_default</code>)</label>
-      <textarea id="prompt-global" style="min-height:100px">${globalPrompt}</textarea>
-      <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
-        <button class="btn btn-primary" onclick="saveGlobalPrompt()">Zapisz globalny</button>
-        <span style="color:var(--muted);font-size:12px">Limit AI: 153 znaki odpowiedzi</span>
-      </div>
-      <div class="response-box" id="prompt-global-response"></div>
+      ${modeBar}
+      ${promptContent}
     </div>
-    <h3 style="margin:20px 0 4px">Per użytkownik</h3>
-    ${usersHtml}
   `;
 }
 
-async function saveGlobalPrompt() {
-  const value = document.getElementById('prompt-global').value.trim();
-  const { error } = await sb.from('settings').upsert({ key: 'system_prompt_default', value, updated_at: new Date().toISOString() });
-  showResponse('prompt-global-response', !error, error ? error.message : 'Zapisano.');
+async function setPromptMode(mode) {
+  if (mode === 'system') {
+    if (!confirm('Przywrócić wbudowany prompt systemowy? Własny prompt zostanie usunięty z bazy.')) return;
+    await sb.from('settings').delete().eq('key', 'system_prompt_default');
+  } else {
+    // custom: check if exists, if not insert HARDCODED_PROMPT
+    const { data } = await sb.from('settings').select('key').eq('key', 'system_prompt_default').maybeSingle();
+    if (!data) {
+      await sb.from('settings').insert({ key: 'system_prompt_default', value: HARDCODED_PROMPT });
+    }
+  }
+  renderPrompt();
 }
 
-async function saveUserPrompt(userId) {
-  const value = document.getElementById(`prompt-user-${userId}`).value.trim();
-  const { error } = await sb.from('users').update({ system_prompt: value || null }).eq('id', userId);
-  if (error) alert('Błąd: ' + error.message);
-  else renderPrompt();
+async function saveCustomPrompt() {
+  const value = document.getElementById('prompt-custom').value.trim();
+  const { error } = await sb.from('settings').upsert({
+    key: 'system_prompt_default',
+    value,
+    updated_at: new Date().toISOString(),
+  });
+  showResponse('prompt-response', !error, error ? error.message : 'Zapisano.');
 }
 
 // ══════════════════════════════════════════════════════
@@ -1050,9 +1376,9 @@ async function renderSettings() {
 
   const rowsHtml = (rows || []).map(r => `
     <tr>
-      <td><code>${r.key}</code></td>
-      <td><input type="text" value="${r.value}" id="setting-${r.key}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px" /></td>
-      <td><button class="btn btn-primary btn-sm" onclick="saveSetting('${r.key}')">Zapisz</button></td>
+      <td><code>${escHtml(r.key)}</code></td>
+      <td><input type="text" value="${escHtml(r.value)}" id="setting-${escHtml(r.key)}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px" /></td>
+      <td><button class="btn btn-primary btn-sm" onclick="saveSetting('${escHtml(r.key)}')">Zapisz</button></td>
     </tr>
   `).join('');
 
@@ -1062,7 +1388,7 @@ async function renderSettings() {
       <p>Konfiguracja systemowa przechowywana w bazie danych</p>
     </div>
     <div class="section-card">
-      <table class="data-table">
+      <table>
         <thead><tr><th>Klucz</th><th>Wartość</th><th></th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
@@ -1096,9 +1422,5 @@ async function addSetting() {
 }
 </script>
 
-<!--
-  Setup: GitHub Pages → Settings → Pages → Source: main branch /docs folder
-  First run: enter Supabase URL and Anon Key (found in Project Settings → API)
--->
 </body>
 </html>
