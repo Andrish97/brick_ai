@@ -124,8 +124,17 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
       return null;
     }
     const data = JSON.parse(resText);
-    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    const candidate = data.candidates?.[0];
+    const parts = candidate?.content?.parts ?? [];
     const text = parts.filter((p: { thought?: boolean }) => !p.thought).map((p: { text?: string }) => p.text ?? "").join("").trim();
+    log("gemini_raw", {
+      model: "gemini-3.5-flash",
+      finishReason: candidate?.finishReason,
+      partsCount: parts.length,
+      chars: text.length,
+      usedSearch: !!candidate?.groundingMetadata,
+      preview: text.slice(0, 100),
+    });
     return text || null;
   } catch (e) {
     log("gemini_error", { exception: String(e) });
