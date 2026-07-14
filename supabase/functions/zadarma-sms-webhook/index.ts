@@ -1,6 +1,12 @@
 import { createHmac, createHash } from "node:crypto";
 
 const ZADARMA_API_URL = "https://api.zadarma.com";
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
 const MAX_REPLY_CHARS = 153;  // 160 - '\n' - 6 cyfr kodu rozmowy
 
@@ -133,12 +139,14 @@ async function askAi(messages: Array<{ role: string; content: string }>, system:
 // --- Handler ---
 
 Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+
   if (req.method === "GET") {
     const echo = new URL(req.url).searchParams.get("zd_echo");
-    return new Response(echo ?? "OK", { status: 200 });
+    return new Response(echo ?? "OK", { status: 200, headers: CORS });
   }
   const dryRun = new URL(req.url).searchParams.get("dry_run") === "1";
-  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: CORS });
 
   let raw: Record<string, string>;
   try {
@@ -147,10 +155,10 @@ Deno.serve(async (req: Request) => {
       ? await req.json()
       : Object.fromEntries(new URLSearchParams(await req.text()));
   } catch {
-    return new Response("Bad request", { status: 400 });
+    return new Response("Bad request", { status: 400, headers: CORS });
   }
 
-  if (raw.zd_echo) return new Response(raw.zd_echo, { status: 200 });
+  if (raw.zd_echo) return new Response(raw.zd_echo, { status: 200, headers: CORS });
 
   const SB = Deno.env.get("SUPABASE_URL")!;
   const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -160,7 +168,7 @@ Deno.serve(async (req: Request) => {
   await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });
 
   const event = (raw.event ?? "").toLowerCase();
-  if (event !== "sms" && event !== "incoming_sms") return new Response("Ignored", { status: 200 });
+  if (event !== "sms" && event !== "incoming_sms") return new Response("Ignored", { status: 200, headers: CORS });
 
   // Zadarma może wysłać dane SMS bezpośrednio lub zagnieżdżone w polu result (JSON string)
   let data: Record<string, string> = raw;
@@ -171,10 +179,10 @@ Deno.serve(async (req: Request) => {
   const senderPhone = data.sms_from ?? data.caller_id ?? "";
   const recipientDid = data.sms_to ?? data.caller_did ?? data.called_did ?? "";
   const smsBody = data.msg ?? data.text ?? "";
-  if (!senderPhone || !smsBody) return new Response("Missing fields", { status: 400 });
+  if (!senderPhone || !smsBody) return new Response("Missing fields", { status: 400, headers: CORS });
 
   const { userCode, convCode, content } = parseSms(smsBody);
-  if (!content) return new Response("Empty content", { status: 200 });
+  if (!content) return new Response("Empty content", { status: 200, headers: CORS });
 
   log("sms_in", { from: senderPhone, userCode, convCode, content });
 
@@ -182,7 +190,7 @@ Deno.serve(async (req: Request) => {
   const users = await sbGet(SB, KEY, `users?code=eq.${userCode}&select=id,active,system_prompt`) as Array<{ id: string; active: boolean; system_prompt: string | null }>;
   if (!users.length || !users[0].active) {
     log("error", { reason: "unknown_user", userCode, from: senderPhone });
-    return new Response("Unknown user", { status: 200 });
+    return new Response("Unknown user", { status: 200, headers: CORS });
   }
   const userId = users[0].id;
   const userSystemPrompt = users[0].system_prompt ?? null;
@@ -208,7 +216,7 @@ Deno.serve(async (req: Request) => {
     conv = created[0] ?? null;
   }
 
-  if (!conv) return new Response("Failed to create conversation", { status: 500 });
+  if (!conv) return new Response("Failed to create conversation", { status: 500, headers: CORS });
 
   const convId = conv.id;
   const convCodeFinal = conv.code;
@@ -278,7 +286,7 @@ Deno.serve(async (req: Request) => {
   const safeReply = aiReply.slice(0, 160 - suffix.length);
 
   if (dryRun) {
-    return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${safeReply}${suffix}` }), { status: 200, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${safeReply}${suffix}` }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
   // Wyślij SMS
@@ -287,8 +295,8 @@ Deno.serve(async (req: Request) => {
     log("sms_sent", { to: senderPhone, from: recipientDid, chars: safeReply.length + suffix.length });
   } catch (e) {
     log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
-    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
 });
