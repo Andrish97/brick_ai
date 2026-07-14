@@ -189,7 +189,10 @@ Deno.serve(async (req: Request) => {
   await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });
 
   const event = (raw.event ?? "").toLowerCase();
-  if (event !== "sms" && event !== "incoming_sms") return new Response("Ignored", { status: 200, headers: CORS });
+  if (event !== "sms" && event !== "incoming_sms") {
+    log("ignored", { reason: "wrong_event", event: raw.event });
+    return new Response("Ignored", { status: 200, headers: CORS });
+  }
 
   // Zadarma może wysłać dane SMS bezpośrednio lub zagnieżdżone w polu result (JSON string)
   let data: Record<string, string> = raw;
@@ -200,34 +203,34 @@ Deno.serve(async (req: Request) => {
   const senderPhone = data.sms_from ?? data.caller_id ?? "";
   const recipientDid = data.sms_to ?? data.caller_did ?? data.called_did ?? "";
   const smsBody = data.msg ?? data.text ?? "";
-  if (!senderPhone || !smsBody) return new Response("Missing fields", { status: 400, headers: CORS });
+  if (!senderPhone || !smsBody) {
+    log("error", { reason: "missing_fields", senderPhone: !!senderPhone, smsBody: !!smsBody, raw });
+    return new Response("Missing fields", { status: 400, headers: CORS });
+  }
 
   const { userCode, convCode, content } = parseSms(smsBody);
+  log("sms_parsed", { from: senderPhone, to: recipientDid, userCode, convCode, content, smsBody });
 
-  // Identyfikacja użytkownika — najpierw po kodzie, fallback po numerze telefonu
+  // Identyfikacja użytkownika po kodzie (pierwsza linia SMS)
   type UserRow = { id: string; active: boolean; system_prompt: string | null };
-  let matchedUsers = await sbGet(SB, KEY, `users?code=eq.${userCode}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
-  let effectiveContent = content;
-
-  if (!matchedUsers.length) {
-    // Fallback: szukaj po numerze nadawcy, cały SMS to treść
-    matchedUsers = await sbGet(SB, KEY, `users?phone_number=eq.${encodeURIComponent(senderPhone)}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
-    if (matchedUsers.length) {
-      effectiveContent = smsBody.trim();
-    }
-  }
+  const matchedUsers = await sbGet(SB, KEY, `users?code=eq.${userCode}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
 
   if (!matchedUsers.length) {
     log("error", { reason: "unknown_user", userCode, from: senderPhone });
     return new Response("Unknown user", { status: 200, headers: CORS });
   }
 
-  if (!effectiveContent) return new Response("Empty content", { status: 200, headers: CORS });
+  const effectiveContent = content;
+
+  if (!effectiveContent) {
+    log("error", { reason: "empty_content", userCode, from: senderPhone, smsBody });
+    return new Response("Empty content", { status: 200, headers: CORS });
+  }
 
   const userId = matchedUsers[0].id;
   const userSystemPrompt = matchedUsers[0].system_prompt ?? null;
 
-  log("sms_in", { from: senderPhone, userCode, convCode, content: effectiveContent });
+  log("sms_in", { from: senderPhone, to: recipientDid, userCode, convCode, content: effectiveContent });
 
   // Znalezienie lub utworzenie rozmowy
   type Conv = { id: string; code: string; summary: string | null };
