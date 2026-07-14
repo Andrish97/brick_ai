@@ -101,6 +101,7 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
           contents,
           systemInstruction: { parts: [{ text: system }] },
           tools: [{ google_search: {} }],
+          generationConfig: { maxOutputTokens: 60 },
         }),
       }
     );
@@ -228,7 +229,7 @@ Deno.serve(async (req: Request) => {
   let systemPrompt = userSystemPrompt ?? null;
   if (!systemPrompt) {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
-    systemPrompt = settings[0]?.value ?? `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny. Nigdy nie podawaj linków URL ani adresów stron www.`;
+    systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. Odpowiadaj BARDZO krótko — maksymalnie ${MAX_REPLY_CHARS} znaków łącznie. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
 
   // Wywołaj AI
