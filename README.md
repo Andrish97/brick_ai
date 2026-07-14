@@ -103,11 +103,14 @@ git push origin main
 
 ### 7. Zadarma webhook
 
-Napisz do supportu Zadarma lub znajdź w panelu opcję webhooka SMS. Wklej URL:
+Zadarma **nie udostępnia opcji ustawienia webhooka SMS w panelu** (są tylko opcje: aplikacja, email, messenger). Nie można tego też zrobić przez API bez aktywnej Wirtualnej Centrali. Jedyna droga to **kontakt z supportem**.
 
-```
-https://<REF>.supabase.co/functions/v1/zadarma-sms-webhook
-```
+1. Zaloguj się do Zadarma → otwórz czat z supportem (ikona czatu w panelu)
+2. Wyślij wiadomość:
+
+> Chcę ustawić webhook HTTP dla przychodzących SMS na numer +48XXXXXXXXX. URL: `https://<REF>.supabase.co/functions/v1/zadarma-sms-webhook`
+
+Support konfiguruje to po swojej stronie — zazwyczaj w kilka minut.
 
 ### 8. Dodaj pierwszego użytkownika SMS
 
