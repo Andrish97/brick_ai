@@ -307,6 +307,12 @@
       <div class="nav-item" onclick="showPage('logs')" id="nav-logs">
         <span class="nav-icon">📋</span> Logi
       </div>
+      <div class="nav-item" onclick="showPage('prompt')" id="nav-prompt">
+        <span class="nav-icon">🧠</span> Prompt
+      </div>
+      <div class="nav-item" onclick="showPage('settings')" id="nav-settings">
+        <span class="nav-icon">⚙️</span> Ustawienia
+      </div>
     </nav>
     <div class="sidebar-footer">
       <div class="user-email" id="user-email-label"></div>
@@ -413,6 +419,8 @@ function showPage(page) {
     'webhook-test': renderWebhookTest,
     'send-sms':   renderSendSms,
     logs:         renderLogs,
+    prompt:       renderPrompt,
+    settings:     renderSettings,
   };
   (pages[page] || (() => {}))();
 }
@@ -740,8 +748,10 @@ async function resendLast(msgId) {
 // ══════════════════════════════════════════════════════
 //  PAGE: TEST WEBHOOKA
 // ══════════════════════════════════════════════════════
-function renderWebhookTest() {
-  const sbUrl = SB_URL;
+async function renderWebhookTest() {
+  const { data: settingsRows } = await sb.from('settings').select('key,value');
+  const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
+  const callerId = settings['zadarma_caller_id'] || '';
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -750,9 +760,9 @@ function renderWebhookTest() {
     </div>
     <div class="section-card">
       <label>Od numeru (sms_from)</label>
-      <input type="tel" id="wh-from" placeholder="+48123456789" />
+      <input type="tel" id="wh-from" placeholder="48573311779" />
       <label>Do numeru (sms_to / called_did)</label>
-      <input type="tel" id="wh-to" value="48459569689" />
+      <input type="tel" id="wh-to" value="${callerId}" />
       <label>Kod użytkownika (pierwsza linia SMS)</label>
       <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
       <label>Kod rozmowy (opcjonalny)</label>
@@ -900,6 +910,118 @@ async function renderLogs() {
       </div>
     </div>
   `;
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: PROMPT
+// ══════════════════════════════════════════════════════
+async function renderPrompt() {
+  const DEFAULT_PROMPT = `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie 153 znaki. Bądź zwięzły i konkretny.`;
+
+  const [{ data: settingsRows }, { data: users }] = await Promise.all([
+    sb.from('settings').select('key,value'),
+    sb.from('users').select('id,code,phone_number,system_prompt,active').order('code'),
+  ]);
+
+  const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
+  const globalPrompt = settings['system_prompt_default'] || DEFAULT_PROMPT;
+
+  const usersHtml = (users || []).map(u => `
+    <div class="section-card" style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <strong>Użytkownik ${u.code}</strong>
+        <span style="color:var(--muted);font-size:12px">${u.phone_number || ''}</span>
+      </div>
+      <label>Prompt (puste = globalny)</label>
+      <textarea id="prompt-user-${u.id}" style="min-height:80px" placeholder="${globalPrompt}">${u.system_prompt || ''}</textarea>
+      <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="saveUserPrompt('${u.id}')">Zapisz</button>
+    </div>
+  `).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Prompt systemowy</h1>
+      <p>Domyślny prompt dla wszystkich + nadpisanie per użytkownik</p>
+    </div>
+    <div class="section-card">
+      <h3 style="margin-bottom:12px">Globalny prompt domyślny</h3>
+      <label>Prompt (zapisywany w tabeli settings jako <code>system_prompt_default</code>)</label>
+      <textarea id="prompt-global" style="min-height:100px">${globalPrompt}</textarea>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
+        <button class="btn btn-primary" onclick="saveGlobalPrompt()">Zapisz globalny</button>
+        <span style="color:var(--muted);font-size:12px">Limit AI: 153 znaki odpowiedzi</span>
+      </div>
+      <div class="response-box" id="prompt-global-response"></div>
+    </div>
+    <h3 style="margin:20px 0 4px">Per użytkownik</h3>
+    ${usersHtml}
+  `;
+}
+
+async function saveGlobalPrompt() {
+  const value = document.getElementById('prompt-global').value.trim();
+  const { error } = await sb.from('settings').upsert({ key: 'system_prompt_default', value, updated_at: new Date().toISOString() });
+  showResponse('prompt-global-response', !error, error ? error.message : 'Zapisano.');
+}
+
+async function saveUserPrompt(userId) {
+  const value = document.getElementById(`prompt-user-${userId}`).value.trim();
+  const { error } = await sb.from('users').update({ system_prompt: value || null }).eq('id', userId);
+  if (error) alert('Błąd: ' + error.message);
+  else renderPrompt();
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: USTAWIENIA
+// ══════════════════════════════════════════════════════
+async function renderSettings() {
+  const { data: rows } = await sb.from('settings').select('key,value').order('key');
+
+  const rowsHtml = (rows || []).map(r => `
+    <tr>
+      <td><code>${r.key}</code></td>
+      <td><input type="text" value="${r.value}" id="setting-${r.key}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px" /></td>
+      <td><button class="btn btn-primary btn-sm" onclick="saveSetting('${r.key}')">Zapisz</button></td>
+    </tr>
+  `).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Ustawienia</h1>
+      <p>Konfiguracja systemowa przechowywana w bazie danych</p>
+    </div>
+    <div class="section-card">
+      <table class="data-table">
+        <thead><tr><th>Klucz</th><th>Wartość</th><th></th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+    <div class="section-card" style="margin-top:16px">
+      <h3 style="margin-bottom:12px">Dodaj ustawienie</h3>
+      <label>Klucz</label>
+      <input type="text" id="new-setting-key" placeholder="np. system_prompt_default" />
+      <label>Wartość</label>
+      <input type="text" id="new-setting-value" placeholder="wartość" />
+      <button class="btn btn-primary" style="margin-top:12px" onclick="addSetting()">Dodaj</button>
+      <div class="response-box" id="settings-response"></div>
+    </div>
+  `;
+}
+
+async function saveSetting(key) {
+  const value = document.getElementById(`setting-${key}`).value.trim();
+  const { error } = await sb.from('settings').update({ value, updated_at: new Date().toISOString() }).eq('key', key);
+  if (error) alert('Błąd: ' + error.message);
+  else renderSettings();
+}
+
+async function addSetting() {
+  const key   = document.getElementById('new-setting-key').value.trim();
+  const value = document.getElementById('new-setting-value').value.trim();
+  if (!key || !value) { showResponse('settings-response', false, 'Oba pola są wymagane.'); return; }
+  const { error } = await sb.from('settings').upsert({ key, value });
+  if (error) showResponse('settings-response', false, error.message);
+  else renderSettings();
 }
 </script>
 

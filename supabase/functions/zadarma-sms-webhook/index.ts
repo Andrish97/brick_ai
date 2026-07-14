@@ -220,9 +220,11 @@ Deno.serve(async (req: Request) => {
     aiMessages.push({ role: "user", content });
   }
 
-  const systemPrompt = userSystemPrompt
-    ? userSystemPrompt
-    : `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
+  let systemPrompt = userSystemPrompt ?? null;
+  if (!systemPrompt) {
+    const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
+    systemPrompt = settings[0]?.value ?? `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
+  }
 
   // Wywołaj AI
   const rawReply = await askAi(aiMessages, systemPrompt);
@@ -251,8 +253,12 @@ Deno.serve(async (req: Request) => {
   // Aktualizuj aktywność
   await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { last_activity_at: new Date().toISOString() });
 
+  // Zabezpieczenie: upewnij się że aiReply + '\n' + kod nie przekracza 160 znaków
+  const suffix = `\n${convCodeFinal}`;
+  const safeReply = aiReply.slice(0, 160 - suffix.length);
+
   // Wyślij SMS
-  await sendSms(senderPhone, `${aiReply}\n${convCodeFinal}`, recipientDid);
+  await sendSms(senderPhone, `${safeReply}${suffix}`, recipientDid);
 
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 });
