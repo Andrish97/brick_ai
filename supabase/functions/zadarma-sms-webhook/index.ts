@@ -153,7 +153,6 @@ Deno.serve(async (req: Request) => {
   // Identyfikacja użytkownika
   const users = await sbGet(SB, KEY, `users?code=eq.${userCode}&select=id,active`) as Array<{ id: string; active: boolean }>;
   if (!users.length || !users[0].active) {
-    await sendSms(senderPhone, "Nieznany kod użytkownika.", recipientDid);
     return new Response("Unknown user", { status: 200 });
   }
   const userId = users[0].id;
