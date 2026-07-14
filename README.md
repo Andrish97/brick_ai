@@ -44,6 +44,7 @@ Odpowiedź AI (max 153 znaki)
 | `SUPABASE_ACCESS_TOKEN` | [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens) → Generate new token |
 | `SUPABASE_PROJECT_REF` | 20-znakowy ref z URL projektu (np. `abcdefghijklmnopqrst`) |
 | `SUPABASE_DB_URL` | Connection string z poolera, np. `postgresql://postgres.REF:[HASŁO]@aws-0-eu-west-1.pooler.supabase.com:5432/postgres` |
+| `SETUP_SECRET` | Dowolny losowy string (np. 32 znaki) — ten sam musi być też w sekretach Edge Functions |
 
 3. **Settings → Pages → Source: GitHub Actions** — włącza automatyczny deploy panelu admina
 
@@ -72,7 +73,8 @@ supabase secrets set \
   ZADARMA_API_SECRET='...' \
   GEMINI_API_KEY='...' \
   DEEPSEEK_API_KEY='...' \
-  SUPABASE_ANON_KEY='...'
+  SUPABASE_ANON_KEY='...' \
+  SETUP_SECRET='...'
 ```
 
 > Sekrety ustawione w jednym miejscu działają dla wszystkich Edge Functions w projekcie.
@@ -84,6 +86,7 @@ supabase secrets set \
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
 | `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) → API Keys |
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
+| `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
 
 ### 5. Deploy
 
@@ -117,31 +120,15 @@ Upewnij się, że numer ma włączony **odbiór SMS** (opcja przy zakupie lub w 
 
 Instrukcja wideo (PL): [Jak dodać wirtualny numer w Zadarma](https://www.youtube.com/watch?v=lO4mKxmOVuU&list=PLPGEmuoHtxlJzl80Y3zy0VcXSAtDcM_2p&index=4)
 
-#### c) Konfiguracja webhooka przez API
+#### c) Konfiguracja webhooka — automatyczna
 
-Webhook ustawia się przez API Zadarma (sekcja [Informacja o połączeniach](https://zadarma.com/pl/support/api/#intro)).
+**Webhook konfiguruje się automatycznie** przy każdym deployu (GitHub Actions wywołuje Edge Function `setup-zadarma-webhook`).
 
-**Krok 1 — ustaw URL webhooka:**
-```bash
-curl -X PUT https://api.zadarma.com/v1/pbx/webhooks/url/ \
-  -H "Authorization: <KEY>:<SIGNATURE>" \
-  -d "url=https://<REF>.supabase.co/functions/v1/zadarma-sms-webhook"
-```
+Działa przez API Zadarma (sekcja [Informacja o połączeniach](https://zadarma.com/pl/support/api/#intro)):
+- `PUT /v1/pbx/webhooks/url/` — ustawia URL webhooka
+- `POST /v1/pbx/webhooks/hooks/` — włącza powiadomienia SMS
 
-**Krok 2 — włącz powiadomienia SMS:**
-```bash
-curl -X POST https://api.zadarma.com/v1/pbx/webhooks/hooks/ \
-  -H "Authorization: <KEY>:<SIGNATURE>" \
-  -d "sms=true"
-```
-
-**Sprawdź konfigurację:**
-```bash
-curl https://api.zadarma.com/v1/pbx/webhooks/ \
-  -H "Authorization: <KEY>:<SIGNATURE>"
-```
-
-Zamiast ręcznego budowania nagłówka `Authorization`, możesz użyć skryptu `scripts/test-zadarma.ts` (Deno) — zmień metodę i path odpowiednio.
+Wymagane sekrety (patrz kroki 2 i 4): `ZADARMA_API_KEY`, `ZADARMA_API_SECRET`, `SETUP_SECRET`.
 
 > Webhook musi odpowiadać na GET z `?zd_echo=...` zwracając tę samą wartość — Edge Function już to obsługuje.
 

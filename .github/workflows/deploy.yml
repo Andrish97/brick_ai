@@ -37,6 +37,19 @@ jobs:
             --project-ref "$SUPABASE_PROJECT_REF" \
             --no-verify-jwt
 
+          supabase functions deploy setup-zadarma-webhook \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --no-verify-jwt
+
+      - name: Setup Zadarma webhook
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SETUP_SECRET: ${{ secrets.SETUP_SECRET }}
+        run: |
+          curl -sf -X POST \
+            "https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/setup-zadarma-webhook" \
+            -H "Authorization: Bearer ${SETUP_SECRET}"
+
       - name: Run DB migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
