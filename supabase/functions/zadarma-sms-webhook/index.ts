@@ -239,6 +239,7 @@ Deno.serve(async (req: Request) => {
   if (convCode) {
     const found = await sbGet(SB, KEY, `conversations?code=eq.${convCode}&user_id=eq.${userId}&status=eq.active&select=id,code,summary`) as Conv[];
     conv = found[0] ?? null;
+    if (!conv) log("error", { reason: "conv_not_found", convCode, userId });
   }
 
   if (!conv) {
@@ -251,9 +252,13 @@ Deno.serve(async (req: Request) => {
     await sbPost(SB, KEY, "conversations", { user_id: userId, code: newCode, status: "active" });
     const created = await sbGet(SB, KEY, `conversations?code=eq.${newCode}&select=id,code,summary`) as Conv[];
     conv = created[0] ?? null;
+    if (conv) log("conv_new", { convCode: newCode, userId, requestedConvCode: convCode ?? null });
   }
 
-  if (!conv) return new Response("Failed to create conversation", { status: 500, headers: CORS });
+  if (!conv) {
+    log("error", { reason: "conv_create_failed", userId });
+    return new Response("Failed to create conversation", { status: 500, headers: CORS });
+  }
 
   const convId = conv.id;
   const convCodeFinal = conv.code;
@@ -268,8 +273,8 @@ Deno.serve(async (req: Request) => {
   let needsCompaction = false;
 
   if (msgs.length >= COMPACT_THRESHOLD) {
-    // Jedno wywołanie AI: kompaktowanie + odpowiedź
     needsCompaction = true;
+    log("compaction", { convId, convCode: convCodeFinal, msgCount: msgs.length });
     const historyText = msgs.map((m) => `${m.direction === "in" ? "User" : "AI"}: ${m.content}`).join("\n");
     aiMessages.push({
       role: "user",
