@@ -1449,7 +1449,7 @@ function renderSmsContent() {
         ? (sendUserOpts.length
             ? uiSelectHtml('sms-user', sendUserOpts, { value: _smsSendUserId })
             : '<p style="color:var(--muted);font-size:13px">Brak użytkowników z przypisanym numerem telefonu.</p>')
-        : '<input type="tel" id="sms-to" placeholder="48573311779" />'
+        : '<input type="tel" id="sms-to" placeholder="np. 48500000000" />'
       }
       ${isUser && sendUserOpts.length ? `
         <label style="margin-top:12px">Kod rozmowy (opcjonalny)</label>
