@@ -4,6 +4,10 @@ const ZADARMA_API_URL = "https://api.zadarma.com";
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
 const MAX_REPLY_CHARS = 153;  // 160 - '\n' - 6 cyfr kodu rozmowy
 
+function stripUrls(text: string): string {
+  return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
+}
+
 // --- Zadarma auth ---
 
 function md5Hex(input: string): string {
@@ -273,7 +277,7 @@ Deno.serve(async (req: Request) => {
   let systemPrompt = userSystemPrompt ?? null;
   if (!systemPrompt) {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
-    systemPrompt = settings[0]?.value ?? `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
+    systemPrompt = settings[0]?.value ?? `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny. Nigdy nie podawaj linków URL ani adresów stron www.`;
   }
 
   // Konfiguracja kolejki AI
@@ -289,7 +293,7 @@ Deno.serve(async (req: Request) => {
     try {
       const json = JSON.parse(rawReply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
       summary = (json.summary ?? "").slice(0, 300);
-      aiReply = (json.reply ?? rawReply).slice(0, MAX_REPLY_CHARS);
+      aiReply = stripUrls(json.reply ?? rawReply).slice(0, MAX_REPLY_CHARS);
       // Usuń stare wiadomości i zapisz summary PRZED zapisem nowych
       await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
       await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
@@ -297,7 +301,7 @@ Deno.serve(async (req: Request) => {
       aiReply = rawReply.slice(0, MAX_REPLY_CHARS);
     }
   } else {
-    aiReply = rawReply.slice(0, MAX_REPLY_CHARS);
+    aiReply = stripUrls(rawReply).slice(0, MAX_REPLY_CHARS);
   }
 
   // Zapis wiadomości użytkownika i odpowiedzi
