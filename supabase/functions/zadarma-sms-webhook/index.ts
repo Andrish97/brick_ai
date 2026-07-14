@@ -186,27 +186,25 @@ Deno.serve(async (req: Request) => {
   type Msg = { direction: string; content: string };
   const msgs = await sbGet(SB, KEY, `messages?conversation_id=eq.${convId}&order=created_at.asc&select=direction,content`) as Msg[];
 
-  // Kompaktowanie jeśli za dużo wiadomości
-  if (msgs.length >= COMPACT_THRESHOLD) {
-    const historyText = msgs.map((m) => `${m.direction === "in" ? "User" : "AI"}: ${m.content}`).join("\n");
-    const newSummary = await askAi(
-      [{ role: "user", content: `Skompaktuj poniższą rozmowę do max 300 znaków, zachowując kluczowy kontekst:\n\n${historyText}` }],
-      "Jesteś asystentem kompaktującym rozmowy. Odpowiedz tylko podsumowaniem, bez komentarzy.",
-    );
-    summary = newSummary.slice(0, 300);
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
-    await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
-  }
-
   // Kontekst dla AI
   const aiMessages: Array<{ role: string; content: string }> = [];
-  if (summary) aiMessages.push({ role: "user", content: `[Kontekst rozmowy: ${summary}]` });
-  if (msgs.length < COMPACT_THRESHOLD) {
+  let needsCompaction = false;
+
+  if (msgs.length >= COMPACT_THRESHOLD) {
+    // Jedno wywołanie AI: kompaktowanie + odpowiedź
+    needsCompaction = true;
+    const historyText = msgs.map((m) => `${m.direction === "in" ? "User" : "AI"}: ${m.content}`).join("\n");
+    aiMessages.push({
+      role: "user",
+      content: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość: ${content}\n\nOdpowiedz w JSON: {"summary":"max 300 znaków podsumowanie historii","reply":"odpowiedź max ${MAX_REPLY_CHARS} znaków"}`,
+    });
+  } else {
+    if (summary) aiMessages.push({ role: "user", content: `[Kontekst rozmowy: ${summary}]` });
     for (const m of msgs) {
       aiMessages.push({ role: m.direction === "in" ? "user" : "assistant", content: m.content });
     }
+    aiMessages.push({ role: "user", content });
   }
-  aiMessages.push({ role: "user", content });
 
   const systemPrompt = `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
 
@@ -214,7 +212,22 @@ Deno.serve(async (req: Request) => {
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content });
 
   // Wywołaj AI
-  const aiReply = (await askAi(aiMessages, systemPrompt)).slice(0, MAX_REPLY_CHARS);
+  const rawReply = await askAi(aiMessages, systemPrompt);
+  let aiReply: string;
+
+  if (needsCompaction) {
+    try {
+      const json = JSON.parse(rawReply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+      summary = (json.summary ?? "").slice(0, 300);
+      aiReply = (json.reply ?? rawReply).slice(0, MAX_REPLY_CHARS);
+      await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
+      await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}&created_at=lt.${new Date().toISOString()}`);
+    } catch {
+      aiReply = rawReply.slice(0, MAX_REPLY_CHARS);
+    }
+  } else {
+    aiReply = rawReply.slice(0, MAX_REPLY_CHARS);
+  }
 
   // Zapis odpowiedzi
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: aiReply });
