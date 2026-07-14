@@ -14,6 +14,16 @@ function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
 }
 
+function smartTrim(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastPunct = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"), cut.lastIndexOf("\n"));
+  if (lastPunct > max * 0.6) return cut.slice(0, lastPunct + 1).trim();
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace > max * 0.6) return cut.slice(0, lastSpace).trim();
+  return cut.trim();
+}
+
 // --- Zadarma auth ---
 
 function md5Hex(input: string): string {
@@ -270,15 +280,15 @@ Deno.serve(async (req: Request) => {
     try {
       const json = JSON.parse(rawReply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
       summary = (json.summary ?? "").slice(0, 300);
-      aiReply = stripUrls(json.reply ?? rawReply).slice(0, MAX_REPLY_CHARS);
+      aiReply = smartTrim(stripUrls(json.reply ?? rawReply), MAX_REPLY_CHARS);
       // Usuń stare wiadomości i zapisz summary PRZED zapisem nowych
       await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
       await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
     } catch {
-      aiReply = rawReply.slice(0, MAX_REPLY_CHARS);
+      aiReply = smartTrim(rawReply, MAX_REPLY_CHARS);
     }
   } else {
-    aiReply = stripUrls(rawReply).slice(0, MAX_REPLY_CHARS);
+    aiReply = smartTrim(stripUrls(rawReply), MAX_REPLY_CHARS);
   }
 
   // Zapis wiadomości użytkownika i odpowiedzi
