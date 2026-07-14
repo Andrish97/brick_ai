@@ -84,18 +84,25 @@ function generateCode(length: number): string {
 
 async function callGemini(messages: Array<{ role: string; content: string }>, system: string): Promise<string | null> {
   try {
-    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${Deno.env.get("GEMINI_API_KEY")}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "gemini-2.0-flash",
-        max_tokens: 200,
-        messages: [{ role: "system", content: system }, ...messages],
-      }),
-    });
+    const contents = messages.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${Deno.env.get("GEMINI_API_KEY")}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents,
+          systemInstruction: { parts: [{ text: system }] },
+          tools: [{ googleSearch: {} }],
+        }),
+      }
+    );
     if (!res.ok) return null;
     const data = await res.json();
-    return data.choices?.[0]?.message?.content ?? null;
+    return data.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
   } catch {
     return null;
   }
@@ -306,7 +313,12 @@ Deno.serve(async (req: Request) => {
   const safeReply = aiReply.slice(0, 160 - suffix.length);
 
   // Wyślij SMS
-  await sendSms(senderPhone, `${safeReply}${suffix}`, recipientDid);
+  try {
+    await sendSms(senderPhone, `${safeReply}${suffix}`, recipientDid);
+  } catch (e) {
+    await sbPost(SB, KEY, "webhook_logs", { raw_payload: { error: "sendSms failed", message: String(e), to: senderPhone, from: recipientDid } });
+    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { "Content-Type": "application/json" } });
+  }
 
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 });
