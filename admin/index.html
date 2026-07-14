@@ -328,24 +328,18 @@ let selectedConvId = null;
 let selectedConvCode = null;
 
 // ══════════════════════════════════════════════════════
+//  CONFIG
+// ══════════════════════════════════════════════════════
+const SB_URL  = 'https://rjnqpenbjyeiygedjvzk.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqbnFwZW5ianllaXlnZWRqdnprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0NzUwNjcsImV4cCI6MjA5NzA1MTA2N30.EvAtFPW4o7f3HAxJvvPA1bqQjuoZ-3D-3cwnAFQ96UU';
+
+// ══════════════════════════════════════════════════════
 //  INIT
 // ══════════════════════════════════════════════════════
 (function init() {
-  const url  = localStorage.getItem('sb_url');
-  const anon = localStorage.getItem('sb_anon');
-
-  if (!url || !anon) {
-    document.getElementById('setup-overlay').classList.remove('hidden');
-    return;
-  }
-
-  initSupabase(url, anon);
+  sb = supabase.createClient(SB_URL, SB_ANON);
   checkSession();
 })();
-
-function initSupabase(url, anon) {
-  sb = supabase.createClient(url, anon);
-}
 
 async function checkSession() {
   const { data: { session } } = await sb.auth.getSession();
@@ -365,29 +359,6 @@ function onLoggedIn(user) {
   showPage('dashboard');
 }
 
-// ══════════════════════════════════════════════════════
-//  SETUP
-// ══════════════════════════════════════════════════════
-function saveSetup() {
-  const url  = document.getElementById('setup-url').value.trim().replace(/\/$/, '');
-  const anon = document.getElementById('setup-anon').value.trim();
-  if (!url || !anon) {
-    document.getElementById('setup-err').textContent = 'Oba pola są wymagane.';
-    return;
-  }
-  localStorage.setItem('sb_url', url);
-  localStorage.setItem('sb_anon', anon);
-  document.getElementById('setup-overlay').classList.add('hidden');
-  initSupabase(url, anon);
-  document.getElementById('login-overlay').classList.remove('hidden');
-}
-
-function resetSetup() {
-  localStorage.removeItem('sb_url');
-  localStorage.removeItem('sb_anon');
-  document.getElementById('login-overlay').classList.add('hidden');
-  document.getElementById('setup-overlay').classList.remove('hidden');
-}
 
 // ══════════════════════════════════════════════════════
 //  AUTH
@@ -768,7 +739,7 @@ async function resendLast(msgId) {
 //  PAGE: TEST WEBHOOKA
 // ══════════════════════════════════════════════════════
 function renderWebhookTest() {
-  const sbUrl = localStorage.getItem('sb_url') || '';
+  const sbUrl = SB_URL;
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -803,7 +774,7 @@ async function sendWebhookTest() {
   if (convCode) msgBody += '\n' + convCode;
   msgBody += '\n' + body;
 
-  const sbUrl = localStorage.getItem('sb_url') || '';
+  const sbUrl = SB_URL;
   const payload = {
     event: 'incoming_sms',
     sms_from: from,
@@ -862,7 +833,7 @@ async function sendAdminSms() {
     return;
   }
 
-  const sbUrl = localStorage.getItem('sb_url') || '';
+  const sbUrl = SB_URL;
 
   try {
     const res = await fetch(`${sbUrl}/functions/v1/admin-send-sms`, {
