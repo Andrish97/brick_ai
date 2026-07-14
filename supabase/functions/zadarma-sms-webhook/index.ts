@@ -44,6 +44,9 @@ function buildAuth(path: string, params: Record<string, string>): string {
 async function sendSms(to: string, text: string, from: string): Promise<void> {
   const path = "/v1/sms/send/";
   const params = { number: to, message: text, caller_id: from };
+  const apiKey = Deno.env.get("ZADARMA_API_KEY") ?? "";
+  const apiSecret = Deno.env.get("ZADARMA_API_SECRET") ?? "";
+  log("sms_debug", { to, from, msgLen: text.length, keyPresent: !!apiKey, secretPresent: !!apiSecret, keyPrefix: apiKey.slice(0, 4) });
   const res = await fetch(`${ZADARMA_API_URL}${path}`, {
     method: "POST",
     headers: { Authorization: buildAuth(path, params), "Content-Type": "application/x-www-form-urlencoded" },
