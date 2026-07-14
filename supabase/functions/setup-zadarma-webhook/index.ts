@@ -18,10 +18,12 @@ function buildAuth(path: string, params: Record<string, string>): string {
 }
 
 async function zadarmaReq(method: string, path: string, params: Record<string, string>): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(`${ZADARMA_API_URL}${path}`, {
+  const isGet = method === "GET";
+  const qs = isGet && Object.keys(params).length ? "?" + new URLSearchParams(params).toString() : "";
+  const res = await fetch(`${ZADARMA_API_URL}${path}${qs}`, {
     method,
-    headers: { Authorization: buildAuth(path, params), "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(params).toString(),
+    headers: { Authorization: buildAuth(path, params), ...(isGet ? {} : { "Content-Type": "application/x-www-form-urlencoded" }) },
+    ...(isGet ? {} : { body: new URLSearchParams(params).toString() }),
   });
   return { status: res.status, body: await res.json() };
 }
@@ -35,10 +37,11 @@ Deno.serve(async (req: Request) => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const webhookUrl = `${supabaseUrl}/functions/v1/zadarma-sms-webhook`;
 
+  const getResult = await zadarmaReq("GET", "/v1/pbx/webhooks/", {});
   const urlResult = await zadarmaReq("POST", "/v1/pbx/webhooks/url/", { url: webhookUrl });
   const hooksResult = await zadarmaReq("POST", "/v1/pbx/webhooks/hooks/", { sms: "true" });
 
-  return new Response(JSON.stringify({ webhookUrl, urlResult, hooksResult }, null, 2), {
+  return new Response(JSON.stringify({ webhookUrl, getResult, urlResult, hooksResult }, null, 2), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
