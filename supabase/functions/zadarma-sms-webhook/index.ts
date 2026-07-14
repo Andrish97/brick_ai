@@ -264,6 +264,17 @@ Deno.serve(async (req: Request) => {
   const convCodeFinal = conv.code;
   let summary = conv.summary ?? null;
 
+  // Zamknięcie rozmowy słowem kluczowym
+  const CLOSE_KEYWORDS = ["koniec", "stop", "zamknij", "end"];
+  if (CLOSE_KEYWORDS.includes(effectiveContent.trim().toLowerCase())) {
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { status: "closed" });
+    log("conv_closed", { convId, convCode: convCodeFinal, userId, trigger: effectiveContent.trim() });
+    if (!dryRun) {
+      await sendSms(senderPhone, "Rozmowa zakończona.", recipientDid).catch(() => {});
+    }
+    return new Response(JSON.stringify({ ok: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+
   // Historia wiadomości
   type Msg = { direction: string; content: string };
   const msgs = await sbGet(SB, KEY, `messages?conversation_id=eq.${convId}&order=created_at.asc&select=direction,content`) as Msg[];

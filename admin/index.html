@@ -1556,6 +1556,7 @@ const LOG_TYPE_STYLE = {
   error:        { label: 'Błąd',         cls: 'badge-red'    },
   ignored:      { label: 'Zignorowany',  cls: 'badge-yellow' },
   conv_new:     { label: 'Nowa rozm.',   cls: 'badge-green'  },
+  conv_closed:  { label: 'Rozm. zamkn.', cls: 'badge-yellow' },
   compaction:   { label: 'Kompakt.',     cls: 'badge-yellow' },
   raw_webhook:  { label: 'Raw webhook',  cls: 'badge-yellow' },
 };
@@ -1672,6 +1673,7 @@ function renderLogsContent() {
               error:        'błąd logiczny — nieznany użytkownik, brak pól, pusta treść',
               ignored:      'webhook zignorowany — nieobsługiwany typ zdarzenia (np. połączenie głosowe)',
               conv_new:     'nowa rozmowa — kod rozmowy, id użytkownika, czy był podany poprzedni kod',
+              conv_closed:  'rozmowa zamknięta słowem kluczowym (KONIEC / STOP / ZAMKNIJ / END)',
               compaction:   'skompaktowanie historii — liczba wiadomości przed usunięciem',
               raw_webhook:  'surowy payload z Zadarmy przed jakimkolwiek przetworzeniem',
             }[key] || '';
