@@ -645,11 +645,12 @@ async function renderConversations() {
           ${c.status === 'active' ? 'aktywna' : 'zamknięta'}
         </span>
       </td>
-      <td onclick="event.stopPropagation()">
+      <td onclick="event.stopPropagation()" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         ${c.status === 'active'
           ? `<button class="btn btn-ghost btn-sm" onclick="closeConv('${c.id}')">Zamknij</button>`
-          : '—'
+          : ''
         }
+        <button class="btn btn-danger btn-sm" onclick="deleteConv('${c.id}')">Usuń</button>
       </td>
     </tr>
   `).join('');
@@ -660,6 +661,9 @@ async function renderConversations() {
       <p>Kliknij wiersz, aby zobaczyć wiadomości</p>
     </div>
     <div class="section-card">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+        <button class="btn btn-danger btn-sm" onclick="deleteAllConvs()">🗑 Usuń wszystkie rozmowy</button>
+      </div>
       ${error ? `<p style="color:var(--danger)">${error.message}</p>` : ''}
       <div class="table-wrap">
         <table>
@@ -681,6 +685,20 @@ async function renderConversations() {
 
 async function closeConv(id) {
   await sb.from('conversations').update({ status: 'closed' }).eq('id', id);
+  renderConversations();
+}
+
+async function deleteConv(id) {
+  if (!confirm('Usunąć rozmowę i wszystkie jej wiadomości?')) return;
+  await sb.from('messages').delete().eq('conversation_id', id);
+  await sb.from('conversations').delete().eq('id', id);
+  renderConversations();
+}
+
+async function deleteAllConvs() {
+  if (!confirm('Usunąć WSZYSTKIE rozmowy i wiadomości? Tej operacji nie można cofnąć.')) return;
+  await sb.from('messages').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  await sb.from('conversations').delete().neq('id', '00000000-0000-0000-0000-000000000000');
   renderConversations();
 }
 
@@ -927,7 +945,10 @@ async function renderLogs() {
       <p>Ostatnie 100 zdarzeń + 20 raw webhooków — kliknij wiersz, aby zobaczyć szczegóły</p>
     </div>
     <div class="section-card">
-      <h2 style="font-size:14px;margin-bottom:12px">Zdarzenia systemowe</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="font-size:14px;margin:0">Zdarzenia systemowe</h2>
+        <button class="btn btn-danger btn-sm" onclick="clearLogs()">🗑 Wyczyść logi</button>
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Czas</th><th>Typ</th><th>Dane</th></tr></thead>
@@ -936,7 +957,10 @@ async function renderLogs() {
       </div>
     </div>
     <div class="section-card" style="margin-top:16px">
-      <h2 style="font-size:14px;margin-bottom:12px">Raw webhooki (Zadarma)</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="font-size:14px;margin:0">Raw webhooki (Zadarma)</h2>
+        <button class="btn btn-danger btn-sm" onclick="clearWebhookLogs()">🗑 Wyczyść webhooki</button>
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Czas</th><th>Typ</th><th>Payload</th></tr></thead>
@@ -945,6 +969,18 @@ async function renderLogs() {
       </div>
     </div>
   `;
+}
+
+async function clearLogs() {
+  if (!confirm('Usunąć wszystkie logi systemowe?')) return;
+  await sb.from('logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  renderLogs();
+}
+
+async function clearWebhookLogs() {
+  if (!confirm('Usunąć wszystkie raw webhooki?')) return;
+  await sb.from('webhook_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  renderLogs();
 }
 
 // ══════════════════════════════════════════════════════
