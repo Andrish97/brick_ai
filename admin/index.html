@@ -384,11 +384,8 @@
       <div class="nav-item" onclick="showPage('phone-numbers')" id="nav-phone-numbers">
         <span class="nav-icon">📱</span> Numery
       </div>
-      <div class="nav-item" onclick="showPage('send-sms')" id="nav-send-sms">
-        <span class="nav-icon">📤</span> Wyślij SMS
-      </div>
-      <div class="nav-item" onclick="showPage('receive-test')" id="nav-receive-test">
-        <span class="nav-icon">🧪</span> Test odbioru
+      <div class="nav-item" onclick="showPage('sms-tools')" id="nav-sms-tools">
+        <span class="nav-icon">📤</span> Wysyłka SMS
       </div>
       <div class="nav-item" onclick="showPage('logs')" id="nav-logs">
         <span class="nav-icon">📋</span> Logi
@@ -512,8 +509,9 @@ function showPage(page) {
     conversations:   renderConversations,
     messages:        renderMessages,
     'phone-numbers': renderPhoneNumbers,
-    'receive-test':  renderReceiveTest,
-    'send-sms':      renderSendSms,
+    'receive-test':  renderSmsTools,
+    'send-sms':      renderSmsTools,
+    'sms-tools':     renderSmsTools,
     logs:            renderLogs,
     prompt:          renderPrompt,
     settings:        renderSettings,
@@ -1417,38 +1415,67 @@ async function deletePhoneNumber(id) {
 }
 
 // ══════════════════════════════════════════════════════
-//  PAGE: TEST ODBIORU (formerly webhook-test)
+//  PAGE: WYSYŁKA SMS (Wyślij + Test odbioru)
 // ══════════════════════════════════════════════════════
-async function renderReceiveTest() {
+let smsToolsMode = 'send'; // 'send' | 'test'
+
+async function renderSmsTools(mode) {
+  if (mode === 'send' || mode === 'test') smsToolsMode = mode;
   await loadPhoneNumbers();
-  const toOpts = phoneNumbers.map((pn, i) => ({ value: pn.number, label: (i === 0 ? '★ ' : '') + pn.number + (pn.description ? ' — ' + pn.description : '') + (i === 0 ? ' (domyślny)' : '') }));
-  const toField = uiSelectHtml('wh-to', toOpts, { value: phoneNumbers[0]?.number || '', placeholder: 'Brak numerów — dodaj w Numery' });
+
+  const pnOpts = phoneNumbers.map((pn, i) => ({
+    value: pn.number,
+    label: (i === 0 ? '★ ' : '') + pn.number + (pn.description ? ' — ' + pn.description : ''),
+  }));
+  const defaultNum = phoneNumbers[0]?.number || '';
+  const noNumPlaceholder = 'Brak numerów — dodaj w sekcji Numery';
+
+  const isSend = smsToolsMode === 'send';
+
+  const sendHtml = `
+    <label>Numer odbiorcy</label>
+    <input type="tel" id="sms-to" placeholder="48573311779" />
+    <label>Numer nadawcy (Zadarma)</label>
+    ${uiSelectHtml('sms-from', pnOpts, { value: defaultNum, placeholder: noNumPlaceholder })}
+    <label>Treść wiadomości</label>
+    <textarea id="sms-body" placeholder="Wpisz treść wiadomości…"></textarea>
+    <button class="btn btn-primary" style="margin-top:14px" onclick="sendAdminSms()">Wyślij SMS</button>
+    <div class="response-box" id="sms-response"></div>
+  `;
+
+  const testHtml = `
+    <label>Numer nadawcy (telefon użytkownika)</label>
+    <input type="tel" id="wh-from" placeholder="48573311779" />
+    <label>Numer odbiorcy (Zadarma)</label>
+    ${uiSelectHtml('wh-to', pnOpts, { value: defaultNum, placeholder: noNumPlaceholder })}
+    <label>Kod użytkownika</label>
+    <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
+    <label>Kod rozmowy (opcjonalny)</label>
+    <input type="text" id="wh-convcode" maxlength="6" placeholder="123456" />
+    <label>Treść wiadomości</label>
+    <textarea id="wh-body" placeholder="Wpisz treść wiadomości…"></textarea>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:14px">
+      <label class="toggle" style="margin:0">
+        <input type="checkbox" id="wh-dryrun" checked />
+        <span class="toggle-slider"></span>
+      </label>
+      <span style="font-size:13px">Dry run <span style="color:var(--muted);font-size:12px">(test AI bez wysyłki SMS)</span></span>
+    </div>
+    <button class="btn btn-primary" style="margin-top:14px" onclick="sendWebhookTest()">Wyślij test</button>
+    <div class="response-box" id="wh-response"></div>
+  `;
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
-      <h1>Test odbioru SMS</h1>
-      <p>Symuluje wysyłkę SMS od użytkownika do systemu</p>
+      <h1>Wysyłka SMS</h1>
+      <p>Wyślij wiadomość lub zasymuluj przychodzący SMS od użytkownika</p>
+    </div>
+    <div class="prompt-mode-bar" style="margin-bottom:20px">
+      <button class="prompt-mode-btn ${isSend ? 'active' : ''}" onclick="renderSmsTools('send')">📤 Wyślij SMS</button>
+      <button class="prompt-mode-btn ${!isSend ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
     </div>
     <div class="section-card">
-      <label>Numer nadawcy — telefon użytkownika (skąd przyszedł SMS)</label>
-      <input type="tel" id="wh-from" placeholder="np. 48573311779" />
-      <label>Numer odbiorcy — Twój wirtualny numer Zadarma</label>
-      ${toField}
-      <label>Kod użytkownika (pierwsza linia SMS)</label>
-      <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
-      <label>Kod rozmowy (opcjonalny — puste = nowa rozmowa)</label>
-      <input type="text" id="wh-convcode" maxlength="6" placeholder="123456" />
-      <label>Treść wiadomości</label>
-      <textarea id="wh-body" placeholder="Twoja treść..."></textarea>
-      <div style="display:flex;align-items:center;gap:10px;margin-top:14px">
-        <label class="toggle" style="margin:0">
-          <input type="checkbox" id="wh-dryrun" checked />
-          <span class="toggle-slider"></span>
-        </label>
-        <span style="font-size:13px">Dry run <span style="color:var(--muted);font-size:12px">(tylko test AI, bez wysyłki SMS)</span></span>
-      </div>
-      <button class="btn btn-primary" style="margin-top:14px" onclick="sendWebhookTest()">Wyślij test</button>
-      <div class="response-box" id="wh-response"></div>
+      ${isSend ? sendHtml : testHtml}
     </div>
   `;
   initAllUiSelects();
@@ -1466,85 +1493,36 @@ async function sendWebhookTest() {
   if (convCode) msgBody += '\n' + convCode;
   msgBody += '\n' + body;
 
-  const payload = {
-    event: 'incoming_sms',
-    sms_from: from,
-    sms_to: to,
-    msg: msgBody,
-  };
-
   const url = `${SB_URL}/functions/v1/zadarma-sms-webhook${dryRun ? '?dry_run=1' : ''}`;
-
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ event: 'incoming_sms', sms_from: from, sms_to: to, msg: msgBody }),
     });
-    const text = await res.text();
-    showResponse('wh-response', res.ok, `HTTP ${res.status}\n${text}`);
+    showResponse('wh-response', res.ok, `HTTP ${res.status}\n${await res.text()}`);
   } catch (e) {
     showResponse('wh-response', false, String(e));
   }
 }
 
-// ══════════════════════════════════════════════════════
-//  PAGE: WYŚLIJ SMS
-// ══════════════════════════════════════════════════════
-async function renderSendSms() {
-  await loadPhoneNumbers();
-  const fromOpts = phoneNumbers.map((pn, i) => ({ value: pn.number, label: (i === 0 ? '★ ' : '') + pn.number + (pn.description ? ' — ' + pn.description : '') }));
-  const fromField = uiSelectHtml('sms-from', fromOpts, { value: phoneNumbers[0]?.number || '', placeholder: 'Brak numerów — dodaj w Numery' });
-
-  document.getElementById('content').innerHTML = `
-    <div class="page-header">
-      <h1>Wyślij SMS</h1>
-      <p>Wysyła SMS przez Zadarma API (wymaga zalogowania)</p>
-    </div>
-    <div class="section-card">
-      <label>Numer odbiorcy — do kogo wysłać SMS</label>
-      <input type="tel" id="sms-to" placeholder="+48123456789" />
-      <label>Numer nadawcy — Twój wirtualny numer Zadarma</label>
-      ${fromField}
-      <label>Treść wiadomości</label>
-      <textarea id="sms-body" placeholder="Treść SMS..."></textarea>
-      <button class="btn btn-primary" style="margin-top:14px" onclick="sendAdminSms()">Wyślij SMS</button>
-      <div class="response-box" id="sms-response"></div>
-    </div>
-  `;
-  initAllUiSelects();
-}
-
 async function sendAdminSms() {
-  const to      = document.getElementById('sms-to').value.trim();
-  const from    = getUiSelect('sms-from');
-  const body    = document.getElementById('sms-body').value.trim();
+  const to   = document.getElementById('sms-to').value.trim();
+  const from = getUiSelect('sms-from') || phoneNumbers[0]?.number || '';
+  const body = document.getElementById('sms-body').value.trim();
 
-  if (!to || !body) {
-    showResponse('sms-response', false, 'Numer odbiorcy i treść są wymagane.');
-    return;
-  }
+  if (!to || !body) { showResponse('sms-response', false, 'Numer odbiorcy i treść są wymagane.'); return; }
 
   const session = await getSession();
-  if (!session) {
-    showResponse('sms-response', false, 'Brak sesji — zaloguj się ponownie.');
-    return;
-  }
-
-  // Use first phone number as default if none selected
-  const callerIdFinal = from || (phoneNumbers[0]?.number || '');
+  if (!session) { showResponse('sms-response', false, 'Brak sesji — zaloguj się ponownie.'); return; }
 
   try {
     const res = await fetch(`${SB_URL}/functions/v1/admin-send-sms`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ phone: to, message: body, caller_id: callerIdFinal }),
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+      body: JSON.stringify({ phone: to, message: body, caller_id: from }),
     });
-    const text = await res.text();
-    showResponse('sms-response', res.ok, `HTTP ${res.status}\n${text}`);
+    showResponse('sms-response', res.ok, `HTTP ${res.status}\n${await res.text()}`);
   } catch (e) {
     showResponse('sms-response', false, String(e));
   }
