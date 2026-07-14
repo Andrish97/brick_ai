@@ -31,10 +31,8 @@ function md5Hex(input: string): string {
 }
 
 function buildAuth(path: string, params: Record<string, string>): string {
-  const paramStr = Object.keys(params)
-    .sort()
-    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k]).replace(/%20/g, "+")}`)
-    .join("&");
+  const sorted = Object.keys(params).sort();
+  const paramStr = sorted.map((k) => `${k}=${new URLSearchParams({ v: params[k] }).toString().slice(2)}`).join("&");
   const hex = createHmac("sha1", Deno.env.get("ZADARMA_API_SECRET")!)
     .update(path + paramStr + md5Hex(paramStr))
     .digest("hex");
