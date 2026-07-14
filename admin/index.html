@@ -7,7 +7,6 @@
   <link rel="icon" type="image/x-icon" href="favicon.ico" />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -315,10 +314,13 @@
     .ui-select.is-disabled .ui-select-btn { opacity: 0.5; cursor: not-allowed; }
 
     /* ── CHART GRID ── */
-    .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 28px; }
-    @media (max-width: 700px) { .chart-grid { grid-template-columns: 1fr; } }
-    .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
-    .chart-card h3 { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+    .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 28px; }
+    @media (max-width: 700px) { .dash-grid { grid-template-columns: 1fr; } }
+    .dash-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+    .dash-card h3 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
+    .dash-row { display: flex; align-items: baseline; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .dash-row:last-child { border-bottom: none; }
+    .dash-time { font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
 
     /* ── ADD ROW ── */
     .btn-add-row {
@@ -853,25 +855,53 @@ async function fetchZadarmaBalance() {
 }
 
 async function renderDashboard() {
-  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-
   const [
     { count: uCount },
-    { count: cCount },
+    { count: cActiveCount },
+    { count: cAllCount },
     { data: settingsRows },
-    { data: recentMsgs },
+    { data: recentLogs },
+    { data: recentConvs },
   ] = await Promise.all([
-    sb.from('users').select('id', { count: 'exact', head: true }),
+    sb.from('users').select('id', { count: 'exact', head: true }).eq('active', true),
+    sb.from('conversations').select('id', { count: 'exact', head: true }).eq('status', 'active'),
     sb.from('conversations').select('id', { count: 'exact', head: true }),
     sb.from('settings').select('key,value'),
-    sb.from('messages').select('created_at,direction').gte('created_at', cutoff),
+    sb.from('logs').select('type,data,created_at').order('created_at', { ascending: false }).limit(10),
+    sb.from('conversations')
+      .select('code,status,last_activity_at,users(code)')
+      .eq('status', 'active')
+      .order('last_activity_at', { ascending: false })
+      .limit(8),
   ]);
 
   const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
   const smsCount = parseInt(settings['sms_count'] || '0', 10);
   const smsPrice = parseFloat(settings['sms_price'] || '0.18');
   const cost = (smsCount * smsPrice).toFixed(2);
-  const msgs = recentMsgs || [];
+
+  const logRows = (recentLogs || []).map(l => {
+    const style = LOG_TYPE_STYLE[l.type] || { label: l.type, cls: 'badge-yellow' };
+    const preview = l.type === 'sms_in'
+      ? escHtml((l.data?.content || '').slice(0, 60))
+      : l.type === 'ai_response'
+        ? escHtml((l.data?.reply || '').slice(0, 60))
+        : escHtml(JSON.stringify(l.data || {}).slice(0, 60));
+    return `<div class="dash-row">
+      <span class="badge ${style.cls}">${escHtml(style.label)}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)">${preview}</span>
+      <span class="dash-time">${fmtDate(l.created_at)}</span>
+    </div>`;
+  }).join('') || '<div style="color:var(--muted);font-size:13px;padding:8px 0">Brak logów</div>';
+
+  const convRows = (recentConvs || []).map(c => {
+    const userCode = c.users?.code ?? '—';
+    return `<div class="dash-row" style="cursor:pointer" onclick="showPage('conversations')">
+      <code style="font-size:12px;color:var(--accent2)">${escHtml(c.code)}</code>
+      <span style="font-size:12px;color:var(--muted)">użytkownik <b style="color:var(--text)">${escHtml(userCode)}</b></span>
+      <span class="dash-time">${fmtDate(c.last_activity_at)}</span>
+    </div>`;
+  }).join('') || '<div style="color:var(--muted);font-size:13px;padding:8px 0">Brak aktywnych rozmów</div>';
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -880,12 +910,12 @@ async function renderDashboard() {
     </div>
     <div class="stat-grid">
       <div class="card">
-        <h3>Użytkownicy</h3>
+        <h3>Aktywni użytkownicy</h3>
         <div class="big-num">${uCount ?? 0}</div>
       </div>
       <div class="card">
-        <h3>Rozmowy</h3>
-        <div class="big-num">${cCount ?? 0}</div>
+        <h3>Aktywne rozmowy</h3>
+        <div class="big-num">${cActiveCount ?? 0} <span style="font-size:14px;color:var(--muted)">/ ${cAllCount ?? 0}</span></div>
       </div>
       <div class="card">
         <h3>SMS wysłanych</h3>
@@ -900,79 +930,19 @@ async function renderDashboard() {
         <div id="zadarma-balance-val" class="big-num"><span class="spinner"></span></div>
       </div>
     </div>
-    <div class="chart-grid">
-      <div class="chart-card">
-        <h3>Aktywność SMS (ostatnie 14 dni)</h3>
-        <canvas id="chart-activity" height="200"></canvas>
+    <div class="dash-grid">
+      <div class="dash-card">
+        <h3>Ostatnia aktywność</h3>
+        ${logRows}
       </div>
-      <div class="chart-card">
-        <h3>Podział wiadomości</h3>
-        <canvas id="chart-split" height="200"></canvas>
+      <div class="dash-card">
+        <h3>Aktywne rozmowy</h3>
+        ${convRows}
       </div>
     </div>
   `;
 
   loadZadarmaBalance();
-
-  // Build date labels for last 14 days
-  const days = [];
-  const inCounts = [];
-  const outCounts = [];
-  for (let i = 13; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    days.push(key.slice(5)); // MM-DD
-    const dayMsgs = msgs.filter(m => m.created_at.slice(0, 10) === key);
-    inCounts.push(dayMsgs.filter(m => m.direction === 'in').length);
-    outCounts.push(dayMsgs.filter(m => m.direction === 'out').length);
-  }
-
-  // Destroy existing charts if any
-  if (window._chartActivity) window._chartActivity.destroy();
-  if (window._chartSplit) window._chartSplit.destroy();
-
-  const actCtx = document.getElementById('chart-activity');
-  if (actCtx) {
-    window._chartActivity = new Chart(actCtx, {
-      type: 'bar',
-      data: {
-        labels: days,
-        datasets: [
-          { label: 'Przychodzące', data: inCounts, backgroundColor: 'rgba(124,58,237,0.7)', borderRadius: 4 },
-          { label: 'Wychodzące', data: outCounts, backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: true,
-        plugins: { legend: { labels: { color: '#8892a4', font: { size: 11 } } } },
-        scales: {
-          x: { ticks: { color: '#8892a4', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
-          y: { ticks: { color: '#8892a4', font: { size: 10 }, stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
-        }
-      }
-    });
-  }
-
-  const inTotal = msgs.filter(m => m.direction === 'in').length;
-  const outTotal = msgs.filter(m => m.direction === 'out').length;
-  const splitCtx = document.getElementById('chart-split');
-  if (splitCtx && (inTotal + outTotal) > 0) {
-    window._chartSplit = new Chart(splitCtx, {
-      type: 'doughnut',
-      data: {
-        labels: ['Przychodzące', 'Wychodzące'],
-        datasets: [{ data: [inTotal, outTotal], backgroundColor: ['rgba(124,58,237,0.8)', 'rgba(34,197,94,0.8)'], borderWidth: 0 }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: true,
-        plugins: { legend: { labels: { color: '#8892a4', font: { size: 12 } } } },
-        cutout: '65%'
-      }
-    });
-  } else if (splitCtx) {
-    document.getElementById('chart-split').parentElement.innerHTML += '<p style="color:var(--muted);text-align:center;font-size:13px">Brak danych</p>';
-  }
 }
 
 async function saveSmsCount() {
