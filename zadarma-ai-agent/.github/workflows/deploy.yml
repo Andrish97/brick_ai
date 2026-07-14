@@ -5,14 +5,17 @@ on:
     branches:
       - main
     paths:
-      - "supabase/functions/**"
-      - "supabase/migrations/**"
-      - ".github/workflows/deploy.yml"
+      - "zadarma-ai-agent/supabase/functions/**"
+      - "zadarma-ai-agent/supabase/migrations/**"
+      - "zadarma-ai-agent/.github/workflows/deploy.yml"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: zadarma-ai-agent
 
     steps:
       - name: Checkout
