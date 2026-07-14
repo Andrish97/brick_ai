@@ -120,16 +120,16 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
     );
     const resText = await res.text();
     if (!res.ok) {
-      console.error("Gemini error:", res.status, resText);
+      log("gemini_error", { status: res.status, body: resText.slice(0, 500) });
       return null;
     }
     const data = JSON.parse(resText);
-    console.log("Gemini raw:", JSON.stringify(data).slice(0, 500));
     const parts = data.candidates?.[0]?.content?.parts ?? [];
+    log("gemini_raw", { candidatesCount: data.candidates?.length, partsCount: parts.length, sample: JSON.stringify(parts).slice(0, 300) });
     const text = parts.filter((p: { thought?: boolean }) => !p.thought).map((p: { text?: string }) => p.text ?? "").join("").trim();
     return text || null;
   } catch (e) {
-    console.error("Gemini exception:", e);
+    log("gemini_error", { exception: String(e) });
     return null;
   }
 }
