@@ -110,7 +110,7 @@ function generateCode(length: number): string {
 
 // --- AI ---
 
-async function callGemini(messages: Array<{ role: string; content: string }>, system: string): Promise<string | null> {
+async function callGemini(messages: Array<{ role: string; content: string }>, system: string, maxOutputTokens = 100): Promise<string | null> {
   try {
     const contents = messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
@@ -125,7 +125,7 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
           contents,
           systemInstruction: { parts: [{ text: system }] },
           tools: [{ google_search: {} }],
-          generationConfig: { maxOutputTokens: 100, thinkingConfig: { thinkingBudget: 0 } },
+          generationConfig: { maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
         }),
       }
     );
@@ -153,8 +153,8 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
   }
 }
 
-async function askAi(messages: Array<{ role: string; content: string }>, system: string): Promise<string> {
-  return (await callGemini(messages, system)) ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
+async function askAi(messages: Array<{ role: string; content: string }>, system: string, maxOutputTokens = 100): Promise<string> {
+  return (await callGemini(messages, system, maxOutputTokens)) ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
 }
 
 // --- Handler ---
@@ -287,7 +287,7 @@ Deno.serve(async (req: Request) => {
     const historyText = msgs.map((m) => `${m.direction === "in" ? "User" : "AI"}: ${m.content}`).join("\n");
     aiMessages.push({
       role: "user",
-      content: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość: ${effectiveContent}\n\nOdpowiedz w JSON: {"summary":"max 300 znaków podsumowanie historii","reply":"odpowiedź max ${MAX_REPLY_CHARS} znaków"}`,
+      content: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość użytkownika: ${effectiveContent}\n\nZadanie: Odpowiedz w JSON z dwoma polami:\n1. "summary": szczegółowe podsumowanie całej historii rozmowy — bez ograniczeń długości, zachowaj wszystkie istotne fakty, kontekst i ustalenia\n2. "reply": odpowiedź do użytkownika, maksymalnie ${MAX_REPLY_CHARS} znaków\n\nFormat: {"summary":"...","reply":"..."}`,
     });
   } else {
     if (summary) aiMessages.push({ role: "user", content: `[Kontekst rozmowy: ${summary}]` });
@@ -304,7 +304,7 @@ Deno.serve(async (req: Request) => {
   }
 
   // Wywołaj AI
-  const rawReply = await askAi(aiMessages, systemPrompt);
+  const rawReply = await askAi(aiMessages, systemPrompt, needsCompaction ? 800 : 100);
   let aiReply: string;
 
   if (needsCompaction) {
