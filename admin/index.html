@@ -320,18 +320,33 @@
     .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
     .chart-card h3 { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
 
-    /* ── ADD TILE ── */
-    .add-tile {
-      background: var(--card);
-      border: 2px dashed var(--border);
-      border-radius: 10px;
-      padding: 20px;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 8px; cursor: pointer; transition: all .15s; min-height: 80px;
-      color: var(--muted); font-size: 13px;
+    /* ── ADD ROW ── */
+    .btn-add-row {
+      width: 100%; background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 13px; padding: 11px 12px;
+      text-align: center; transition: all .15s; display: block;
     }
-    .add-tile:hover { border-color: var(--accent); color: var(--accent2); background: rgba(124,58,237,.05); }
-    .add-tile-icon { font-size: 24px; }
+    .btn-add-row:hover { color: var(--accent2); background: rgba(124,58,237,.06); }
+    tr.add-row td { border-bottom: none; padding: 0; }
+
+    /* ── MODAL ACCENTS ── */
+    .uni-modal::before {
+      content: ''; display: block; height: 3px;
+      background: linear-gradient(90deg, var(--accent), #a78bfa);
+      border-radius: 12px 12px 0 0;
+    }
+    .uni-foot {
+      border-top: 1px solid var(--border);
+      background: rgba(255,255,255,.02);
+      border-radius: 0 0 12px 12px;
+    }
+    .uni-section {
+      font-size: 10px; font-weight: 600; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--accent2);
+      margin: 16px 0 4px; padding-bottom: 6px;
+      border-bottom: 1px solid rgba(124,58,237,.2);
+    }
+    .uni-section:first-child { margin-top: 0; }
   </style>
 </head>
 <body>
@@ -1018,12 +1033,7 @@ async function renderUsers() {
     <div class="page-header">
       <h1>Użytkownicy</h1>
     </div>
-    <div class="add-tile" onclick="openUserModal()" style="margin-bottom:20px">
-      <span class="add-tile-icon">+</span>
-      Dodaj użytkownika
-    </div>
     <div class="section-card">
-      <h2>Lista użytkowników</h2>
       ${error ? `<p style="color:var(--danger)">${error.message}</p>` : ''}
       <div class="table-wrap">
         <table>
@@ -1034,10 +1044,13 @@ async function renderUsers() {
               <th>Aktywny</th>
               <th>Numer wysyłkowy</th>
               <th>System Prompt</th>
-              <th>Akcja</th>
+              <th></th>
             </tr>
           </thead>
-          <tbody>${rows || '<tr><td colspan="6" style="color:var(--muted);text-align:center">Brak użytkowników</td></tr>'}</tbody>
+          <tbody>
+            ${rows}
+            <tr class="add-row"><td colspan="6"><button class="btn-add-row" onclick="openUserModal()">+ Dodaj użytkownika</button></td></tr>
+          </tbody>
         </table>
       </div>
     </div>
@@ -1066,7 +1079,8 @@ async function openUserModal(userId = null) {
   const phoneOptsHtml = phoneOpts.map(o => `<option value="${escHtml(o.value)}" ${(user?.phone_number_id || '') === o.value ? 'selected' : ''}>${escHtml(o.label)}</option>`).join('');
 
   body.innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+    <div class="uni-section">Identyfikacja</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:4px">
       <div>
         <label>Kod (4 cyfry)</label>
         <input type="text" id="um-code" maxlength="4" placeholder="1234" value="${escHtml(user?.code || '')}" />
@@ -1076,10 +1090,10 @@ async function openUserModal(userId = null) {
         <input type="tel" id="um-phone" placeholder="+48123456789" value="${escHtml(user?.phone_number || '')}" />
       </div>
     </div>
-    <label>Numer wysyłkowy Zadarma</label>
+    <div class="uni-section">Numer wysyłkowy</div>
     <select id="um-phone-number-id">${phoneOptsHtml}</select>
-    <label>System Prompt (opcjonalny)</label>
-    <textarea id="um-prompt" style="min-height:60px" placeholder="Jesteś pomocnym asystentem...">${escHtml(user?.system_prompt || '')}</textarea>
+    <div class="uni-section">Prompt</div>
+    <textarea id="um-prompt" style="min-height:60px" placeholder="Puste = globalny prompt systemowy">${escHtml(user?.system_prompt || '')}</textarea>
     <div class="err-msg" id="um-err"></div>
   `;
 
@@ -1304,14 +1318,9 @@ async function renderPhoneNumbers() {
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Numery</h1>
-      <p>Wirtualne numery Zadarma używane do wysyłania SMS. Pierwszy numer jest domyślny (★).</p>
-    </div>
-    <div class="add-tile" onclick="openPhoneNumberModal()" style="margin-bottom:20px">
-      <span class="add-tile-icon">+</span>
-      Dodaj numer
+      <p>Wirtualne numery Zadarma. Pierwszy na liście jest domyślny (★).</p>
     </div>
     <div class="section-card">
-      <h2>Lista numerów</h2>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1319,10 +1328,13 @@ async function renderPhoneNumbers() {
               <th>Kolejność</th>
               <th>Numer</th>
               <th>Opis</th>
-              <th>Akcja</th>
+              <th></th>
             </tr>
           </thead>
-          <tbody>${rows || '<tr><td colspan="4" style="color:var(--muted);text-align:center">Brak numerów</td></tr>'}</tbody>
+          <tbody>
+            ${rows || ''}
+            <tr class="add-row"><td colspan="4"><button class="btn-add-row" onclick="openPhoneNumberModal()">+ Dodaj numer</button></td></tr>
+          </tbody>
         </table>
       </div>
     </div>
@@ -1365,7 +1377,8 @@ async function openPhoneNumberModal(pnId = null) {
         <button class="uni-close" type="button" aria-label="Zamknij">✕</button>
       </div>
       <div class="uni-body" style="padding-top:0">
-        <label>Numer (format Zadarma, np. 48123456789)</label>
+        <div class="uni-section">Dane numeru</div>
+        <label>Numer Zadarma</label>
         <input type="tel" id="pnm-number" placeholder="48123456789" value="${escHtml(pn?.number || '')}" />
         <label>Opis (opcjonalny)</label>
         <input type="text" id="pnm-desc" placeholder="np. Polska" value="${escHtml(pn?.description || '')}" />
