@@ -124,8 +124,10 @@ Instrukcja wideo (PL): [Jak dodać wirtualny numer w Zadarma](https://www.youtub
 
 **Webhook konfiguruje się automatycznie** przy każdym deployu (GitHub Actions wywołuje Edge Function `setup-zadarma-webhook`).
 
+> **Wymagana Wirtualna Centrala** — API Zadarma do konfiguracji webhooka (`/v1/pbx/webhooks/`) działa tylko przy aktywnej Wirtualnej Centrali. Bez niej automatyczna konfiguracja nie zadziała i trzeba skontaktować się z supportem Zadarmy podając URL webhooka.
+
 Działa przez API Zadarma (sekcja [Informacja o połączeniach](https://zadarma.com/pl/support/api/#intro)):
-- `PUT /v1/pbx/webhooks/url/` — ustawia URL webhooka
+- `POST /v1/pbx/webhooks/url/` — ustawia URL webhooka
 - `POST /v1/pbx/webhooks/hooks/` — włącza powiadomienia SMS
 
 Wymagane sekrety (patrz kroki 2 i 4): `ZADARMA_API_KEY`, `ZADARMA_API_SECRET`, `SETUP_SECRET`.
