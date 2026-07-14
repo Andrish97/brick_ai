@@ -151,11 +151,18 @@ Deno.serve(async (req: Request) => {
   // Zapisz raw payload do webhook_logs
   await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });
 
-  if (raw.event !== "sms" && raw.event !== "incoming_sms") return new Response("Ignored", { status: 200 });
+  const event = (raw.event ?? "").toLowerCase();
+  if (event !== "sms" && event !== "incoming_sms") return new Response("Ignored", { status: 200 });
 
-  const senderPhone = raw.sms_from ?? raw.caller_id ?? "";
-  const recipientDid = raw.sms_to ?? raw.called_did ?? "";
-  const smsBody = raw.msg ?? "";
+  // Zadarma może wysłać dane SMS bezpośrednio lub zagnieżdżone w polu result (JSON string)
+  let data: Record<string, string> = raw;
+  if (raw.result && typeof raw.result === "string") {
+    try { data = { ...raw, ...JSON.parse(raw.result) }; } catch { /* ignore */ }
+  }
+
+  const senderPhone = data.sms_from ?? data.caller_id ?? "";
+  const recipientDid = data.sms_to ?? data.caller_did ?? data.called_did ?? "";
+  const smsBody = data.msg ?? data.text ?? "";
   if (!senderPhone || !smsBody) return new Response("Missing fields", { status: 400 });
 
   const { userCode, convCode, content } = parseSms(smsBody);
