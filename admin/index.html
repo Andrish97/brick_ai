@@ -1644,10 +1644,7 @@ function renderLogsContent() {
           <h2 style="font-size:14px;margin:0">Wszystkie zdarzenia</h2>
           <div style="width:200px">${uiSelectHtml('log-filter', types.map(t => ({ value: t, label: t === 'all' ? 'Wszystkie typy' : (LOG_TYPE_STYLE[t]?.label || t) })), { value: logFilterType })}</div>
         </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-danger btn-sm" onclick="clearLogs()">🗑 Wyczyść logi</button>
-          <button class="btn btn-danger btn-sm" onclick="clearWebhookLogs()">🗑 Wyczyść webhooki</button>
-        </div>
+        <button class="btn btn-danger btn-sm" onclick="clearAllLogs()">🗑 Wyczyść wszystko</button>
       </div>
       <div class="table-wrap">
         <table>
@@ -1660,6 +1657,34 @@ function renderLogsContent() {
           </thead>
           <tbody>${rows || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak logów</td></tr>'}</tbody>
         </table>
+      </div>
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <div style="font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-bottom:10px">Legenda typów</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px 20px">
+          ${Object.entries(LOG_TYPE_STYLE).map(([key, s]) => {
+            const desc = {
+              sms_in:       'przychodzący SMS od użytkownika',
+              sms_sent:     'SMS wysłany przez system do użytkownika',
+              sms_error:    'błąd podczas wysyłki SMS',
+              sms_debug:    'diagnostyka wywołania API SMS',
+              ai_response:  'odpowiedź wygenerowana przez AI',
+              gemini_raw:   'surowa odpowiedź modelu Gemini',
+              gemini_error: 'błąd wywołania API Gemini',
+              error:        'ogólny błąd systemowy',
+              webhook:      'zdarzenie przychodzące z Zadarmy',
+              raw_webhook:  'surowy payload webhooka przed przetworzeniem',
+              conv_new:     'utworzenie nowej rozmowy',
+              conv_closed:  'zamknięcie rozmowy',
+              user_created: 'rejestracja nowego użytkownika',
+              balance:      'odpytanie salda konta Zadarma',
+              compaction:   'kompaktowanie historii rozmowy (>20 wiad.)',
+            }[key] || '';
+            return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
+              <span class="badge ${s.cls}">${escHtml(s.label)}</span>
+              <span>${escHtml(desc)}</span>
+            </div>`;
+          }).join('')}
+        </div>
       </div>
     </div>
   `;
@@ -1687,15 +1712,12 @@ function applyLogsSort(col) {
   renderLogsContent();
 }
 
-async function clearLogs() {
-  if (!await confirmModal('Usunąć wszystkie logi systemowe?')) return;
-  await sb.from('logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-  renderLogs();
-}
-
-async function clearWebhookLogs() {
-  if (!await confirmModal('Usunąć wszystkie raw webhooki?')) return;
-  await sb.from('webhook_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+async function clearAllLogs() {
+  if (!await confirmModal('Usunąć wszystkie logi i webhooki?')) return;
+  await Promise.all([
+    sb.from('logs').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+    sb.from('webhook_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000'),
+  ]);
   renderLogs();
 }
 
