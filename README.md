@@ -98,7 +98,7 @@ git push origin main
 
 ### 6. Supabase Auth
 
-1. **Authentication → Users → Invite user** — utwórz konto admina (podaj email, użytkownik dostanie link)
+1. **Authentication → Users → Add user** — wpisz email i hasło bezpośrednio (bez wysyłania linku)
 2. **Authentication → Providers → Email → wyłącz "Enable sign ups"** → Save — blokuje rejestrację nowych kont
 
 ### 7. Zadarma webhook
