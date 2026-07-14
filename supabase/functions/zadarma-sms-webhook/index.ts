@@ -203,18 +203,31 @@ Deno.serve(async (req: Request) => {
   if (!senderPhone || !smsBody) return new Response("Missing fields", { status: 400, headers: CORS });
 
   const { userCode, convCode, content } = parseSms(smsBody);
-  if (!content) return new Response("Empty content", { status: 200, headers: CORS });
 
-  log("sms_in", { from: senderPhone, userCode, convCode, content });
+  // Identyfikacja użytkownika — najpierw po kodzie, fallback po numerze telefonu
+  type UserRow = { id: string; active: boolean; system_prompt: string | null };
+  let matchedUsers = await sbGet(SB, KEY, `users?code=eq.${userCode}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
+  let effectiveContent = content;
 
-  // Identyfikacja użytkownika
-  const users = await sbGet(SB, KEY, `users?code=eq.${userCode}&select=id,active,system_prompt`) as Array<{ id: string; active: boolean; system_prompt: string | null }>;
-  if (!users.length || !users[0].active) {
+  if (!matchedUsers.length) {
+    // Fallback: szukaj po numerze nadawcy, cały SMS to treść
+    matchedUsers = await sbGet(SB, KEY, `users?phone_number=eq.${encodeURIComponent(senderPhone)}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
+    if (matchedUsers.length) {
+      effectiveContent = smsBody.trim();
+    }
+  }
+
+  if (!matchedUsers.length) {
     log("error", { reason: "unknown_user", userCode, from: senderPhone });
     return new Response("Unknown user", { status: 200, headers: CORS });
   }
-  const userId = users[0].id;
-  const userSystemPrompt = users[0].system_prompt ?? null;
+
+  if (!effectiveContent) return new Response("Empty content", { status: 200, headers: CORS });
+
+  const userId = matchedUsers[0].id;
+  const userSystemPrompt = matchedUsers[0].system_prompt ?? null;
+
+  log("sms_in", { from: senderPhone, userCode, convCode, content: effectiveContent });
 
   // Znalezienie lub utworzenie rozmowy
   type Conv = { id: string; code: string; summary: string | null };
@@ -257,14 +270,14 @@ Deno.serve(async (req: Request) => {
     const historyText = msgs.map((m) => `${m.direction === "in" ? "User" : "AI"}: ${m.content}`).join("\n");
     aiMessages.push({
       role: "user",
-      content: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość: ${content}\n\nOdpowiedz w JSON: {"summary":"max 300 znaków podsumowanie historii","reply":"odpowiedź max ${MAX_REPLY_CHARS} znaków"}`,
+      content: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość: ${effectiveContent}\n\nOdpowiedz w JSON: {"summary":"max 300 znaków podsumowanie historii","reply":"odpowiedź max ${MAX_REPLY_CHARS} znaków"}`,
     });
   } else {
     if (summary) aiMessages.push({ role: "user", content: `[Kontekst rozmowy: ${summary}]` });
     for (const m of msgs) {
       aiMessages.push({ role: m.direction === "in" ? "user" : "assistant", content: m.content });
     }
-    aiMessages.push({ role: "user", content });
+    aiMessages.push({ role: "user", content: effectiveContent });
   }
 
   let systemPrompt = userSystemPrompt ?? null;
@@ -294,7 +307,7 @@ Deno.serve(async (req: Request) => {
 
   // Zapis wiadomości użytkownika i odpowiedzi
 
-  await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content });
+  await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: aiReply });
 
   // Aktualizuj aktywność
