@@ -144,6 +144,13 @@ Deno.serve(async (req: Request) => {
   }
 
   if (raw.zd_echo) return new Response(raw.zd_echo, { status: 200 });
+
+  const SB = Deno.env.get("SUPABASE_URL")!;
+  const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+  // Zapisz raw payload do webhook_logs
+  await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });
+
   if (raw.event !== "sms" && raw.event !== "incoming_sms") return new Response("Ignored", { status: 200 });
 
   const senderPhone = raw.sms_from ?? raw.caller_id ?? "";
@@ -154,15 +161,13 @@ Deno.serve(async (req: Request) => {
   const { userCode, convCode, content } = parseSms(smsBody);
   if (!content) return new Response("Empty content", { status: 200 });
 
-  const SB = Deno.env.get("SUPABASE_URL")!;
-  const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
   // Identyfikacja użytkownika
-  const users = await sbGet(SB, KEY, `users?code=eq.${userCode}&select=id,active`) as Array<{ id: string; active: boolean }>;
+  const users = await sbGet(SB, KEY, `users?code=eq.${userCode}&select=id,active,system_prompt`) as Array<{ id: string; active: boolean; system_prompt: string | null }>;
   if (!users.length || !users[0].active) {
     return new Response("Unknown user", { status: 200 });
   }
   const userId = users[0].id;
+  const userSystemPrompt = users[0].system_prompt ?? null;
 
   // Znalezienie lub utworzenie rozmowy
   type Conv = { id: string; code: string; summary: string | null };
@@ -215,7 +220,9 @@ Deno.serve(async (req: Request) => {
     aiMessages.push({ role: "user", content });
   }
 
-  const systemPrompt = `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
+  const systemPrompt = userSystemPrompt
+    ? userSystemPrompt
+    : `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
 
   // Wywołaj AI
   const rawReply = await askAi(aiMessages, systemPrompt);

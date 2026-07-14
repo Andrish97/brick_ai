@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Brick AI — Admin Panel</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --card:     #1a1d24;
+      --border:   #2a2d38;
+      --accent:   #7c3aed;
+      --accent2:  #9d5df0;
+      --text:     #e2e8f0;
+      --muted:    #8892a4;
+      --danger:   #ef4444;
+      --success:  #22c55e;
+      --warning:  #f59e0b;
+      --sidebar-w: 220px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      font-size: 14px;
+    }
+
+    /* ── MODAL ── */
+    .overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+    }
+    .overlay.hidden { display: none; }
+
+    .modal {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px;
+      width: 420px;
+      max-width: 95vw;
+    }
+    .modal h2 { font-size: 18px; margin-bottom: 8px; }
+    .modal p  { color: var(--muted); margin-bottom: 24px; font-size: 13px; }
+
+    /* ── FORMS ── */
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; margin-top: 14px; }
+    input[type="text"], input[type="email"], input[type="password"], input[type="tel"],
+    textarea, select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input:focus, textarea:focus { border-color: var(--accent); }
+    textarea { resize: vertical; min-height: 70px; }
+
+    /* ── BUTTONS ── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 16px; border: none; border-radius: 6px;
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: opacity .15s, transform .1s;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary  { background: var(--accent);  color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent2); }
+    .btn-danger   { background: var(--danger);  color: #fff; }
+    .btn-danger:hover:not(:disabled) { opacity: .85; }
+    .btn-ghost    { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+    .btn-full { width: 100%; justify-content: center; margin-top: 20px; }
+
+    /* ── LAYOUT ── */
+    #app { display: none; height: 100vh; }
+    #app.visible { display: flex; }
+
+    .sidebar {
+      width: var(--sidebar-w);
+      background: var(--card);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      flex-shrink: 0;
+    }
+    .sidebar-logo {
+      padding: 20px 16px 16px;
+      font-size: 16px; font-weight: 700;
+      border-bottom: 1px solid var(--border);
+      color: var(--accent2);
+    }
+    .sidebar-logo span { color: var(--muted); font-weight: 400; font-size: 12px; display: block; }
+    .nav { flex: 1; padding: 8px 0; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 16px; cursor: pointer;
+      color: var(--muted); font-size: 13px;
+      border-left: 3px solid transparent;
+      transition: all .15s;
+    }
+    .nav-item:hover  { color: var(--text); background: rgba(255,255,255,.04); }
+    .nav-item.active { color: var(--text); border-left-color: var(--accent); background: rgba(124,58,237,.1); }
+    .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+    .sidebar-footer { padding: 16px; border-top: 1px solid var(--border); }
+    .user-email { font-size: 11px; color: var(--muted); margin-bottom: 8px; word-break: break-all; }
+
+    .content { flex: 1; overflow-y: auto; padding: 28px; }
+
+    /* ── PAGE HEADER ── */
+    .page-header { margin-bottom: 24px; }
+    .page-header h1 { font-size: 22px; font-weight: 600; }
+    .page-header p  { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+    /* ── CARDS ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .card h3 { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+    .card .big-num { font-size: 32px; font-weight: 700; }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    /* ── TABLE ── */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      text-align: left; font-size: 11px; text-transform: uppercase;
+      letter-spacing: .05em; color: var(--muted);
+      padding: 8px 12px; border-bottom: 1px solid var(--border);
+    }
+    td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,.02); }
+    .tr-clickable { cursor: pointer; }
+
+    /* ── TOGGLE ── */
+    .toggle { position: relative; display: inline-block; width: 36px; height: 20px; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute; inset: 0;
+      background: var(--border); border-radius: 20px;
+      cursor: pointer; transition: background .2s;
+    }
+    .toggle-slider::before {
+      content: ""; position: absolute;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #fff; left: 3px; top: 3px;
+      transition: transform .2s;
+    }
+    .toggle input:checked + .toggle-slider { background: var(--accent); }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+    /* ── BADGE ── */
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 99px;
+      font-size: 11px; font-weight: 500;
+    }
+    .badge-green  { background: rgba(34,197,94,.15);  color: var(--success); }
+    .badge-yellow { background: rgba(245,158,11,.15); color: var(--warning); }
+    .badge-red    { background: rgba(239,68,68,.15);  color: var(--danger); }
+
+    /* ── CHAT ── */
+    .chat-wrap { display: flex; flex-direction: column; gap: 10px; max-height: 500px; overflow-y: auto; padding: 4px 0; }
+    .chat-msg {
+      max-width: 72%; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.5;
+    }
+    .chat-msg.in  { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
+    .chat-msg.out { background: var(--card); border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 4px; }
+    .chat-meta { font-size: 10px; margin-top: 4px; opacity: .6; }
+
+    /* ── RESPONSE BOX ── */
+    .response-box {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 12px; margin-top: 14px;
+      font-family: monospace; font-size: 12px;
+      white-space: pre-wrap; word-break: break-all;
+      max-height: 200px; overflow-y: auto; display: none;
+    }
+    .response-box.visible { display: block; }
+    .response-ok  { border-color: var(--success); color: var(--success); }
+    .response-err { border-color: var(--danger);  color: var(--danger); }
+
+    /* ── JSON modal ── */
+    #json-modal pre {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 12px;
+      font-size: 12px; max-height: 60vh;
+      overflow: auto; white-space: pre-wrap; word-break: break-all;
+    }
+    #json-modal .modal { width: 600px; }
+
+    /* ── Error message ── */
+    .err-msg { color: var(--danger); font-size: 12px; margin-top: 8px; min-height: 16px; }
+
+    /* ── Section card ── */
+    .section-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+    .section-card h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
+
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
+
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,.3); border-top-color: #fff;
+      border-radius: 50%; animation: spin .6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .prompt-input { font-size: 12px; min-height: 50px; }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- ── SETUP MODAL ── -->
+<div class="overlay" id="setup-overlay">
+  <div class="modal">
+    <h2>⚙️ Konfiguracja</h2>
+    <p>Pierwsze uruchomienie — wprowadź dane projektu Supabase. Zostaną zapisane lokalnie w przeglądarce.</p>
+    <label>Supabase URL</label>
+    <input type="text" id="setup-url" placeholder="https://xxxx.supabase.co" />
+    <label>Supabase Anon Key</label>
+    <input type="text" id="setup-anon" placeholder="eyJ..." />
+    <div class="err-msg" id="setup-err"></div>
+    <button class="btn btn-primary btn-full" onclick="saveSetup()">Zapisz i kontynuuj</button>
+  </div>
+</div>
+
+<!-- ── LOGIN MODAL ── -->
+<div class="overlay hidden" id="login-overlay">
+  <div class="modal">
+    <h2>🔐 Logowanie</h2>
+    <p>Panel administracyjny Brick AI SMS Gateway</p>
+    <label>Email</label>
+    <input type="email" id="login-email" placeholder="admin@example.com" />
+    <label>Hasło</label>
+    <input type="password" id="login-pass" placeholder="••••••••" />
+    <div class="err-msg" id="login-err"></div>
+    <button class="btn btn-primary btn-full" id="login-btn" onclick="doLogin()">Zaloguj</button>
+    <p style="text-align:center;margin-top:12px;font-size:12px;color:var(--muted)">
+      <a href="#" onclick="resetSetup()" style="color:var(--accent)">Zmień konfigurację</a>
+    </p>
+  </div>
+</div>
+
+<!-- ── JSON DETAIL MODAL ── -->
+<div class="overlay hidden" id="json-overlay" onclick="closeJsonModal(event)">
+  <div id="json-modal" class="modal">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <strong>Raw Payload</strong>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('json-overlay').classList.add('hidden')">✕ Zamknij</button>
+    </div>
+    <pre id="json-content"></pre>
+  </div>
+</div>
+
+<!-- ── MAIN APP ── -->
+<div id="app">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      Brick AI
+      <span>SMS Gateway Admin</span>
+    </div>
+    <nav class="nav">
+      <div class="nav-item active" onclick="showPage('dashboard')" id="nav-dashboard">
+        <span class="nav-icon">📊</span> Dashboard
+      </div>
+      <div class="nav-item" onclick="showPage('users')" id="nav-users">
+        <span class="nav-icon">👥</span> Użytkownicy
+      </div>
+      <div class="nav-item" onclick="showPage('conversations')" id="nav-conversations">
+        <span class="nav-icon">💬</span> Rozmowy
+      </div>
+      <div class="nav-item" onclick="showPage('messages')" id="nav-messages">
+        <span class="nav-icon">✉️</span> Wiadomości
+      </div>
+      <div class="nav-item" onclick="showPage('webhook-test')" id="nav-webhook-test">
+        <span class="nav-icon">🧪</span> Test webhooka
+      </div>
+      <div class="nav-item" onclick="showPage('send-sms')" id="nav-send-sms">
+        <span class="nav-icon">📤</span> Wyślij SMS
+      </div>
+      <div class="nav-item" onclick="showPage('logs')" id="nav-logs">
+        <span class="nav-icon">📋</span> Logi
+      </div>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-email" id="user-email-label"></div>
+      <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center" onclick="doLogout()">Wyloguj</button>
+    </div>
+  </aside>
+
+  <main class="content" id="content">
+    <!-- pages rendered by JS -->
+  </main>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════════════════════
+let sb = null;
+let currentUser = null;
+let currentPage = 'dashboard';
+let selectedConvId = null;
+let selectedConvCode = null;
+
+// ══════════════════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════════════════
+(function init() {
+  const url  = localStorage.getItem('sb_url');
+  const anon = localStorage.getItem('sb_anon');
+
+  if (!url || !anon) {
+    document.getElementById('setup-overlay').classList.remove('hidden');
+    return;
+  }
+
+  initSupabase(url, anon);
+  checkSession();
+})();
+
+function initSupabase(url, anon) {
+  sb = supabase.createClient(url, anon);
+}
+
+async function checkSession() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    onLoggedIn(session.user);
+  } else {
+    document.getElementById('login-overlay').classList.remove('hidden');
+  }
+}
+
+function onLoggedIn(user) {
+  currentUser = user;
+  document.getElementById('login-overlay').classList.add('hidden');
+  document.getElementById('setup-overlay').classList.add('hidden');
+  document.getElementById('app').classList.add('visible');
+  document.getElementById('user-email-label').textContent = user.email;
+  showPage('dashboard');
+}
+
+// ══════════════════════════════════════════════════════
+//  SETUP
+// ══════════════════════════════════════════════════════
+function saveSetup() {
+  const url  = document.getElementById('setup-url').value.trim().replace(/\/$/, '');
+  const anon = document.getElementById('setup-anon').value.trim();
+  if (!url || !anon) {
+    document.getElementById('setup-err').textContent = 'Oba pola są wymagane.';
+    return;
+  }
+  localStorage.setItem('sb_url', url);
+  localStorage.setItem('sb_anon', anon);
+  document.getElementById('setup-overlay').classList.add('hidden');
+  initSupabase(url, anon);
+  document.getElementById('login-overlay').classList.remove('hidden');
+}
+
+function resetSetup() {
+  localStorage.removeItem('sb_url');
+  localStorage.removeItem('sb_anon');
+  document.getElementById('login-overlay').classList.add('hidden');
+  document.getElementById('setup-overlay').classList.remove('hidden');
+}
+
+// ══════════════════════════════════════════════════════
+//  AUTH
+// ══════════════════════════════════════════════════════
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const pass  = document.getElementById('login-pass').value;
+  const btn   = document.getElementById('login-btn');
+  const err   = document.getElementById('login-err');
+  err.textContent = '';
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Logowanie...';
+
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+  btn.disabled = false;
+  btn.textContent = 'Zaloguj';
+  if (error) {
+    err.textContent = error.message;
+    return;
+  }
+  onLoggedIn(data.user);
+}
+
+async function doLogout() {
+  await sb.auth.signOut();
+  currentUser = null;
+  document.getElementById('app').classList.remove('visible');
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-pass').value = '';
+  document.getElementById('login-overlay').classList.remove('hidden');
+}
+
+// ══════════════════════════════════════════════════════
+//  NAVIGATION
+// ══════════════════════════════════════════════════════
+function showPage(page) {
+  currentPage = page;
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  const navEl = document.getElementById(`nav-${page}`);
+  if (navEl) navEl.classList.add('active');
+
+  const content = document.getElementById('content');
+  content.innerHTML = '<p style="color:var(--muted);padding:20px">Ładowanie...</p>';
+
+  const pages = {
+    dashboard:    renderDashboard,
+    users:        renderUsers,
+    conversations: renderConversations,
+    messages:     renderMessages,
+    'webhook-test': renderWebhookTest,
+    'send-sms':   renderSendSms,
+    logs:         renderLogs,
+  };
+  (pages[page] || (() => {}))();
+}
+
+// ══════════════════════════════════════════════════════
+//  HELPERS
+// ══════════════════════════════════════════════════════
+function fmtDate(ts) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString('pl-PL');
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function showJsonModal(obj) {
+  document.getElementById('json-content').textContent = JSON.stringify(obj, null, 2);
+  document.getElementById('json-overlay').classList.remove('hidden');
+}
+
+function closeJsonModal(e) {
+  if (e.target === document.getElementById('json-overlay')) {
+    document.getElementById('json-overlay').classList.add('hidden');
+  }
+}
+
+async function getSession() {
+  const { data: { session } } = await sb.auth.getSession();
+  return session;
+}
+
+function showResponse(boxId, ok, text) {
+  const box = document.getElementById(boxId);
+  box.classList.add('visible');
+  box.classList.remove('response-ok', 'response-err');
+  box.classList.add(ok ? 'response-ok' : 'response-err');
+  box.textContent = text;
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: DASHBOARD
+// ══════════════════════════════════════════════════════
+async function renderDashboard() {
+  const [
+    { count: uCount },
+    { count: cCount },
+    { data: msgs }
+  ] = await Promise.all([
+    sb.from('users').select('id', { count: 'exact', head: true }),
+    sb.from('conversations').select('id', { count: 'exact', head: true }),
+    sb.from('messages').select('direction'),
+  ]);
+
+  const mCount = msgs ? msgs.length : 0;
+  const outCount = msgs ? msgs.filter(m => m.direction === 'out').length : 0;
+  const cost = (outCount * 0.18).toFixed(2);
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Dashboard</h1>
+      <p>Przegląd systemu Brick AI SMS Gateway</p>
+    </div>
+    <div class="stat-grid">
+      <div class="card">
+        <h3>Użytkownicy</h3>
+        <div class="big-num">${uCount ?? 0}</div>
+      </div>
+      <div class="card">
+        <h3>Rozmowy</h3>
+        <div class="big-num">${cCount ?? 0}</div>
+      </div>
+      <div class="card">
+        <h3>Wiadomości</h3>
+        <div class="big-num">${mCount}</div>
+      </div>
+      <div class="card">
+        <h3>Koszt (wych. × 0,18 PLN)</h3>
+        <div class="big-num">${cost} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
+      </div>
+    </div>
+  `;
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: USERS
+// ══════════════════════════════════════════════════════
+async function renderUsers() {
+  const { data: users, error } = await sb
+    .from('users')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  const rows = (users || []).map(u => `
+    <tr>
+      <td><code>${escHtml(u.code)}</code></td>
+      <td>${escHtml(u.phone_number || '—')}</td>
+      <td>
+        <label class="toggle">
+          <input type="checkbox" ${u.active ? 'checked' : ''} onchange="toggleUserActive('${u.id}', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </td>
+      <td>
+        <input class="prompt-input" type="text"
+          value="${escHtml(u.system_prompt || '')}"
+          placeholder="(domyślny prompt systemowy)"
+          style="font-size:12px"
+          onblur="saveSystemPrompt('${u.id}', this.value)"
+        />
+      </td>
+      <td>
+        <button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}')">Usuń</button>
+      </td>
+    </tr>
+  `).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Użytkownicy</h1>
+    </div>
+
+    <div class="section-card">
+      <h2>Dodaj użytkownika</h2>
+      <div class="form-row">
+        <div>
+          <label>Kod (4 cyfry)</label>
+          <input type="text" id="new-code" maxlength="4" placeholder="1234" />
+        </div>
+        <div>
+          <label>Numer telefonu</label>
+          <input type="tel" id="new-phone" placeholder="+48123456789" />
+        </div>
+      </div>
+      <label>System Prompt (opcjonalny)</label>
+      <textarea id="new-prompt" placeholder="Jesteś pomocnym asystentem..."></textarea>
+      <div class="err-msg" id="add-user-err"></div>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="addUser()">Dodaj użytkownika</button>
+    </div>
+
+    <div class="section-card">
+      <h2>Lista użytkowników</h2>
+      ${error ? `<p style="color:var(--danger)">${error.message}</p>` : ''}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Kod</th>
+              <th>Telefon</th>
+              <th>Aktywny</th>
+              <th>System Prompt</th>
+              <th>Akcja</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted);text-align:center">Brak użytkowników</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function toggleUserActive(id, active) {
+  await sb.from('users').update({ active }).eq('id', id);
+}
+
+async function saveSystemPrompt(id, value) {
+  await sb.from('users').update({ system_prompt: value || null }).eq('id', id);
+}
+
+async function addUser() {
+  const code   = document.getElementById('new-code').value.trim();
+  const phone  = document.getElementById('new-phone').value.trim();
+  const prompt = document.getElementById('new-prompt').value.trim();
+  const err    = document.getElementById('add-user-err');
+  err.textContent = '';
+
+  if (!/^\d{4}$/.test(code)) {
+    err.textContent = 'Kod musi składać się z 4 cyfr.';
+    return;
+  }
+
+  const { error } = await sb.from('users').insert({
+    code,
+    phone_number: phone || null,
+    system_prompt: prompt || null,
+    active: true,
+  });
+
+  if (error) {
+    err.textContent = error.message;
+    return;
+  }
+  renderUsers();
+}
+
+async function deleteUser(id) {
+  if (!confirm('Usunąć użytkownika? To usunie też wszystkie jego rozmowy i wiadomości.')) return;
+  await sb.from('users').delete().eq('id', id);
+  renderUsers();
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: CONVERSATIONS
+// ══════════════════════════════════════════════════════
+async function renderConversations() {
+  const { data: convs, error } = await sb
+    .from('conversations')
+    .select('*, users(code)')
+    .order('last_activity_at', { ascending: false });
+
+  const rows = (convs || []).map(c => `
+    <tr class="tr-clickable" onclick="openMessages('${c.id}', '${c.code}')">
+      <td><code>${escHtml(c.code)}</code></td>
+      <td><code>${escHtml(c.users?.code || '?')}</code></td>
+      <td>${fmtDate(c.last_activity_at)}</td>
+      <td>
+        <span class="badge ${c.status === 'active' ? 'badge-green' : 'badge-yellow'}">
+          ${c.status === 'active' ? 'aktywna' : 'zamknięta'}
+        </span>
+      </td>
+      <td onclick="event.stopPropagation()">
+        ${c.status === 'active'
+          ? `<button class="btn btn-ghost btn-sm" onclick="closeConv('${c.id}')">Zamknij</button>`
+          : '—'
+        }
+      </td>
+    </tr>
+  `).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Rozmowy</h1>
+      <p>Kliknij wiersz, aby zobaczyć wiadomości</p>
+    </div>
+    <div class="section-card">
+      ${error ? `<p style="color:var(--danger)">${error.message}</p>` : ''}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Kod rozmowy</th>
+              <th>Użytkownik</th>
+              <th>Ostatnia aktywność</th>
+              <th>Status</th>
+              <th>Akcja</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted);text-align:center">Brak rozmów</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function closeConv(id) {
+  await sb.from('conversations').update({ status: 'closed' }).eq('id', id);
+  renderConversations();
+}
+
+function openMessages(convId, convCode) {
+  selectedConvId   = convId;
+  selectedConvCode = convCode;
+  showPage('messages');
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: MESSAGES
+// ══════════════════════════════════════════════════════
+async function renderMessages() {
+  if (!selectedConvId) {
+    document.getElementById('content').innerHTML = `
+      <div class="page-header"><h1>Wiadomości</h1></div>
+      <p style="color:var(--muted)">Wybierz rozmowę z listy Rozmów.</p>
+      <button class="btn btn-ghost" style="margin-top:12px" onclick="showPage('conversations')">← Wróć do rozmów</button>
+    `;
+    return;
+  }
+
+  const { data: msgs } = await sb
+    .from('messages')
+    .select('*')
+    .eq('conversation_id', selectedConvId)
+    .order('created_at', { ascending: true });
+
+  const bubbles = (msgs || []).map(m => `
+    <div style="display:flex;flex-direction:column;align-items:${m.direction === 'in' ? 'flex-end' : 'flex-start'}">
+      <div class="chat-msg ${m.direction}">
+        ${escHtml(m.content)}
+        <div class="chat-meta">${fmtDate(m.created_at)}</div>
+      </div>
+    </div>
+  `).join('');
+
+  // Find last outgoing message
+  const lastOut = [...(msgs || [])].reverse().find(m => m.direction === 'out');
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Wiadomości</h1>
+      <p>Rozmowa: <code>${escHtml(selectedConvCode)}</code></p>
+    </div>
+    <button class="btn btn-ghost btn-sm" style="margin-bottom:16px" onclick="showPage('conversations')">← Wróć</button>
+    ${lastOut ? `<button class="btn btn-ghost btn-sm" style="margin-bottom:16px;margin-left:8px" onclick="resendLast('${escHtml(lastOut.id)}')">↩ Wyślij ponownie ostatnią (out)</button>` : ''}
+    <div class="section-card">
+      <div class="chat-wrap" id="chat-wrap">
+        ${bubbles || '<p style="color:var(--muted);text-align:center">Brak wiadomości</p>'}
+      </div>
+    </div>
+    <div class="response-box" id="resend-response"></div>
+  `;
+
+  // scroll to bottom
+  const cw = document.getElementById('chat-wrap');
+  if (cw) cw.scrollTop = cw.scrollHeight;
+}
+
+async function resendLast(msgId) {
+  showResponse('resend-response', true, 'Funkcja "wyślij ponownie" wymaga znajomości numeru telefonu nadawcy — dostępna przez admin-send-sms.');
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: TEST WEBHOOKA
+// ══════════════════════════════════════════════════════
+function renderWebhookTest() {
+  const sbUrl = localStorage.getItem('sb_url') || '';
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Test webhooka</h1>
+      <p>Symuluje przychodzący SMS od Zadarmy</p>
+    </div>
+    <div class="section-card">
+      <label>Od numeru (sms_from)</label>
+      <input type="tel" id="wh-from" placeholder="+48123456789" />
+      <label>Do numeru (sms_to / called_did)</label>
+      <input type="tel" id="wh-to" placeholder="+48987654321" />
+      <label>Kod użytkownika (pierwsza linia SMS)</label>
+      <input type="text" id="wh-usercode" maxlength="4" placeholder="1234" />
+      <label>Kod rozmowy (opcjonalny)</label>
+      <input type="text" id="wh-convcode" maxlength="6" placeholder="123456" />
+      <label>Treść wiadomości</label>
+      <textarea id="wh-body" placeholder="Twoja treść..."></textarea>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="sendWebhookTest()">Wyślij test</button>
+      <div class="response-box" id="wh-response"></div>
+    </div>
+  `;
+}
+
+async function sendWebhookTest() {
+  const from     = document.getElementById('wh-from').value.trim();
+  const to       = document.getElementById('wh-to').value.trim();
+  const userCode = document.getElementById('wh-usercode').value.trim();
+  const convCode = document.getElementById('wh-convcode').value.trim();
+  const body     = document.getElementById('wh-body').value.trim();
+
+  let msgBody = userCode;
+  if (convCode) msgBody += '\n' + convCode;
+  msgBody += '\n' + body;
+
+  const sbUrl = localStorage.getItem('sb_url') || '';
+  const payload = {
+    event: 'incoming_sms',
+    sms_from: from,
+    sms_to: to,
+    msg: msgBody,
+  };
+
+  try {
+    const res = await fetch(`${sbUrl}/functions/v1/zadarma-sms-webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    showResponse('wh-response', res.ok, `HTTP ${res.status}\n${text}`);
+  } catch (e) {
+    showResponse('wh-response', false, String(e));
+  }
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: WYŚLIJ SMS
+// ══════════════════════════════════════════════════════
+function renderSendSms() {
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Wyślij SMS</h1>
+      <p>Wysyła SMS przez Zadarma API (wymaga zalogowania)</p>
+    </div>
+    <div class="section-card">
+      <label>Numer docelowy</label>
+      <input type="tel" id="sms-to" placeholder="+48123456789" />
+      <label>Numer nadawcy (caller_id)</label>
+      <input type="tel" id="sms-from" placeholder="+48987654321" />
+      <label>Treść wiadomości</label>
+      <textarea id="sms-body" placeholder="Treść SMS..."></textarea>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="sendAdminSms()">Wyślij SMS</button>
+      <div class="response-box" id="sms-response"></div>
+    </div>
+  `;
+}
+
+async function sendAdminSms() {
+  const to      = document.getElementById('sms-to').value.trim();
+  const from    = document.getElementById('sms-from').value.trim();
+  const body    = document.getElementById('sms-body').value.trim();
+
+  if (!to || !from || !body) {
+    showResponse('sms-response', false, 'Wszystkie pola są wymagane.');
+    return;
+  }
+
+  const session = await getSession();
+  if (!session) {
+    showResponse('sms-response', false, 'Brak sesji — zaloguj się ponownie.');
+    return;
+  }
+
+  const sbUrl = localStorage.getItem('sb_url') || '';
+
+  try {
+    const res = await fetch(`${sbUrl}/functions/v1/admin-send-sms`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ phone: to, message: body, caller_id: from }),
+    });
+    const text = await res.text();
+    showResponse('sms-response', res.ok, `HTTP ${res.status}\n${text}`);
+  } catch (e) {
+    showResponse('sms-response', false, String(e));
+  }
+}
+
+// ══════════════════════════════════════════════════════
+//  PAGE: LOGI
+// ══════════════════════════════════════════════════════
+async function renderLogs() {
+  const { data: logs, error } = await sb
+    .from('webhook_logs')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  const rows = (logs || []).map(l => {
+    const preview = JSON.stringify(l.raw_payload).slice(0, 100);
+    const full = l.raw_payload;
+    return `
+      <tr>
+        <td style="white-space:nowrap">${fmtDate(l.created_at)}</td>
+        <td>
+          <span
+            style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
+            onclick='showJsonModal(${escHtml(JSON.stringify(full))})'
+            title="Kliknij, aby zobaczyć pełny JSON"
+          >${escHtml(preview)}${preview.length >= 100 ? '…' : ''}</span>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Logi webhooków</h1>
+      <p>Ostatnie 50 wpisów — kliknij payload, aby zobaczyć pełny JSON</p>
+    </div>
+    <div class="section-card">
+      ${error ? `<p style="color:var(--danger)">${error.message}</p>` : ''}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Czas</th>
+              <th>Raw Payload</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="2" style="color:var(--muted);text-align:center">Brak logów</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+</script>
+
+<!--
+  Setup: GitHub Pages → Settings → Pages → Source: main branch /docs folder
+  First run: enter Supabase URL and Anon Key (found in Project Settings → API)
+-->
+</body>
+</html>
