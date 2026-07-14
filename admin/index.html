@@ -7,6 +7,7 @@
   <link rel="icon" type="image/x-icon" href="favicon.ico" />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -86,7 +87,7 @@
     .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
     .btn-sm { padding: 5px 10px; font-size: 12px; }
     .btn-full { width: 100%; justify-content: center; margin-top: 20px; }
-    .btn-icon { padding: 3px 7px; font-size: 13px; min-width: 26px; justify-content: center; }
+    .btn-icon { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; border-radius: 6px; }
 
     /* ── LAYOUT ── */
     #app { display: none; height: 100vh; }
@@ -204,15 +205,6 @@
     .response-ok  { border-color: var(--success); color: var(--success); }
     .response-err { border-color: var(--danger);  color: var(--danger); }
 
-    /* ── JSON modal ── */
-    #json-modal pre {
-      background: var(--bg); border: 1px solid var(--border);
-      border-radius: 6px; padding: 12px;
-      font-size: 12px; max-height: 60vh;
-      overflow: auto; white-space: pre-wrap; word-break: break-all;
-    }
-    #json-modal .modal { width: 600px; }
-
     /* ── Error message ── */
     .err-msg { color: var(--danger); font-size: 12px; margin-top: 8px; min-height: 16px; }
 
@@ -321,6 +313,25 @@
     .ui-select-item:first-child { border-radius: 8px 8px 0 0; }
     .ui-select-item:last-child { border-radius: 0 0 8px 8px; }
     .ui-select.is-disabled .ui-select-btn { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── CHART GRID ── */
+    .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 28px; }
+    @media (max-width: 700px) { .chart-grid { grid-template-columns: 1fr; } }
+    .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+    .chart-card h3 { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+
+    /* ── ADD TILE ── */
+    .add-tile {
+      background: var(--card);
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 8px; cursor: pointer; transition: all .15s; min-height: 80px;
+      color: var(--muted); font-size: 13px;
+    }
+    .add-tile:hover { border-color: var(--accent); color: var(--accent2); background: rgba(124,58,237,.05); }
+    .add-tile-icon { font-size: 24px; }
   </style>
 </head>
 <body>
@@ -353,17 +364,6 @@
   </div>
 </div>
 
-<!-- ── JSON DETAIL MODAL ── -->
-<div class="overlay hidden" id="json-overlay" onclick="closeJsonModal(event)">
-  <div id="json-modal" class="modal">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <strong>Raw Payload</strong>
-      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('json-overlay').classList.add('hidden')">✕ Zamknij</button>
-    </div>
-    <pre id="json-content"></pre>
-  </div>
-</div>
-
 <!-- ── MAIN APP ── -->
 <div id="app">
   <aside class="sidebar">
@@ -375,20 +375,20 @@
       <div class="nav-item active" onclick="showPage('dashboard')" id="nav-dashboard">
         <span class="nav-icon">📊</span> Dashboard
       </div>
-      <div class="nav-item" onclick="showPage('users')" id="nav-users">
-        <span class="nav-icon">👥</span> Użytkownicy
-      </div>
       <div class="nav-item" onclick="showPage('conversations')" id="nav-conversations">
         <span class="nav-icon">💬</span> Rozmowy
+      </div>
+      <div class="nav-item" onclick="showPage('users')" id="nav-users">
+        <span class="nav-icon">👥</span> Użytkownicy
       </div>
       <div class="nav-item" onclick="showPage('phone-numbers')" id="nav-phone-numbers">
         <span class="nav-icon">📱</span> Numery
       </div>
-      <div class="nav-item" onclick="showPage('receive-test')" id="nav-receive-test">
-        <span class="nav-icon">🧪</span> Test odbioru
-      </div>
       <div class="nav-item" onclick="showPage('send-sms')" id="nav-send-sms">
         <span class="nav-icon">📤</span> Wyślij SMS
+      </div>
+      <div class="nav-item" onclick="showPage('receive-test')" id="nav-receive-test">
+        <span class="nav-icon">🧪</span> Test odbioru
       </div>
       <div class="nav-item" onclick="showPage('logs')" id="nav-logs">
         <span class="nav-icon">📋</span> Logi
@@ -539,18 +539,47 @@ function escHtml(str) {
 }
 
 function showJsonModal(obj) {
-  document.getElementById('json-content').textContent = JSON.stringify(obj, null, 2);
-  document.getElementById('json-overlay').classList.remove('hidden');
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:12px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0';
+  pre.textContent = JSON.stringify(obj, null, 2);
+  const body = document.createElement('div');
+  body.style.padding = '0 24px 20px';
+  body.appendChild(pre);
+
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'uni-overlay';
+    const modalEl = document.createElement('div');
+    modalEl.className = 'uni-modal';
+    modalEl.style.width = '600px';
+    modalEl.setAttribute('role', 'dialog');
+    modalEl.setAttribute('aria-modal', 'true');
+    modalEl.innerHTML = `
+      <div class="uni-head" style="margin-bottom:12px">
+        <div class="uni-title">Szczegóły</div>
+        <button class="uni-close" type="button" aria-label="Zamknij">✕</button>
+      </div>
+    `;
+    modalEl.appendChild(body);
+    const foot = document.createElement('div');
+    foot.className = 'uni-foot';
+    foot.innerHTML = '<button class="btn btn-primary" type="button" data-action="ok">Zamknij</button>';
+    modalEl.appendChild(foot);
+    overlay.appendChild(modalEl);
+
+    let done = false;
+    const finish = () => { if (done) return; done = true; overlay.remove(); document.removeEventListener('keydown', onKey, true); resolve(); };
+    const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); finish(); } };
+    overlay.addEventListener('click', e => { if (e.target === overlay) finish(); });
+    foot.querySelector('[data-action="ok"]').addEventListener('click', finish);
+    modalEl.querySelector('.uni-close').addEventListener('click', finish);
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+  });
 }
 
 function showJsonFromRow(el) {
   showJsonModal(JSON.parse(el.dataset.json));
-}
-
-function closeJsonModal(e) {
-  if (e.target === document.getElementById('json-overlay')) {
-    document.getElementById('json-overlay').classList.add('hidden');
-  }
 }
 
 async function getSession() {
@@ -810,20 +839,25 @@ async function fetchZadarmaBalance() {
 }
 
 async function renderDashboard() {
+  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+
   const [
     { count: uCount },
     { count: cCount },
     { data: settingsRows },
+    { data: recentMsgs },
   ] = await Promise.all([
     sb.from('users').select('id', { count: 'exact', head: true }),
     sb.from('conversations').select('id', { count: 'exact', head: true }),
     sb.from('settings').select('key,value'),
+    sb.from('messages').select('created_at,direction').gte('created_at', cutoff),
   ]);
 
   const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
   const smsCount = parseInt(settings['sms_count'] || '0', 10);
   const smsPrice = parseFloat(settings['sms_price'] || '0.18');
   const cost = (smsCount * smsPrice).toFixed(2);
+  const msgs = recentMsgs || [];
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
@@ -852,9 +886,79 @@ async function renderDashboard() {
         <div id="zadarma-balance-val" class="big-num"><span class="spinner"></span></div>
       </div>
     </div>
+    <div class="chart-grid">
+      <div class="chart-card">
+        <h3>Aktywność SMS (ostatnie 14 dni)</h3>
+        <canvas id="chart-activity" height="200"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3>Podział wiadomości</h3>
+        <canvas id="chart-split" height="200"></canvas>
+      </div>
+    </div>
   `;
 
   loadZadarmaBalance();
+
+  // Build date labels for last 14 days
+  const days = [];
+  const inCounts = [];
+  const outCounts = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    days.push(key.slice(5)); // MM-DD
+    const dayMsgs = msgs.filter(m => m.created_at.slice(0, 10) === key);
+    inCounts.push(dayMsgs.filter(m => m.direction === 'in').length);
+    outCounts.push(dayMsgs.filter(m => m.direction === 'out').length);
+  }
+
+  // Destroy existing charts if any
+  if (window._chartActivity) window._chartActivity.destroy();
+  if (window._chartSplit) window._chartSplit.destroy();
+
+  const actCtx = document.getElementById('chart-activity');
+  if (actCtx) {
+    window._chartActivity = new Chart(actCtx, {
+      type: 'bar',
+      data: {
+        labels: days,
+        datasets: [
+          { label: 'Przychodzące', data: inCounts, backgroundColor: 'rgba(124,58,237,0.7)', borderRadius: 4 },
+          { label: 'Wychodzące', data: outCounts, backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: true,
+        plugins: { legend: { labels: { color: '#8892a4', font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#8892a4', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+          y: { ticks: { color: '#8892a4', font: { size: 10 }, stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  const inTotal = msgs.filter(m => m.direction === 'in').length;
+  const outTotal = msgs.filter(m => m.direction === 'out').length;
+  const splitCtx = document.getElementById('chart-split');
+  if (splitCtx && (inTotal + outTotal) > 0) {
+    window._chartSplit = new Chart(splitCtx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Przychodzące', 'Wychodzące'],
+        datasets: [{ data: [inTotal, outTotal], backgroundColor: ['rgba(124,58,237,0.8)', 'rgba(34,197,94,0.8)'], borderWidth: 0 }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: true,
+        plugins: { legend: { labels: { color: '#8892a4', font: { size: 12 } } } },
+        cutout: '65%'
+      }
+    });
+  } else if (splitCtx) {
+    document.getElementById('chart-split').parentElement.innerHTML += '<p style="color:var(--muted);text-align:center;font-size:13px">Brak danych</p>';
+  }
 }
 
 async function saveSmsCount() {
@@ -885,7 +989,15 @@ async function renderUsers() {
     .select('*')
     .order('created_at', { ascending: false });
 
-  const rows = (users || []).map(u => `
+  const phoneLabel = (phoneNumberId) => {
+    if (!phoneNumberId) return `<span style="color:var(--muted)">★ domyślny</span>`;
+    const pn = phoneNumbers.find(p => p.id === phoneNumberId);
+    return pn ? escHtml(pn.number + (pn.description ? ' — ' + pn.description : '')) : '—';
+  };
+
+  const rows = (users || []).map(u => {
+    const promptText = u.system_prompt ? (u.system_prompt.length > 40 ? escHtml(u.system_prompt.slice(0, 40)) + '…' : escHtml(u.system_prompt)) : '<span style="color:var(--muted)">—</span>';
+    return `
     <tr>
       <td><code>${escHtml(u.code)}</code></td>
       <td>${escHtml(u.phone_number || '—')}</td>
@@ -895,52 +1007,23 @@ async function renderUsers() {
           <span class="toggle-slider"></span>
         </label>
       </td>
-      <td>${userPhoneSelectHtml(u.id, u.phone_number_id)}</td>
-      <td>
-        <input class="prompt-input" type="text"
-          value="${escHtml(u.system_prompt || '')}"
-          placeholder="(domyślny prompt systemowy)"
-          style="font-size:12px"
-          onblur="saveSystemPrompt('${u.id}', this.value)"
-        />
-      </td>
-      <td>
-        <button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}')">Usuń</button>
+      <td>${phoneLabel(u.phone_number_id)}</td>
+      <td>${promptText}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="openUserModal('${u.id}')">Edytuj</button>
+        <button class="btn btn-icon btn-danger" onclick="deleteUser('${u.id}')" title="Usuń">×</button>
       </td>
     </tr>
-  `).join('');
+  `}).join('');
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Użytkownicy</h1>
     </div>
-
-    <div class="section-card">
-      <h2>Dodaj użytkownika</h2>
-      <div class="form-row">
-        <div>
-          <label>Kod (4 cyfry)</label>
-          <input type="text" id="new-code" maxlength="4" placeholder="1234" />
-        </div>
-        <div>
-          <label>Numer telefonu użytkownika</label>
-          <input type="tel" id="new-phone" placeholder="+48123456789" />
-        </div>
-      </div>
-      <label>Numer wysyłkowy Zadarma (opcjonalny — puste = domyślny)</label>
-      ${(() => {
-        const newUserPhoneOpts = phoneNumbers.length ? [
-          { value: '', label: '(domyślny)' },
-          ...phoneNumbers.map(pn => ({ value: pn.number, label: pn.number + (pn.description ? ' — ' + pn.description : '') }))
-        ] : [];
-        return uiSelectHtml('new-user-phone', newUserPhoneOpts, { placeholder: 'Brak numerów — dodaj w Numery' });
-      })()}
-      <label>System Prompt (opcjonalny)</label>
-      <textarea id="new-prompt" placeholder="Jesteś pomocnym asystentem..."></textarea>
-      <div class="err-msg" id="add-user-err"></div>
-      <button class="btn btn-primary" style="margin-top:14px" onclick="addUser()">Dodaj użytkownika</button>
+    <div class="add-tile" onclick="openUserModal()" style="margin-bottom:20px">
+      <span class="add-tile-icon">+</span>
+      Dodaj użytkownika
     </div>
-
     <div class="section-card">
       <h2>Lista użytkowników</h2>
       ${error ? `<p style="color:var(--danger)">${error.message}</p>` : ''}
@@ -961,58 +1044,104 @@ async function renderUsers() {
       </div>
     </div>
   `;
-
-  initAllUiSelects();
-
-  // Wire up user phone selects
-  (users || []).forEach(u => {
-    const menu = document.querySelector(`[data-select-id="user-phone-${u.id}"] .ui-select-menu`);
-    if (menu) {
-      menu.addEventListener('click', () => {
-        setTimeout(() => updateUserPhone(u.id, getUiSelect('user-phone-' + u.id)), 0);
-      });
-    }
-  });
 }
 
 async function toggleUserActive(id, active) {
   await sb.from('users').update({ active }).eq('id', id);
 }
 
-async function saveSystemPrompt(id, value) {
-  await sb.from('users').update({ system_prompt: value || null }).eq('id', id);
-}
-
-async function addUser() {
-  const code          = document.getElementById('new-code').value.trim();
-  const phone         = document.getElementById('new-phone').value.trim();
-  const prompt        = document.getElementById('new-prompt').value.trim();
-  const phoneNumberId = getUiSelect('new-user-phone');
-  const err           = document.getElementById('add-user-err');
-  err.textContent = '';
-
-  if (!/^\d{4}$/.test(code)) {
-    err.textContent = 'Kod musi składać się z 4 cyfr.';
-    return;
+async function openUserModal(userId = null) {
+  await loadPhoneNumbers();
+  let user = null;
+  if (userId) {
+    const { data } = await sb.from('users').select('*').eq('id', userId).single();
+    user = data;
   }
 
-  // phoneNumbersSelectHtmlById stores number strings as values, but we need the id
-  // Find the phone_number record by number
-  const selectedPn = phoneNumberId ? phoneNumbers.find(p => p.number === phoneNumberId) : null;
+  // Build form body
+  const body = document.createElement('div');
+  const defaultPn = phoneNumbers[0];
+  const phoneOpts = [
+    { value: '', label: defaultPn ? `★ ${defaultPn.number}${defaultPn.description ? ' — ' + defaultPn.description : ''} (domyślny)` : '(brak domyślnego)' },
+    ...phoneNumbers.map(pn => ({ value: pn.id, label: pn.number + (pn.description ? ' — ' + pn.description : '') }))
+  ];
+  const phoneOptsHtml = phoneOpts.map(o => `<option value="${escHtml(o.value)}" ${(user?.phone_number_id || '') === o.value ? 'selected' : ''}>${escHtml(o.label)}</option>`).join('');
 
-  const { error } = await sb.from('users').insert({
-    code,
-    phone_number: phone || null,
-    system_prompt: prompt || null,
-    phone_number_id: selectedPn?.id || null,
-    active: true,
-  });
+  body.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div>
+        <label>Kod (4 cyfry)</label>
+        <input type="text" id="um-code" maxlength="4" placeholder="1234" value="${escHtml(user?.code || '')}" />
+      </div>
+      <div>
+        <label>Telefon użytkownika</label>
+        <input type="tel" id="um-phone" placeholder="+48123456789" value="${escHtml(user?.phone_number || '')}" />
+      </div>
+    </div>
+    <label>Numer wysyłkowy Zadarma</label>
+    <select id="um-phone-number-id">${phoneOptsHtml}</select>
+    <label>System Prompt (opcjonalny)</label>
+    <textarea id="um-prompt" style="min-height:60px" placeholder="Jesteś pomocnym asystentem...">${escHtml(user?.system_prompt || '')}</textarea>
+    <div class="err-msg" id="um-err"></div>
+  `;
 
-  if (error) {
-    err.textContent = error.message;
-    return;
-  }
-  renderUsers();
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'uni-overlay';
+    const modalEl = document.createElement('div');
+    modalEl.className = 'uni-modal';
+    modalEl.setAttribute('role', 'dialog');
+    modalEl.setAttribute('aria-modal', 'true');
+    modalEl.innerHTML = `
+      <div class="uni-head">
+        <div class="uni-title">${user ? 'Edytuj użytkownika' : 'Dodaj użytkownika'}</div>
+        <button class="uni-close" type="button" aria-label="Zamknij">✕</button>
+      </div>
+    `;
+    const bodyWrap = document.createElement('div');
+    bodyWrap.className = 'uni-body';
+    bodyWrap.style.paddingTop = '0';
+    bodyWrap.appendChild(body);
+    const foot = document.createElement('div');
+    foot.className = 'uni-foot';
+    foot.innerHTML = `
+      <button class="btn btn-ghost" type="button" data-action="cancel">Anuluj</button>
+      <button class="btn btn-primary" type="button" data-action="ok">${user ? 'Zapisz' : 'Dodaj'}</button>
+    `;
+    modalEl.appendChild(bodyWrap);
+    modalEl.appendChild(foot);
+    overlay.appendChild(modalEl);
+
+    let done = false;
+    const finish = val => { if (done) return; done = true; overlay.remove(); document.removeEventListener('keydown', onKey, true); resolve(val); };
+    const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+    overlay.addEventListener('click', e => { if (e.target === overlay) finish(false); });
+    foot.querySelector('[data-action="cancel"]').addEventListener('click', () => finish(false));
+    modalEl.querySelector('.uni-close').addEventListener('click', () => finish(false));
+
+    foot.querySelector('[data-action="ok"]').addEventListener('click', async () => {
+      const code = document.getElementById('um-code').value.trim();
+      const phone = document.getElementById('um-phone').value.trim();
+      const prompt = document.getElementById('um-prompt').value.trim();
+      const phoneNumberId = document.getElementById('um-phone-number-id').value || null;
+      const errEl = document.getElementById('um-err');
+      errEl.textContent = '';
+      if (!/^\d{4}$/.test(code)) { errEl.textContent = 'Kod musi składać się z 4 cyfr.'; return; }
+
+      let error;
+      if (user) {
+        ({ error } = await sb.from('users').update({ code, phone_number: phone || null, system_prompt: prompt || null, phone_number_id: phoneNumberId }).eq('id', user.id));
+      } else {
+        ({ error } = await sb.from('users').insert({ code, phone_number: phone || null, system_prompt: prompt || null, phone_number_id: phoneNumberId, active: true }));
+      }
+      if (error) { errEl.textContent = error.message; return; }
+      finish(true);
+    });
+
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+    setTimeout(() => document.getElementById('um-code')?.focus(), 0);
+  }).then(saved => { if (saved) renderUsers(); });
 }
 
 async function deleteUser(id) {
@@ -1045,7 +1174,7 @@ async function renderConversations() {
           ? `<button class="btn btn-ghost btn-sm" onclick="closeConv('${c.id}')">Zamknij</button>`
           : ''
         }
-        <button class="btn btn-danger btn-sm" onclick="deleteConv('${c.id}')">Usuń</button>
+        <button class="btn btn-danger btn-icon" onclick="deleteConv('${c.id}')" title="Usuń rozmowę">×</button>
       </td>
     </tr>
   `).join('');
@@ -1165,10 +1294,10 @@ async function renderPhoneNumbers() {
           <button class="btn btn-ghost btn-icon btn-sm" onclick="movePhoneNumber('${pn.id}', 'down')" ${isLast ? 'disabled' : ''}>↓</button>
           ${isFirst ? '<span class="badge badge-yellow" style="margin-left:4px">★</span>' : ''}
         </td>
-        <td><code>${escHtml(pn.number)}</code></td>
-        <td>${desc}</td>
+        <td style="cursor:pointer" onclick="openPhoneNumberModal('${pn.id}')"><code>${escHtml(pn.number)}</code></td>
+        <td style="cursor:pointer" onclick="openPhoneNumberModal('${pn.id}')">${desc}</td>
         <td>
-          <button class="btn btn-danger btn-sm" onclick="deletePhoneNumber('${pn.id}')">Usuń</button>
+          <button class="btn btn-danger btn-icon" onclick="deletePhoneNumber('${pn.id}')" title="Usuń">×</button>
         </td>
       </tr>
     `;
@@ -1179,20 +1308,9 @@ async function renderPhoneNumbers() {
       <h1>Numery</h1>
       <p>Wirtualne numery Zadarma używane do wysyłania SMS. Pierwszy numer jest domyślny (★).</p>
     </div>
-    <div class="section-card">
-      <h2>Dodaj numer</h2>
-      <div class="form-row">
-        <div>
-          <label>Numer (np. 48100200300)</label>
-          <input type="text" id="new-pn-number" placeholder="48100200300" />
-        </div>
-        <div>
-          <label>Opis (opcjonalny)</label>
-          <input type="text" id="new-pn-desc" placeholder="np. Numer główny" />
-        </div>
-      </div>
-      <button class="btn btn-primary" style="margin-top:14px" onclick="addPhoneNumber()">Dodaj numer</button>
-      <div class="err-msg" id="pn-err"></div>
+    <div class="add-tile" onclick="openPhoneNumberModal()" style="margin-bottom:20px">
+      <span class="add-tile-icon">+</span>
+      Dodaj numer
     </div>
     <div class="section-card">
       <h2>Lista numerów</h2>
@@ -1230,31 +1348,66 @@ async function movePhoneNumber(id, direction) {
   renderPhoneNumbers();
 }
 
-async function addPhoneNumber() {
-  const number = document.getElementById('new-pn-number').value.trim();
-  const desc   = document.getElementById('new-pn-desc').value.trim();
-  const errEl  = document.getElementById('pn-err');
-  errEl.textContent = '';
-
-  if (!number) {
-    errEl.textContent = 'Numer jest wymagany.';
-    return;
+async function openPhoneNumberModal(pnId = null) {
+  let pn = null;
+  if (pnId) {
+    pn = phoneNumbers.find(p => p.id === pnId) || null;
   }
 
-  const maxOrder = phoneNumbers.reduce((m, pn) => Math.max(m, pn.sort_order), -1);
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'uni-overlay';
+    const modalEl = document.createElement('div');
+    modalEl.className = 'uni-modal';
+    modalEl.setAttribute('role', 'dialog');
+    modalEl.setAttribute('aria-modal', 'true');
+    modalEl.innerHTML = `
+      <div class="uni-head">
+        <div class="uni-title">${pn ? 'Edytuj numer' : 'Dodaj numer'}</div>
+        <button class="uni-close" type="button" aria-label="Zamknij">✕</button>
+      </div>
+      <div class="uni-body" style="padding-top:0">
+        <label>Numer (format Zadarma, np. 48123456789)</label>
+        <input type="tel" id="pnm-number" placeholder="48123456789" value="${escHtml(pn?.number || '')}" />
+        <label>Opis (opcjonalny)</label>
+        <input type="text" id="pnm-desc" placeholder="np. Polska" value="${escHtml(pn?.description || '')}" />
+        <div class="err-msg" id="pnm-err"></div>
+      </div>
+      <div class="uni-foot">
+        <button class="btn btn-ghost" type="button" data-action="cancel">Anuluj</button>
+        <button class="btn btn-primary" type="button" data-action="ok">${pn ? 'Zapisz' : 'Dodaj'}</button>
+      </div>
+    `;
 
-  const { error } = await sb.from('phone_numbers').insert({
-    number,
-    description: desc || null,
-    sort_order: maxOrder + 1,
-  });
+    let done = false;
+    const finish = val => { if (done) return; done = true; overlay.remove(); document.removeEventListener('keydown', onKey, true); resolve(val); };
+    const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+    overlay.addEventListener('click', e => { if (e.target === overlay) finish(false); });
+    modalEl.querySelector('[data-action="cancel"]').addEventListener('click', () => finish(false));
+    modalEl.querySelector('.uni-close').addEventListener('click', () => finish(false));
+    modalEl.querySelector('[data-action="ok"]').addEventListener('click', async () => {
+      const number = document.getElementById('pnm-number').value.trim();
+      const desc = document.getElementById('pnm-desc').value.trim();
+      const errEl = document.getElementById('pnm-err');
+      errEl.textContent = '';
+      if (!number) { errEl.textContent = 'Numer jest wymagany.'; return; }
 
-  if (error) {
-    errEl.textContent = error.message;
-    return;
-  }
+      let error;
+      if (pn) {
+        ({ error } = await sb.from('phone_numbers').update({ number, description: desc || null }).eq('id', pn.id));
+      } else {
+        const maxOrder = phoneNumbers.length > 0 ? Math.max(...phoneNumbers.map(p => p.sort_order)) : -1;
+        ({ error } = await sb.from('phone_numbers').insert({ number, description: desc || null, sort_order: maxOrder + 1 }));
+      }
+      if (error) { errEl.textContent = error.message; return; }
+      finish(true);
+    });
 
-  renderPhoneNumbers();
+    overlay.appendChild(modalEl);
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+    setTimeout(() => document.getElementById('pnm-number')?.focus(), 0);
+  }).then(saved => { if (saved) renderPhoneNumbers(); });
 }
 
 async function deletePhoneNumber(id) {
