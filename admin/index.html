@@ -339,6 +339,7 @@
       border-top: 1px solid var(--border);
       background: rgba(255,255,255,.02);
       border-radius: 0 0 12px 12px;
+      padding-top: 14px;
     }
     .uni-section {
       font-size: 10px; font-weight: 600; letter-spacing: .08em;
@@ -1022,7 +1023,7 @@ async function renderUsers() {
       </td>
       <td>${phoneLabel(u.phone_number_id)}</td>
       <td>${promptText}</td>
-      <td onclick="event.stopPropagation()">
+      <td onclick="event.stopPropagation()" style="text-align:right">
         <button class="btn btn-icon btn-danger" onclick="deleteUser('${u.id}')" title="Usuń">×</button>
       </td>
     </tr>
@@ -1180,7 +1181,7 @@ async function renderConversations() {
           ${c.status === 'active' ? 'aktywna' : 'zamknięta'}
         </span>
       </td>
-      <td onclick="event.stopPropagation()" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <td onclick="event.stopPropagation()" style="text-align:right;display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
         ${c.status === 'active'
           ? `<button class="btn btn-ghost btn-sm" onclick="closeConv('${c.id}')">Zamknij</button>`
           : ''
@@ -1307,7 +1308,7 @@ async function renderPhoneNumbers() {
         </td>
         <td style="cursor:pointer" onclick="openPhoneNumberModal('${pn.id}')"><code>${escHtml(pn.number)}</code></td>
         <td style="cursor:pointer" onclick="openPhoneNumberModal('${pn.id}')">${desc}</td>
-        <td>
+        <td style="text-align:right">
           <button class="btn btn-danger btn-icon" onclick="deletePhoneNumber('${pn.id}')" title="Usuń">×</button>
         </td>
       </tr>
