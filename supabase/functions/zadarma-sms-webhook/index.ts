@@ -100,14 +100,20 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
         body: JSON.stringify({
           contents,
           systemInstruction: { parts: [{ text: system }] },
-          tools: [{ googleSearch: {} }],
+          tools: [{ google_search: {} }],
         }),
       }
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error("Gemini error:", res.status, await res.text());
+      return null;
+    }
     const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
-  } catch {
+    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    const text = parts.map((p: { text?: string }) => p.text ?? "").join("").trim();
+    return text || null;
+  } catch (e) {
+    console.error("Gemini exception:", e);
     return null;
   }
 }
