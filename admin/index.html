@@ -875,25 +875,47 @@ async function sendAdminSms() {
 // ══════════════════════════════════════════════════════
 //  PAGE: LOGI
 // ══════════════════════════════════════════════════════
-async function renderLogs() {
-  const { data: logs, error } = await sb
-    .from('webhook_logs')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(50);
+const LOG_TYPE_STYLE = {
+  sms_in:       { label: 'SMS przych.', cls: 'badge-green' },
+  ai_response:  { label: 'AI odp.',     cls: 'badge-yellow' },
+  sms_sent:     { label: 'SMS wysł.',   cls: 'badge-green' },
+  sms_error:    { label: 'SMS błąd',    cls: 'badge-red' },
+  error:        { label: 'Błąd',        cls: 'badge-red' },
+  webhook:      { label: 'Webhook',     cls: 'badge-yellow' },
+};
 
-  const rows = (logs || []).map(l => {
-    const preview = JSON.stringify(l.raw_payload).slice(0, 100);
-    const full = l.raw_payload;
+async function renderLogs() {
+  const [{ data: logs }, { data: webhooks }] = await Promise.all([
+    sb.from('logs').select('*').order('created_at', { ascending: false }).limit(100),
+    sb.from('webhook_logs').select('*').order('created_at', { ascending: false }).limit(20),
+  ]);
+
+  const logRows = (logs || []).map(l => {
+    const style = LOG_TYPE_STYLE[l.type] || { label: l.type, cls: 'badge-yellow' };
+    const preview = JSON.stringify(l.data || {}).slice(0, 120);
     return `
       <tr>
         <td style="white-space:nowrap">${fmtDate(l.created_at)}</td>
+        <td><span class="badge ${style.cls}">${style.label}</span></td>
         <td>
-          <span
-            style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
-            onclick='showJsonModal(${escHtml(JSON.stringify(full))})'
-            title="Kliknij, aby zobaczyć pełny JSON"
-          >${escHtml(preview)}${preview.length >= 100 ? '…' : ''}</span>
+          <span style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
+            onclick='showJsonModal(${escHtml(JSON.stringify(l.data || {}))})'
+          >${escHtml(preview)}${preview.length >= 120 ? '…' : ''}</span>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  const webhookRows = (webhooks || []).map(l => {
+    const preview = JSON.stringify(l.raw_payload).slice(0, 120);
+    return `
+      <tr>
+        <td style="white-space:nowrap">${fmtDate(l.created_at)}</td>
+        <td><span class="badge badge-yellow">Raw webhook</span></td>
+        <td>
+          <span style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
+            onclick='showJsonModal(${escHtml(JSON.stringify(l.raw_payload))})'
+          >${escHtml(preview)}${preview.length >= 120 ? '…' : ''}</span>
         </td>
       </tr>
     `;
@@ -901,20 +923,24 @@ async function renderLogs() {
 
   document.getElementById('content').innerHTML = `
     <div class="page-header">
-      <h1>Logi webhooków</h1>
-      <p>Ostatnie 50 wpisów — kliknij payload, aby zobaczyć pełny JSON</p>
+      <h1>Logi</h1>
+      <p>Ostatnie 100 zdarzeń + 20 raw webhooków — kliknij wiersz, aby zobaczyć szczegóły</p>
     </div>
     <div class="section-card">
-      ${error ? `<p style="color:var(--danger)">${error.message}</p>` : ''}
+      <h2 style="font-size:14px;margin-bottom:12px">Zdarzenia systemowe</h2>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>Czas</th>
-              <th>Raw Payload</th>
-            </tr>
-          </thead>
-          <tbody>${rows || '<tr><td colspan="2" style="color:var(--muted);text-align:center">Brak logów</td></tr>'}</tbody>
+          <thead><tr><th>Czas</th><th>Typ</th><th>Dane</th></tr></thead>
+          <tbody>${logRows || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak logów</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section-card" style="margin-top:16px">
+      <h2 style="font-size:14px;margin-bottom:12px">Raw webhooki (Zadarma)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Czas</th><th>Typ</th><th>Payload</th></tr></thead>
+          <tbody>${webhookRows || '<tr><td colspan="3" style="color:var(--muted);text-align:center">Brak webhooków</td></tr>'}</tbody>
         </table>
       </div>
     </div>

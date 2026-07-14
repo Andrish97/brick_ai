@@ -67,6 +67,13 @@ async function sbDelete(url: string, key: string, table: string, filter: string)
   await fetch(`${url}/rest/v1/${table}?${filter}`, { method: "DELETE", headers: sbHeaders(key) });
 }
 
+let _sbLog: { url: string; key: string } | null = null;
+function initLog(url: string, key: string) { _sbLog = { url, key }; }
+function log(type: string, data: object) {
+  if (!_sbLog) return;
+  sbPost(_sbLog.url, _sbLog.key, "logs", { type, data }).catch(() => {});
+}
+
 // --- Parsowanie SMS ---
 
 function parseSms(body: string): { userCode: string; convCode: string | null; content: string } {
@@ -147,6 +154,7 @@ Deno.serve(async (req: Request) => {
 
   const SB = Deno.env.get("SUPABASE_URL")!;
   const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  initLog(SB, KEY);
 
   // Zapisz raw payload do webhook_logs
   await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });
@@ -168,9 +176,12 @@ Deno.serve(async (req: Request) => {
   const { userCode, convCode, content } = parseSms(smsBody);
   if (!content) return new Response("Empty content", { status: 200 });
 
+  log("sms_in", { from: senderPhone, userCode, convCode, content });
+
   // Identyfikacja użytkownika
   const users = await sbGet(SB, KEY, `users?code=eq.${userCode}&select=id,active,system_prompt`) as Array<{ id: string; active: boolean; system_prompt: string | null }>;
   if (!users.length || !users[0].active) {
+    log("error", { reason: "unknown_user", userCode, from: senderPhone });
     return new Response("Unknown user", { status: 200 });
   }
   const userId = users[0].id;
@@ -260,6 +271,8 @@ Deno.serve(async (req: Request) => {
   // Aktualizuj aktywność
   await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { last_activity_at: new Date().toISOString() });
 
+  log("ai_response", { convId, convCode: convCodeFinal, reply: aiReply, chars: aiReply.length });
+
   // Zabezpieczenie: upewnij się że aiReply + '\n' + kod nie przekracza 160 znaków
   const suffix = `\n${convCodeFinal}`;
   const safeReply = aiReply.slice(0, 160 - suffix.length);
@@ -271,8 +284,9 @@ Deno.serve(async (req: Request) => {
   // Wyślij SMS
   try {
     await sendSms(senderPhone, `${safeReply}${suffix}`, recipientDid);
+    log("sms_sent", { to: senderPhone, from: recipientDid, chars: safeReply.length + suffix.length });
   } catch (e) {
-    await sbPost(SB, KEY, "webhook_logs", { raw_payload: { error: "sendSms failed", message: String(e), to: senderPhone, from: recipientDid } });
+    log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
     return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { "Content-Type": "application/json" } });
   }
 
