@@ -769,6 +769,13 @@ async function renderWebhookTest() {
       <input type="text" id="wh-convcode" maxlength="6" placeholder="123456" />
       <label>Treść wiadomości</label>
       <textarea id="wh-body" placeholder="Twoja treść..."></textarea>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:14px">
+        <label class="toggle" style="margin:0">
+          <input type="checkbox" id="wh-dryrun" checked />
+          <span class="toggle-slider"></span>
+        </label>
+        <span style="font-size:13px">Dry run <span style="color:var(--muted);font-size:12px">(tylko test AI, bez wysyłki SMS)</span></span>
+      </div>
       <button class="btn btn-primary" style="margin-top:14px" onclick="sendWebhookTest()">Wyślij test</button>
       <div class="response-box" id="wh-response"></div>
     </div>
@@ -781,12 +788,12 @@ async function sendWebhookTest() {
   const userCode = document.getElementById('wh-usercode').value.trim();
   const convCode = document.getElementById('wh-convcode').value.trim();
   const body     = document.getElementById('wh-body').value.trim();
+  const dryRun   = document.getElementById('wh-dryrun').checked;
 
   let msgBody = userCode;
   if (convCode) msgBody += '\n' + convCode;
   msgBody += '\n' + body;
 
-  const sbUrl = SB_URL;
   const payload = {
     event: 'incoming_sms',
     sms_from: from,
@@ -794,8 +801,10 @@ async function sendWebhookTest() {
     msg: msgBody,
   };
 
+  const url = `${SB_URL}/functions/v1/zadarma-sms-webhook${dryRun ? '?dry_run=1' : ''}`;
+
   try {
-    const res = await fetch(`${sbUrl}/functions/v1/zadarma-sms-webhook`, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

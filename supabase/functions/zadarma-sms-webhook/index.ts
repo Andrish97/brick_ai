@@ -130,6 +130,7 @@ Deno.serve(async (req: Request) => {
     const echo = new URL(req.url).searchParams.get("zd_echo");
     return new Response(echo ?? "OK", { status: 200 });
   }
+  const dryRun = new URL(req.url).searchParams.get("dry_run") === "1";
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
   let raw: Record<string, string>;
@@ -262,6 +263,10 @@ Deno.serve(async (req: Request) => {
   // Zabezpieczenie: upewnij się że aiReply + '\n' + kod nie przekracza 160 znaków
   const suffix = `\n${convCodeFinal}`;
   const safeReply = aiReply.slice(0, 160 - suffix.length);
+
+  if (dryRun) {
+    return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${safeReply}${suffix}` }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
 
   // Wyślij SMS
   try {
