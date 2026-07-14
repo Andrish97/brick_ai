@@ -101,22 +101,27 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
   }
 }
 
-async function callDeepSeek(messages: Array<{ role: string; content: string }>, system: string): Promise<string> {
-  const res = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${Deno.env.get("DEEPSEEK_API_KEY")}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      max_tokens: 200,
-      messages: [{ role: "system", content: system }, ...messages],
-    }),
-  });
-  const data = await res.json();
-  return data.choices[0].message.content;
+async function callDeepSeek(messages: Array<{ role: string; content: string }>, system: string): Promise<string | null> {
+  try {
+    const res = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${Deno.env.get("DEEPSEEK_API_KEY")}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        max_tokens: 200,
+        messages: [{ role: "system", content: system }, ...messages],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function askAi(messages: Array<{ role: string; content: string }>, system: string): Promise<string> {
-  return (await callGemini(messages, system)) ?? (await callDeepSeek(messages, system));
+  return (await callGemini(messages, system)) ?? (await callDeepSeek(messages, system)) ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
 }
 
 // --- Handler ---
@@ -147,6 +152,8 @@ Deno.serve(async (req: Request) => {
   if (!senderPhone || !smsBody) return new Response("Missing fields", { status: 400 });
 
   const { userCode, convCode, content } = parseSms(smsBody);
+  if (!content) return new Response("Empty content", { status: 200 });
+
   const SB = Deno.env.get("SUPABASE_URL")!;
   const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -175,8 +182,10 @@ Deno.serve(async (req: Request) => {
     }
     await sbPost(SB, KEY, "conversations", { user_id: userId, code: newCode, status: "active" });
     const created = await sbGet(SB, KEY, `conversations?code=eq.${newCode}&select=id,code,summary`) as Conv[];
-    conv = created[0];
+    conv = created[0] ?? null;
   }
+
+  if (!conv) return new Response("Failed to create conversation", { status: 500 });
 
   const convId = conv.id;
   const convCodeFinal = conv.code;
@@ -208,9 +217,6 @@ Deno.serve(async (req: Request) => {
 
   const systemPrompt = `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
 
-  // Zapis wiadomości użytkownika
-  await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content });
-
   // Wywołaj AI
   const rawReply = await askAi(aiMessages, systemPrompt);
   let aiReply: string;
@@ -220,8 +226,9 @@ Deno.serve(async (req: Request) => {
       const json = JSON.parse(rawReply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
       summary = (json.summary ?? "").slice(0, 300);
       aiReply = (json.reply ?? rawReply).slice(0, MAX_REPLY_CHARS);
+      // Usuń stare wiadomości i zapisz summary PRZED zapisem nowych
+      await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
       await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
-      await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}&created_at=lt.${new Date().toISOString()}`);
     } catch {
       aiReply = rawReply.slice(0, MAX_REPLY_CHARS);
     }
@@ -229,7 +236,9 @@ Deno.serve(async (req: Request) => {
     aiReply = rawReply.slice(0, MAX_REPLY_CHARS);
   }
 
-  // Zapis odpowiedzi
+  // Zapis wiadomości użytkownika i odpowiedzi
+
+  await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content });
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: aiReply });
 
   // Aktualizuj aktywność
