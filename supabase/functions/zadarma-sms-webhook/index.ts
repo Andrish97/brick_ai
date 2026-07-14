@@ -304,7 +304,7 @@ Deno.serve(async (req: Request) => {
   }
 
   // Wywołaj AI
-  const rawReply = await askAi(aiMessages, systemPrompt, needsCompaction ? 800 : 100);
+  const rawReply = await askAi(aiMessages, systemPrompt, needsCompaction ? 2000 : 100);
   let aiReply: string;
 
   if (needsCompaction) {
