@@ -120,8 +120,44 @@ async function callDeepSeek(messages: Array<{ role: string; content: string }>, 
   }
 }
 
-async function askAi(messages: Array<{ role: string; content: string }>, system: string): Promise<string> {
-  return (await callGemini(messages, system)) ?? (await callDeepSeek(messages, system)) ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
+async function callClaude(messages: Array<{ role: string; content: string }>, system: string): Promise<string | null> {
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": Deno.env.get("ANTHROPIC_API_KEY") ?? "",
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 200,
+        system,
+        messages,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.content?.[0]?.text ?? null;
+  } catch {
+    return null;
+  }
+}
+
+type AiEntry = { id: string; enabled: boolean };
+
+async function askAi(messages: Array<{ role: string; content: string }>, system: string, config: AiEntry[]): Promise<string> {
+  const callers: Record<string, (m: typeof messages, s: string) => Promise<string | null>> = {
+    gemini: callGemini,
+    claude: callClaude,
+    deepseek: callDeepSeek,
+  };
+  for (const { id, enabled } of config) {
+    if (!enabled) continue;
+    const result = await callers[id]?.(messages, system);
+    if (result) return result;
+  }
+  return "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
 }
 
 // --- Handler ---
@@ -233,8 +269,13 @@ Deno.serve(async (req: Request) => {
     systemPrompt = settings[0]?.value ?? `Jesteś pomocnym asystentem AI działającym przez SMS. Odpowiadaj maksymalnie ${MAX_REPLY_CHARS} znaków. Bądź zwięzły i konkretny.`;
   }
 
+  // Konfiguracja kolejki AI
+  const aiConfigRows = await sbGet(SB, KEY, `settings?key=eq.ai_config&select=value`) as Array<{ value: string }>;
+  let aiConfig: AiEntry[] = [{ id: "gemini", enabled: true }, { id: "deepseek", enabled: true }];
+  try { if (aiConfigRows[0]?.value) aiConfig = JSON.parse(aiConfigRows[0].value); } catch { /* fallback */ }
+
   // Wywołaj AI
-  const rawReply = await askAi(aiMessages, systemPrompt);
+  const rawReply = await askAi(aiMessages, systemPrompt, aiConfig);
   let aiReply: string;
 
   if (needsCompaction) {
