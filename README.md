@@ -79,8 +79,8 @@ supabase secrets set \
 
 | Sekret | Skąd wziąć |
 |--------|-----------|
-| `ZADARMA_API_KEY` | Zadarma → Mój profil → Integracje i API → Klucze i API |
-| `ZADARMA_API_SECRET` | j.w. |
+| `ZADARMA_API_KEY` | Zadarma → Ustawienia → Integracje i API → Klucze i API → pole **Key** (wymaga potwierdzenia przez email) |
+| `ZADARMA_API_SECRET` | j.w. → pole **Secret** |
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
 | `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) → API Keys |
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
