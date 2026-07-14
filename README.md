@@ -18,7 +18,7 @@ treść wiadomości
 **Odpowiedź (max 160 znaków łącznie):**
 ```
 Odpowiedź AI (max 153 znaki)
-789012
+789012        ← kod rozmowy (6 cyfr) — użyj go w kolejnym SMS
 ```
 
 ---
