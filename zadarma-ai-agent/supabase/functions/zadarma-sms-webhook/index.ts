@@ -1,140 +1,61 @@
-import Anthropic from "npm:@anthropic-ai/sdk@0.27.0";
+import { createHmac, createHash } from "node:crypto";
 
 const ZADARMA_API_URL = "https://api.zadarma.com";
 
 interface ZadarmaSmsWebhook {
-  event: string;
+  event?: string;
   zd_echo?: string;
   caller_id?: string;
   called_did?: string;
   sms_from?: string;
   sms_to?: string;
   msg?: string;
-  date?: string;
 }
 
-function zadarmaSign(
-  params: Record<string, string>,
-  apiSecret: string,
-): string {
-  const sorted = Object.keys(params)
+function md5Hex(input: string): string {
+  return createHash("md5").update(input).digest("hex");
+}
+
+// Zadarma auth: base64(hex(HMAC-SHA1)) — PHP hash_hmac zwraca hex, base64_encode koduje ten hex
+function buildAuth(path: string, params: Record<string, string>, apiKey: string, apiSecret: string): string {
+  const paramStr = Object.keys(params)
     .sort()
-    .map((k) => `${k}=${params[k]}`)
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k]).replace(/%20/g, "+")}`)
     .join("&");
-  const hash = new TextEncoder().encode(sorted + apiSecret);
-  // Using SubtleCrypto for HMAC-SHA1
-  return sorted; // placeholder — signing handled below
-}
-
-async function hmacSha1(secret: string, data: string): Promise<string> {
-  const keyData = new TextEncoder().encode(secret);
-  const msgData = new TextEncoder().encode(data);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    keyData,
-    { name: "HMAC", hash: "SHA-1" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, msgData);
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
-}
-
-async function buildZadarmaAuth(
-  method: string,
-  params: Record<string, string>,
-  apiKey: string,
-  apiSecret: string,
-): Promise<string> {
-  const sorted = Object.keys(params)
-    .sort()
-    .map((k) => `${k}=${encodeURIComponent(params[k])}`)
-    .join("&");
-  const strToSign = method + sorted + md5Hex(sorted);
-  const sign = await hmacSha1(apiSecret, strToSign);
+  const hex = createHmac("sha1", apiSecret).update(path + paramStr + md5Hex(paramStr)).digest("hex");
+  const sign = btoa(hex);
   return `${apiKey}:${sign}`;
 }
 
-// Simple MD5 via SubtleCrypto is not available — use SHA-256 instead for the string hash
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const hashBuf = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hashBuf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-// Zadarma v1 auth: Authorization: api_key:sign
-// sign = base64(HMAC-SHA1(api_secret, method + params_string + md5(params_string)))
-// Since Deno doesn't have md5 built-in, we use the official zadarma approach with sha256 fallback
-// or just use the simpler approach documented in Zadarma API docs
-async function buildAuth(
-  urlPath: string,
-  params: Record<string, string>,
-  apiKey: string,
-  apiSecret: string,
-): Promise<string> {
-  const sorted = Object.keys(params)
-    .sort()
-    .map((k) => `${k}=${encodeURIComponent(params[k])}`)
-    .join("&");
-  const paramsHash = await sha256Hex(sorted);
-  const strToSign = urlPath + sorted + paramsHash;
-  const sign = await hmacSha1(apiSecret, strToSign);
-  return `${apiKey}:${sign}`;
-}
-
-async function sendZadarmaSms(
-  to: string,
-  message: string,
-  from: string,
-): Promise<void> {
+async function sendZadarmaSms(to: string, message: string, from: string): Promise<void> {
   const apiKey = Deno.env.get("ZADARMA_API_KEY")!;
   const apiSecret = Deno.env.get("ZADARMA_API_SECRET")!;
+  const path = "/v1/sms/send/";
+  const params: Record<string, string> = { number: to, message, caller_id: from };
+  const auth = buildAuth(path, params, apiKey, apiSecret);
 
-  const urlPath = "/v1/sms/send/";
-  const params: Record<string, string> = {
-    number: to,
-    message,
-    caller_id: from,
-  };
-
-  const auth = await buildAuth(urlPath, params, apiKey, apiSecret);
-
-  const body = new URLSearchParams(params);
-  const response = await fetch(`${ZADARMA_API_URL}${urlPath}`, {
+  const res = await fetch(`${ZADARMA_API_URL}${path}`, {
     method: "POST",
-    headers: {
-      Authorization: auth,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: body.toString(),
+    headers: { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(params).toString(),
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Zadarma SMS send failed: ${response.status} ${text}`);
+  if (!res.ok) {
+    throw new Error(`Zadarma SMS send failed: ${res.status} ${await res.text()}`);
   }
 }
 
-async function getConversationHistory(
+async function getHistory(
   supabaseUrl: string,
   supabaseKey: string,
-  phoneNumber: string,
+  phone: string,
 ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
-  const response = await fetch(
-    `${supabaseUrl}/rest/v1/conversations?phone_number=eq.${encodeURIComponent(phoneNumber)}&order=created_at.asc&limit=20`,
-    {
-      headers: {
-        apikey: supabaseKey,
-        Authorization: `Bearer ${supabaseKey}`,
-      },
-    },
+  const res = await fetch(
+    `${supabaseUrl}/rest/v1/conversations?phone_number=eq.${encodeURIComponent(phone)}&order=created_at.asc&limit=20`,
+    { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } },
   );
-
-  if (!response.ok) return [];
-
-  const rows: Array<{ role: string; content: string }> = await response.json();
+  if (!res.ok) return [];
+  const rows: Array<{ role: string; content: string }> = await res.json();
   return rows
     .filter((r) => r.role === "user" || r.role === "assistant")
     .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
@@ -143,7 +64,7 @@ async function getConversationHistory(
 async function saveMessage(
   supabaseUrl: string,
   supabaseKey: string,
-  phoneNumber: string,
+  phone: string,
   role: "user" | "assistant",
   content: string,
 ): Promise<void> {
@@ -155,45 +76,34 @@ async function saveMessage(
       "Content-Type": "application/json",
       Prefer: "return=minimal",
     },
-    body: JSON.stringify({ phone_number: phoneNumber, role, content }),
+    body: JSON.stringify({ phone_number: phone, role, content }),
   });
 }
 
 Deno.serve(async (req: Request) => {
-  // Zadarma webhook verification (echo challenge)
+  // Echo challenge (GET)
   if (req.method === "GET") {
-    const url = new URL(req.url);
-    const echo = url.searchParams.get("zd_echo");
-    if (echo) {
-      return new Response(echo, { status: 200 });
-    }
-    return new Response("OK", { status: 200 });
+    const echo = new URL(req.url).searchParams.get("zd_echo");
+    return new Response(echo ?? "OK", { status: 200 });
   }
 
-  if (req.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
-  }
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
   let payload: ZadarmaSmsWebhook;
   try {
-    const contentType = req.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
+    const ct = req.headers.get("content-type") ?? "";
+    if (ct.includes("application/json")) {
       payload = await req.json();
     } else {
-      const text = await req.text();
-      const params = new URLSearchParams(text);
-      payload = Object.fromEntries(params.entries()) as ZadarmaSmsWebhook;
+      payload = Object.fromEntries(new URLSearchParams(await req.text())) as ZadarmaSmsWebhook;
     }
   } catch {
     return new Response("Bad request", { status: 400 });
   }
 
-  // Handle echo challenge in POST body
-  if (payload.zd_echo) {
-    return new Response(payload.zd_echo, { status: 200 });
-  }
+  // Echo challenge (POST body)
+  if (payload.zd_echo) return new Response(payload.zd_echo, { status: 200 });
 
-  // Only handle incoming SMS events
   if (payload.event !== "sms" && payload.event !== "incoming_sms") {
     return new Response("Ignored", { status: 200 });
   }
@@ -202,54 +112,59 @@ Deno.serve(async (req: Request) => {
   const recipientDid = payload.sms_to ?? payload.called_did ?? "";
   const userMessage = payload.msg ?? "";
 
-  if (!senderPhone || !userMessage) {
-    return new Response("Missing fields", { status: 400 });
-  }
+  if (!senderPhone || !userMessage) return new Response("Missing fields", { status: 400 });
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const claudeApiKey = Deno.env.get("ANTHROPIC_API_KEY")!;
-  const systemPrompt = Deno.env.get("SYSTEM_PROMPT") ??
-    "Jesteś pomocnym asystentem AI. Odpowiadaj zwięźle, bo komunikujesz się przez SMS.";
+  const systemPrompt = "Jesteś pomocnym asystentem AI. Odpowiadaj zwięźle, bo komunikujesz się przez SMS.";
 
-  // Load conversation history
-  const history = await getConversationHistory(
-    supabaseUrl,
-    supabaseKey,
-    senderPhone,
-  );
-
-  // Save incoming user message
+  const history = await getHistory(supabaseUrl, supabaseKey, senderPhone);
   await saveMessage(supabaseUrl, supabaseKey, senderPhone, "user", userMessage);
 
-  // Call Claude API
-  const anthropic = new Anthropic({ apiKey: claudeApiKey });
-  const messages: Array<{ role: "user" | "assistant"; content: string }> = [
+  const messages = [
+    { role: "system", content: systemPrompt },
     ...history,
     { role: "user", content: userMessage },
   ];
 
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 300,
-    system: systemPrompt,
-    messages,
-  });
+  async function callGemini(): Promise<string | null> {
+    try {
+      const res = await fetch(
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${Deno.env.get("GEMINI_API_KEY")}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ model: "gemini-2.0-flash", max_tokens: 300, messages }),
+        },
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.choices?.[0]?.message?.content ?? null;
+    } catch {
+      return null;
+    }
+  }
 
-  const replyText =
-    response.content[0].type === "text" ? response.content[0].text : "";
+  async function callDeepSeek(): Promise<string> {
+    const res = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${Deno.env.get("DEEPSEEK_API_KEY")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "deepseek-chat", max_tokens: 300, messages }),
+    });
+    const data = await res.json();
+    return data.choices[0].message.content;
+  }
 
-  // Save assistant reply
-  await saveMessage(
-    supabaseUrl,
-    supabaseKey,
-    senderPhone,
-    "assistant",
-    replyText,
-  );
+  const reply = (await callGemini()) ?? (await callDeepSeek());
 
-  // Send SMS back via Zadarma
-  await sendZadarmaSms(senderPhone, replyText, recipientDid);
+  await saveMessage(supabaseUrl, supabaseKey, senderPhone, "assistant", reply);
+  await sendZadarmaSms(senderPhone, reply, recipientDid);
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
