@@ -269,7 +269,7 @@ Deno.serve(async (req: Request) => {
   let systemPrompt = userSystemPrompt ?? null;
   if (!systemPrompt) {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
-    systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. Odpowiadaj BARDZO krótko — maksymalnie ${MAX_REPLY_CHARS} znaków łącznie. Żadnych linków URL. Tylko fakty, zero wstępów.`;
+    systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${MAX_REPLY_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
 
   // Wywołaj AI
