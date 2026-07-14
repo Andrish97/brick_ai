@@ -1,4 +1,6 @@
-# Supabase project config — fill in project_id before running `supabase link`
+[project]
+project_id = "rjnqpenbjyeiygedjvzk"
+
 [api]
 enabled = true
 port = 54321
