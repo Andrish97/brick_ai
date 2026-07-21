@@ -239,17 +239,18 @@ async function getDirections(from: string, to: string, transport: string): Promi
 
   const lines: string[] = [];
   for (const step of leg.steps ?? []) {
+    if ((step.distanceMeters ?? 0) < 30) continue;
     const nav = step.navigationInstruction;
     if (!nav) continue;
     const arrow = maneuverArrow(nav.maneuver ?? "");
-    const instr = (nav.instructions ?? "").slice(0, 45);
-    const dist = step.distanceMeters ? ` (${formatDistance(step.distanceMeters)})` : "";
-    lines.push(`${arrow} ${instr}${dist}`);
+    const dist = step.distanceMeters ? formatDistance(step.distanceMeters) : "";
+    const instr = (nav.instructions ?? "").replace(/^(Skręć\s+\w+\s+w\s+|Jedź\s+prosto\s+(przez\s+|na\s+|ul\.\s*)?)/i, "").slice(0, 30);
+    lines.push(`${arrow}${dist} ${instr}`);
   }
 
   const totalDist = leg.distanceMeters ? formatDistance(leg.distanceMeters) : "";
   const totalTime = leg.duration ? `~${Math.round(parseInt(leg.duration) / 60)}min` : "";
-  lines.push(`★ ${to.slice(0, 35)}${totalDist ? ` (${totalDist}, ${totalTime})` : ""}`);
+  lines.push(`★ ${to.slice(0, 25)} ${totalDist} ${totalTime}`.trimEnd());
 
   return lines.join("\n");
 }
@@ -432,6 +433,8 @@ Deno.serve(async (req: Request) => {
     }
 
     const transport = profileTransport ?? "pieszo";
+    const modeMap: Record<string, string> = { "samochód": "DRIVE", "rower": "BICYCLE", "hulajnoga": "BICYCLE", "pieszo": "WALK" };
+    log("nav_request", { convId, from: fromAddr, to: toAddr, transport, travelMode: modeMap[transport] ?? "WALK" });
 
     // Nawigacja zawsze z extended mode i continuation
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true });
@@ -440,8 +443,8 @@ Deno.serve(async (req: Request) => {
     const mapsResult = await getDirections(fromAddr, toAddr, transport);
 
     if (!mapsResult) {
-      // Brak klucza Maps API lub błąd
       const noKey = !Deno.env.get("GOOGLE_MAPS_API_KEY");
+      log("nav_failed", { convId, from: fromAddr, to: toAddr, transport, reason: noKey ? "no_api_key" : "no_route" });
       const errMsg = noKey
         ? "Nawigacja wymaga klucza Google Maps API. Dodaj sekret GOOGLE_MAPS_API_KEY w Supabase."
         : "Nie udalo sie pobrac trasy. Sprawdz adresy i sprobuj ponownie.";
@@ -452,28 +455,34 @@ Deno.serve(async (req: Request) => {
 
     const navText = sanitizeForSms(mapsResult);
 
-    const CHUNK_SIZE = 160 - suffix.length;
-    const firstChunk = navText.length > CHUNK_SIZE - 3 ? navText.slice(0, CHUNK_SIZE - 3) + "..." : navText;
-    const remaining = navText.length > CHUNK_SIZE - 3 ? navText.slice(CHUNK_SIZE - 3) : null;
+    // Dzielimy na części po 153 znaki (concatenated SMS — operator łączy po stronie odbiorcy)
+    // Każda część zawiera suffix z kodem rozmowy
+    const PART_SIZE = 153 - suffix.length;
+    const parts: string[] = [];
+    for (let i = 0; i < navText.length; i += PART_SIZE) {
+      parts.push(navText.slice(i, i + PART_SIZE));
+    }
 
     await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: navText });
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, {
       last_activity_at: new Date().toISOString(),
-      pending_reply: remaining,
+      pending_reply: null,
     });
-    log("nav_sent", { convId, from: fromAddr, to: toAddr, transport, chars: navText.length, hasMore: !!remaining });
+    log("nav_sent", { convId, from: fromAddr, to: toAddr, transport, chars: navText.length, parts: parts.length });
 
     if (dryRun) {
-      return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${firstChunk}${suffix}` }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ ok: true, dry_run: true, reply: parts.map(p => `${p}${suffix}`).join("\n---\n"), parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
     }
     try {
-      await sendSms(senderPhone, `${firstChunk}${suffix}`, recipientDid);
-      sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
+      for (const part of parts) {
+        await sendSms(senderPhone, `${part}${suffix}`, recipientDid);
+        sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
+      }
     } catch (e) {
       log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
       return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
     }
-    return new Response(JSON.stringify({ ok: true, navigation: true, has_more: !!remaining }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ok: true, navigation: true, parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
   // Kontynuacja — wysyłamy następny chunk bez angażowania AI
@@ -561,9 +570,15 @@ Deno.serve(async (req: Request) => {
   if (profileName) profileLines.push(`Imię: ${profileName}`);
   if (profileHome) profileLines.push(`Adres domowy: ${profileHome}`);
   if (profileWork) profileLines.push(`Adres pracy: ${profileWork}`);
-  if (profileTransport) profileLines.push(`Domyślny środek transportu: ${profileTransport}`);
+  if (profileTransport) {
+    const transportNote = profileTransport === "hulajnoga"
+      ? `Domyślny środek transportu: hulajnoga elektryczna (ścieżki rowerowe priorytetowo; chodniki gdy brak ścieżki; drogi do 30 km/h; zakaz autostrad i dróg ekspresowych; max 25 km/h)`
+      : `Domyślny środek transportu: ${profileTransport}`;
+    profileLines.push(transportNote);
+  }
   if (profileLines.length) {
     systemPrompt = `[Profil użytkownika]\n${profileLines.join("\n")}\n\n${systemPrompt}`;
+    if (profileTransport) log("ai_transport_context", { convId, transport: profileTransport });
   }
 
   // Wywołaj AI

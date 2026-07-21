@@ -252,6 +252,9 @@
       padding: 0;
       width: 420px;
       max-width: 95vw;
+      max-height: 92vh;
+      display: flex;
+      flex-direction: column;
       box-shadow: 0 20px 60px rgba(0,0,0,.5);
       animation: slideUp .15s ease;
     }
@@ -267,7 +270,7 @@
       border-radius: 4px; transition: color .15s;
     }
     .uni-close:hover { color: var(--text); }
-    .uni-body { padding: 12px 24px 20px; color: var(--muted); font-size: 14px; line-height: 1.5; white-space: pre-line; }
+    .uni-body { padding: 12px 24px 20px; color: var(--muted); font-size: 14px; line-height: 1.5; white-space: pre-line; overflow-y: auto; flex: 1; }
     .uni-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 0 24px 20px; }
 
     /* ── CUSTOM SELECT ── */
@@ -1058,6 +1061,7 @@ async function openUserModal(userId = null) {
           <option value="samochód" ${user?.profile_transport === 'samochód' ? 'selected' : ''}>Samochód</option>
           <option value="komunikacja miejska" ${user?.profile_transport === 'komunikacja miejska' ? 'selected' : ''}>Komunikacja miejska</option>
           <option value="rower" ${user?.profile_transport === 'rower' ? 'selected' : ''}>Rower</option>
+          <option value="hulajnoga" ${user?.profile_transport === 'hulajnoga' ? 'selected' : ''}>Hulajnoga</option>
           <option value="pieszo" ${user?.profile_transport === 'pieszo' ? 'selected' : ''}>Pieszo</option>
         </select>
       </div>
@@ -1179,12 +1183,14 @@ async function renderConversations() {
           <span class="toggle-slider"></span>
         </label>
       </td>
-      <td onclick="event.stopPropagation()" style="text-align:right;display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-        ${c.status === 'active'
-          ? `<button class="btn btn-ghost btn-icon" onclick="closeConv('${c.id}')" title="Zamknij" style="width:auto;padding:0 8px">Zamknij</button>`
-          : ''
-        }
-        <button class="btn btn-danger btn-icon" onclick="deleteConv('${c.id}')" title="Usuń rozmowę">×</button>
+      <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
+        <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
+          ${c.status === 'active'
+            ? `<button class="btn btn-ghost btn-icon" onclick="closeConv('${c.id}')" title="Zamknij" style="width:auto;padding:0 8px">Zamknij</button>`
+            : ''
+          }
+          <button class="btn btn-danger btn-icon" onclick="deleteConv('${c.id}')" title="Usuń rozmowę">×</button>
+        </div>
       </td>
     </tr>
   `).join('');
