@@ -1045,6 +1045,31 @@ async function openUserModal(userId = null) {
     </div>
     <div class="uni-section">Numer wysyłkowy</div>
     <select id="um-phone-number-id">${phoneOptsHtml}</select>
+    <div class="uni-section">Profil użytkownika (kontekst dla AI)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px">
+      <div>
+        <label>Imię</label>
+        <input type="text" id="um-profile-name" placeholder="np. Jan" value="${escHtml(user?.profile_name || '')}" />
+      </div>
+      <div>
+        <label>Transport</label>
+        <select id="um-profile-transport">
+          <option value="">— nie ustawiony —</option>
+          <option value="samochód" ${user?.profile_transport === 'samochód' ? 'selected' : ''}>Samochód</option>
+          <option value="komunikacja miejska" ${user?.profile_transport === 'komunikacja miejska' ? 'selected' : ''}>Komunikacja miejska</option>
+          <option value="rower" ${user?.profile_transport === 'rower' ? 'selected' : ''}>Rower</option>
+          <option value="pieszo" ${user?.profile_transport === 'pieszo' ? 'selected' : ''}>Pieszo</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-bottom:8px">
+      <label>Dom (adres z ulicą)</label>
+      <input type="text" id="um-profile-home" placeholder="np. ul. Marszałkowska 1, Warszawa" value="${escHtml(user?.profile_home || '')}" />
+    </div>
+    <div style="margin-bottom:4px">
+      <label>Praca (adres z ulicą)</label>
+      <input type="text" id="um-profile-work" placeholder="np. ul. Puławska 17, Warszawa" value="${escHtml(user?.profile_work || '')}" />
+    </div>
     <div class="uni-section">Prompt</div>
     <textarea id="um-prompt" style="min-height:60px" placeholder="Puste = globalny prompt systemowy">${escHtml(user?.system_prompt || '')}</textarea>
     <div class="err-msg" id="um-err"></div>
@@ -1089,15 +1114,29 @@ async function openUserModal(userId = null) {
       const phone = document.getElementById('um-phone').value.trim();
       const prompt = document.getElementById('um-prompt').value.trim();
       const phoneNumberId = document.getElementById('um-phone-number-id').value || null;
+      const profileName = document.getElementById('um-profile-name').value.trim();
+      const profileHome = document.getElementById('um-profile-home').value.trim();
+      const profileWork = document.getElementById('um-profile-work').value.trim();
+      const profileTransport = document.getElementById('um-profile-transport').value;
       const errEl = document.getElementById('um-err');
       errEl.textContent = '';
       if (!/^\d{4}$/.test(code)) { errEl.textContent = 'Kod musi składać się z 4 cyfr.'; return; }
 
+      const fields = {
+        code,
+        phone_number: phone || null,
+        system_prompt: prompt || null,
+        phone_number_id: phoneNumberId,
+        profile_name: profileName || null,
+        profile_home: profileHome || null,
+        profile_work: profileWork || null,
+        profile_transport: profileTransport || null,
+      };
       let error;
       if (user) {
-        ({ error } = await sb.from('users').update({ code, phone_number: phone || null, system_prompt: prompt || null, phone_number_id: phoneNumberId }).eq('id', user.id));
+        ({ error } = await sb.from('users').update(fields).eq('id', user.id));
       } else {
-        ({ error } = await sb.from('users').insert({ code, phone_number: phone || null, system_prompt: prompt || null, phone_number_id: phoneNumberId, active: true }));
+        ({ error } = await sb.from('users').insert({ ...fields, active: true }));
       }
       if (error) { errEl.textContent = error.message; return; }
       finish(true);
@@ -1134,6 +1173,12 @@ async function renderConversations() {
           ${c.status === 'active' ? 'aktywna' : 'zamknięta'}
         </span>
       </td>
+      <td onclick="event.stopPropagation()">
+        <label class="toggle" title="Tryb rozszerzony (dłuższe odpowiedzi)">
+          <input type="checkbox" ${c.extended_mode ? 'checked' : ''} onchange="toggleExtendedMode('${c.id}', this.checked)" />
+          <span class="toggle-slider"></span>
+        </label>
+      </td>
       <td onclick="event.stopPropagation()" style="text-align:right;display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
         ${c.status === 'active'
           ? `<button class="btn btn-ghost btn-icon" onclick="closeConv('${c.id}')" title="Zamknij" style="width:auto;padding:0 8px">Zamknij</button>`
@@ -1162,6 +1207,7 @@ async function renderConversations() {
               <th>Użytkownik</th>
               <th>Ostatnia aktywność</th>
               <th>Status</th>
+              <th title="Tryb rozszerzony">Rozszerz.</th>
               <th></th>
             </tr>
           </thead>
@@ -1175,6 +1221,10 @@ async function renderConversations() {
 async function closeConv(id) {
   await sb.from('conversations').update({ status: 'closed' }).eq('id', id);
   renderConversations();
+}
+
+async function toggleExtendedMode(id, enabled) {
+  await sb.from('conversations').update({ extended_mode: enabled }).eq('id', id);
 }
 
 async function deleteConv(id) {

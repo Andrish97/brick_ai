@@ -8,7 +8,11 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
-const MAX_REPLY_CHARS = 153;  // 160 - '\n' - 6 cyfr kodu rozmowy
+const MAX_REPLY_CHARS = 153;  // 160 - '\n' - 6 cyfr kodu rozmowy (jeden SMS)
+const MAX_CONT_CHARS = 459;   // 3x SMS — max długość odpowiedzi AI z kontynuacją
+const CONTINUE_KEYWORDS = ["dalej", "więcej", "next", "kontynuuj"];
+const EXTENDED_ON_KEYWORDS = ["tryb długi", "rozwiń", "extended on"];
+const EXTENDED_OFF_KEYWORDS = ["tryb krótki", "extended off"];
 
 function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
@@ -22,6 +26,19 @@ function smartTrim(text: string, max: number): string {
   const lastSpace = cut.lastIndexOf(" ");
   if (lastSpace > max * 0.6) return cut.slice(0, lastSpace).trim();
   return cut.trim();
+}
+
+function sanitizeForSms(text: string): string {
+  return text
+    .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')  // cudzysłowy → "
+    .replace(/[\u2018\u2019\u201A\u2039\u203A]/g, "'")  // apostrofy → '
+    .replace(/\u2013/g, '-')                              // półpauza → -
+    .replace(/\u2014/g, '--')                             // pauza → --
+    .replace(/\u2026/g, '...')                            // wielokropek → ...
+    .replace(/\u00A0/g, ' ')                              // spacja niełamliwa → spacja
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')               // znaki zerowej szerokości
+    .replace(/\r\n|\r/g, '\n')                            // CRLF/CR → LF
+    .trim();
 }
 
 // --- Zadarma auth ---
@@ -93,7 +110,18 @@ function log(type: string, data: object) {
 
 // --- Parsowanie SMS ---
 
-function parseSms(body: string): { userCode: string; convCode: string | null; content: string } {
+// Znany numer: opcjonalny kod rozmowy (6 cyfr) w pierwszej linii, reszta to treść
+function parseSmsKnownPhone(body: string): { convCode: string | null; content: string } {
+  const lines = body.trim().split("\n").map((l) => l.trim());
+  const first = lines[0] ?? "";
+  if (/^\d{6}$/.test(first)) {
+    return { convCode: first, content: lines.slice(1).join("\n").trim() };
+  }
+  return { convCode: null, content: body.trim() };
+}
+
+// Nieznany numer: pierwsza linia = kod użytkownika, opcjonalna druga = kod rozmowy
+function parseSmsUnknownPhone(body: string): { userCode: string; convCode: string | null; content: string } {
   const lines = body.trim().split("\n").map((l) => l.trim());
   const userCode = lines[0] ?? "";
   const second = lines[1] ?? "";
@@ -208,36 +236,55 @@ Deno.serve(async (req: Request) => {
     return new Response("Missing fields", { status: 400, headers: CORS });
   }
 
-  const { userCode, convCode, content } = parseSms(smsBody);
-  log("sms_parsed", { from: senderPhone, to: recipientDid, userCode, convCode, content, smsBody });
+  // Identyfikacja użytkownika: najpierw po numerze telefonu, fallback na kod
+  type UserRow = { id: string; active: boolean; system_prompt: string | null; profile_name: string | null; profile_home: string | null; profile_work: string | null; profile_transport: string | null };
+  const usersByPhone = await sbGet(SB, KEY, `users?phone_number=eq.${encodeURIComponent(senderPhone)}&active=eq.true&select=id,active,system_prompt,profile_name,profile_home,profile_work,profile_transport`) as UserRow[];
 
-  // Identyfikacja użytkownika po kodzie (pierwsza linia SMS)
-  type UserRow = { id: string; active: boolean; system_prompt: string | null };
-  const matchedUsers = await sbGet(SB, KEY, `users?code=eq.${userCode}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
+  let matchedUsers: UserRow[];
+  let convCode: string | null;
+  let effectiveContent: string;
 
-  if (!matchedUsers.length) {
-    log("error", { reason: "unknown_user", userCode, from: senderPhone });
-    return new Response("Unknown user", { status: 200, headers: CORS });
+  if (usersByPhone.length) {
+    // Znany numer — kod użytkownika zbędny
+    matchedUsers = usersByPhone;
+    const parsed = parseSmsKnownPhone(smsBody);
+    convCode = parsed.convCode;
+    effectiveContent = parsed.content;
+    log("sms_parsed", { from: senderPhone, to: recipientDid, knownPhone: true, convCode, content: effectiveContent, smsBody });
+  } else {
+    // Nieznany numer — wymagany kod użytkownika (pierwsza linia)
+    const parsed = parseSmsUnknownPhone(smsBody);
+    convCode = parsed.convCode;
+    effectiveContent = parsed.content;
+    log("sms_parsed", { from: senderPhone, to: recipientDid, knownPhone: false, userCode: parsed.userCode, convCode, content: effectiveContent, smsBody });
+
+    matchedUsers = await sbGet(SB, KEY, `users?code=eq.${parsed.userCode}&active=eq.true&select=id,active,system_prompt,profile_name,profile_home,profile_work,profile_transport`) as UserRow[];
+    if (!matchedUsers.length) {
+      log("error", { reason: "unknown_user", userCode: parsed.userCode, from: senderPhone });
+      return new Response("Unknown user", { status: 200, headers: CORS });
+    }
   }
 
-  const effectiveContent = content;
-
   if (!effectiveContent) {
-    log("error", { reason: "empty_content", userCode, from: senderPhone, smsBody });
+    log("error", { reason: "empty_content", from: senderPhone, smsBody });
     return new Response("Empty content", { status: 200, headers: CORS });
   }
 
   const userId = matchedUsers[0].id;
   const userSystemPrompt = matchedUsers[0].system_prompt ?? null;
+  const profileName = matchedUsers[0].profile_name ?? null;
+  const profileHome = matchedUsers[0].profile_home ?? null;
+  const profileWork = matchedUsers[0].profile_work ?? null;
+  const profileTransport = matchedUsers[0].profile_transport ?? null;
 
-  log("sms_in", { from: senderPhone, to: recipientDid, userCode, convCode, content: effectiveContent });
+  log("sms_in", { from: senderPhone, to: recipientDid, convCode, content: effectiveContent });
 
   // Znalezienie lub utworzenie rozmowy
-  type Conv = { id: string; code: string; summary: string | null };
+  type Conv = { id: string; code: string; summary: string | null; pending_reply: string | null; extended_mode: boolean };
   let conv: Conv | null = null;
 
   if (convCode) {
-    const found = await sbGet(SB, KEY, `conversations?code=eq.${convCode}&user_id=eq.${userId}&status=eq.active&select=id,code,summary`) as Conv[];
+    const found = await sbGet(SB, KEY, `conversations?code=eq.${convCode}&user_id=eq.${userId}&status=eq.active&select=id,code,summary,pending_reply,extended_mode`) as Conv[];
     conv = found[0] ?? null;
     if (!conv) log("error", { reason: "conv_not_found", convCode, userId });
   }
@@ -250,7 +297,7 @@ Deno.serve(async (req: Request) => {
       if (!existing.length) break;
     }
     await sbPost(SB, KEY, "conversations", { user_id: userId, code: newCode, status: "active" });
-    const created = await sbGet(SB, KEY, `conversations?code=eq.${newCode}&select=id,code,summary`) as Conv[];
+    const created = await sbGet(SB, KEY, `conversations?code=eq.${newCode}&select=id,code,summary,pending_reply,extended_mode`) as Conv[];
     conv = created[0] ?? null;
     if (conv) log("conv_new", { convCode: newCode, userId, requestedConvCode: convCode ?? null });
   }
@@ -263,6 +310,8 @@ Deno.serve(async (req: Request) => {
   const convId = conv.id;
   const convCodeFinal = conv.code;
   let summary = conv.summary ?? null;
+  let pendingReply = conv.pending_reply ?? null;
+  const extendedMode = conv.extended_mode ?? false;
 
   // Zamknięcie rozmowy słowem kluczowym
   const kwSettings = await sbGet(SB, KEY, `settings?key=eq.close_keywords&select=value`) as Array<{ value: string }>;
@@ -273,9 +322,72 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
+  // Włączanie / wyłączanie trybu rozszerzonego przez SMS
+  const msgLower = effectiveContent.trim().toLowerCase();
+  if (EXTENDED_ON_KEYWORDS.includes(msgLower)) {
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true, pending_reply: null });
+    log("extended_mode_on", { convId, convCode: convCodeFinal });
+    const suffix = `\n${convCodeFinal}`;
+    const info = `Tryb rozszerzony wlaczony. AI moze odpowiadac dluzej — pisz "dalej" po kolejne czesci.`;
+    if (!dryRun) await sendSms(senderPhone, `${info}${suffix}`, recipientDid);
+    return new Response(JSON.stringify({ ok: true, extended_mode: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+  if (EXTENDED_OFF_KEYWORDS.includes(msgLower)) {
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: false, pending_reply: null });
+    log("extended_mode_off", { convId, convCode: convCodeFinal });
+    const suffix = `\n${convCodeFinal}`;
+    const info = `Tryb rozszerzony wylaczony.`;
+    if (!dryRun) await sendSms(senderPhone, `${info}${suffix}`, recipientDid);
+    return new Response(JSON.stringify({ ok: true, extended_mode: false }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+
+  // Kontynuacja — wysyłamy następny chunk bez angażowania AI
+  if (CONTINUE_KEYWORDS.includes(effectiveContent.trim().toLowerCase()) && pendingReply) {
+    const suffix = `\n${convCodeFinal}`;
+    const chunkSize = 160 - suffix.length;
+    const chunk = pendingReply.slice(0, chunkSize);
+    const remaining = pendingReply.slice(chunkSize) || null;
+
+    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
+    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: chunk });
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, {
+      pending_reply: remaining,
+      last_activity_at: new Date().toISOString(),
+    });
+    log("continuation_sent", { convId, convCode: convCodeFinal, chunkLen: chunk.length, hasMore: !!remaining });
+
+    if (dryRun) {
+      return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${chunk}${suffix}`, has_more: !!remaining }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+    }
+    try {
+      await sendSms(senderPhone, `${chunk}${suffix}`, recipientDid);
+      sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
+    } catch (e) {
+      log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
+      return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ ok: true, continuation: true, has_more: !!remaining }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+
+  // Nowa wiadomość — czyścimy ewentualne pending_reply
+  if (pendingReply) {
+    pendingReply = null;
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { pending_reply: null });
+  }
+
   // Historia wiadomości
-  type Msg = { direction: string; content: string };
-  const msgs = await sbGet(SB, KEY, `messages?conversation_id=eq.${convId}&order=created_at.asc&select=direction,content`) as Msg[];
+  type Msg = { direction: string; content: string; created_at: string };
+  const msgs = await sbGet(SB, KEY, `messages?conversation_id=eq.${convId}&order=created_at.asc&select=direction,content,created_at`) as Msg[];
+
+  // Sprawdź duplikaty — Zadarma może wielokrotnie wysłać ten sam webhook
+  const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  const isDuplicate = msgs.some(
+    (m) => m.direction === "in" && m.content === effectiveContent && m.created_at >= twoMinutesAgo
+  );
+  if (isDuplicate) {
+    log("duplicate_skipped", { convId, convCode: convCodeFinal, content: effectiveContent });
+    return new Response(JSON.stringify({ ok: true, duplicate: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
 
   // Kontekst dla AI
   const aiMessages: Array<{ role: string; content: string }> = [];
@@ -302,39 +414,67 @@ Deno.serve(async (req: Request) => {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
     systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${MAX_REPLY_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
+  if (extendedMode) {
+    systemPrompt = systemPrompt.replace(
+      new RegExp(`MAKSYMALNIE ${MAX_REPLY_CHARS} ZNAKÓW`, 'g'),
+      `MAKSYMALNIE ${MAX_CONT_CHARS} ZNAKÓW`
+    ) + ` Możesz pisać do ${MAX_CONT_CHARS} znaków — odpowiedź zostanie automatycznie podzielona na SMS-y.`;
+  }
+
+  // Dołącz profil użytkownika do system promptu
+  const profileLines: string[] = [];
+  if (profileName) profileLines.push(`Imię: ${profileName}`);
+  if (profileHome) profileLines.push(`Adres domowy: ${profileHome}`);
+  if (profileWork) profileLines.push(`Adres pracy: ${profileWork}`);
+  if (profileTransport) profileLines.push(`Domyślny środek transportu: ${profileTransport}`);
+  if (profileLines.length) {
+    systemPrompt = `[Profil użytkownika]\n${profileLines.join("\n")}\n\n${systemPrompt}`;
+  }
 
   // Wywołaj AI
-  const rawReply = await askAi(aiMessages, systemPrompt, needsCompaction ? 600 : 100);
+  const rawReply = await askAi(aiMessages, systemPrompt, needsCompaction ? 600 : extendedMode ? 300 : 100);
   let aiReply: string;
 
   if (needsCompaction) {
     try {
       const json = JSON.parse(rawReply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
       summary = json.summary ?? "";
-      aiReply = smartTrim(stripUrls(json.reply ?? rawReply), MAX_REPLY_CHARS);
+      aiReply = sanitizeForSms(smartTrim(stripUrls(json.reply ?? rawReply), extendedMode ? MAX_CONT_CHARS : MAX_REPLY_CHARS));
       // Usuń stare wiadomości i zapisz summary PRZED zapisem nowych
       await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
       await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
     } catch {
-      aiReply = smartTrim(rawReply, MAX_REPLY_CHARS);
+      aiReply = sanitizeForSms(smartTrim(rawReply, extendedMode ? MAX_CONT_CHARS : MAX_REPLY_CHARS));
     }
   } else {
-    aiReply = smartTrim(stripUrls(rawReply), MAX_REPLY_CHARS);
+    aiReply = sanitizeForSms(smartTrim(stripUrls(rawReply), extendedMode ? MAX_CONT_CHARS : MAX_REPLY_CHARS));
   }
 
-  // Zapis wiadomości użytkownika i odpowiedzi
+  // Podziel odpowiedź na chunki jeśli dłuższa niż jeden SMS
+  const suffix = `\n${convCodeFinal}`;
+  const CHUNK_SIZE = 160 - suffix.length; // 153
+  let safeReply: string;
+  let newPendingReply: string | null = null;
 
+  if (aiReply.length > CHUNK_SIZE) {
+    // Pierwsza część + "...", reszta trafia do pending_reply
+    safeReply = aiReply.slice(0, CHUNK_SIZE - 3) + "...";
+    newPendingReply = aiReply.slice(CHUNK_SIZE - 3);
+  } else {
+    safeReply = aiReply;
+  }
+
+  // Zapis wiadomości użytkownika i pełnej odpowiedzi AI
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: aiReply });
 
-  // Aktualizuj aktywność
-  await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { last_activity_at: new Date().toISOString() });
+  // Aktualizuj aktywność i pending_reply
+  await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, {
+    last_activity_at: new Date().toISOString(),
+    pending_reply: newPendingReply,
+  });
 
-  log("ai_response", { convId, convCode: convCodeFinal, reply: aiReply, chars: aiReply.length });
-
-  // Zabezpieczenie: upewnij się że aiReply + '\n' + kod nie przekracza 160 znaków
-  const suffix = `\n${convCodeFinal}`;
-  const safeReply = aiReply.slice(0, 160 - suffix.length);
+  log("ai_response", { convId, convCode: convCodeFinal, reply: safeReply, chars: safeReply.length, hasMore: !!newPendingReply });
 
   if (dryRun) {
     return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${safeReply}${suffix}` }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
