@@ -33,10 +33,10 @@ Odpowiedź AI (max 153 znaki)
 
 | Komenda | Opis |
 |---------|------|
-| `tryb długi` / `rozwiń` / `extended on` | Włącza tryb rozszerzony dla **tej rozmowy** |
-| `tryb krótki` / `extended off` | Wyłącza tryb rozszerzony |
-| `dalej` / `więcej` / `next` / `kontynuuj` | Wysyła następną część długiej odpowiedzi |
-| `nawigacja A > B` | Trasa turn-by-turn z A do B |
+| `->` | Włącza tryb rozszerzony dla **tej rozmowy** |
+| `<-` | Wyłącza tryb rozszerzony |
+| `-->` | Wysyła następną część długiej odpowiedzi |
+| `nav A > B` | Trasa turn-by-turn z A do B |
 | `koniec` / `stop` / `zamknij` / `end` | Zamyka bieżącą rozmowę |
 
 ---
@@ -46,10 +46,10 @@ Odpowiedź AI (max 153 znaki)
 Domyślnie AI odpowiada w jednym SMS (max 153 znaki treści). Tryb rozszerzony pozwala na odpowiedzi do ~450 znaków (3 SMS), dzielone automatycznie.
 
 **Jak to działa:**
-1. Wysyłasz `tryb długi` — system potwierdza, flaga ustawiona na tę rozmowę
+1. Wysyłasz `->` — system potwierdza, flaga ustawiona na tę rozmowę
 2. AI dostaje instrukcję że może pisać dłużej
 3. Jeśli odpowiedź nie mieści się w jednym SMS — pierwszy fragment wysłany z `...` na końcu, reszta zapamiętana
-4. Piszesz `dalej` — dostajesz kolejny fragment bez angażowania AI
+4. Piszesz `-->` — dostajesz kolejny fragment bez angażowania AI
 5. Kolejne `dalej` aż do końca odpowiedzi
 6. Gdy piszesz nową wiadomość (nie `dalej`) — zapamiętana reszta jest kasowana, zaczynasz od nowa
 
@@ -63,9 +63,9 @@ Wymaga sekretu `GOOGLE_MAPS_API_KEY` z włączonym **Routes API**.
 
 **Format komendy:**
 ```
-nawigacja Marszałkowska 1, Warszawa > Puławska 17, Warszawa
-nawigacja dom > praca
-nawigacja dom > Dworzec Centralny, Warszawa
+nav Marszałkowska 1, Warszawa > Puławska 17, Warszawa
+nav dom > praca
+nav dom > Dworzec Centralny, Warszawa
 ```
 
 Skróty `dom` i `praca` pobierane z profilu użytkownika.
@@ -89,7 +89,7 @@ Strzałki: `↑` prosto · `↰` lewo · `↱` prawo · `↩` zawróć
 | Pieszo | WALK — chodniki i przejścia |
 | Hulajnoga | BICYCLE — ścieżki rowerowe, unika ruchliwych ulic |
 
-Nawigacja **zawsze włącza tryb rozszerzony** i dzieli trasę na fragmenty. Pisz `dalej` po kolejne kroki.
+Nawigacja **zawsze włącza tryb rozszerzony** i dzieli trasę na fragmenty. Pisz `-->` po kolejne kroki.
 
 ---
 

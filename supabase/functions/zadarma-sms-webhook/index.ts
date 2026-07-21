@@ -10,9 +10,9 @@ const CORS = {
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
 const MAX_REPLY_CHARS = 153;  // 160 - '\n' - 6 cyfr kodu rozmowy (jeden SMS)
 const MAX_CONT_CHARS = 459;   // 3x SMS — max długość odpowiedzi AI z kontynuacją
-const CONTINUE_KEYWORDS = ["dalej", "więcej", "next", "kontynuuj"];
-const EXTENDED_ON_KEYWORDS = ["tryb długi", "rozwiń", "extended on"];
-const EXTENDED_OFF_KEYWORDS = ["tryb krótki", "extended off"];
+const CONTINUE_KEYWORDS = ["-->"];
+const EXTENDED_ON_KEYWORDS = ["->"];
+const EXTENDED_OFF_KEYWORDS = ["<-"];
 
 function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
@@ -397,7 +397,7 @@ Deno.serve(async (req: Request) => {
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true, pending_reply: null });
     log("extended_mode_on", { convId, convCode: convCodeFinal });
     const suffix = `\n${convCodeFinal}`;
-    const info = `Tryb rozszerzony wlaczony. AI moze odpowiadac dluzej — pisz "dalej" po kolejne czesci.`;
+    const info = `Tryb rozszerzony wlaczony. Pisz --> po kolejne czesci.`;
     if (!dryRun) await sendSms(senderPhone, `${info}${suffix}`, recipientDid);
     return new Response(JSON.stringify({ ok: true, extended_mode: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
@@ -411,7 +411,7 @@ Deno.serve(async (req: Request) => {
   }
 
   // Nawigacja: "nawigacja A > B" (A/B mogą być "dom" lub "praca")
-  const navMatch = effectiveContent.match(/^nawigacja\s+(.+?)\s*>\s*(.+)$/i);
+  const navMatch = effectiveContent.match(/^nav\s+(.+?)\s*>\s*(.+)$/i);
   if (navMatch) {
     const resolve = (s: string): string | null => {
       const t = s.trim().toLowerCase();
