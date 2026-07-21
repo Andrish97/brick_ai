@@ -138,6 +138,7 @@ supabase secrets set \
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
 | `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
+| `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Enable **Directions API** → Credentials → Create API Key — wymagany do komendy `nawigacja` |
 
 > **Dlaczego tylko Gemini?** Gemini 2.0 Flash ma wbudowaną wyszukiwarkę Google (`googleSearch`) — jedyny darmowy model z dostępem do danych w czasie rzeczywistym (pogoda, kursy walut, aktualności) bez dodatkowych integracji.
 

@@ -185,6 +185,71 @@ async function askAi(messages: Array<{ role: string; content: string }>, system:
   return (await callGemini(messages, system, maxOutputTokens)) ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
 }
 
+// --- Google Maps Directions ---
+
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim();
+}
+
+function extractStreet(html: string): string {
+  // Ostatni <b>...</b> to zazwyczaj nazwa ulicy
+  const bolds = [...html.matchAll(/<b>([^<]+)<\/b>/g)].map(m => m[1]);
+  return bolds[bolds.length - 1] ?? stripHtml(html);
+}
+
+function maneuverArrow(maneuver: string): string {
+  if (!maneuver || maneuver.includes("straight") || maneuver.includes("merge") || maneuver.includes("ramp") && !maneuver.includes("left") && !maneuver.includes("right")) return "↑";
+  if (maneuver.includes("uturn")) return "↩";
+  if (maneuver.includes("left"))  return "↰";
+  if (maneuver.includes("right")) return "↱";
+  return "↑";
+}
+
+async function getDirections(from: string, to: string, transport: string): Promise<string | null> {
+  const apiKey = Deno.env.get("GOOGLE_MAPS_API_KEY");
+  if (!apiKey) return null;
+
+  const modeMap: Record<string, string> = {
+    "samochód":  "driving",
+    "rower":     "bicycling",
+    "hulajnoga": "bicycling",
+    "pieszo":    "walking",
+  };
+  const mode = modeMap[transport] ?? "walking";
+
+  const url = `https://maps.googleapis.com/maps/api/directions/json?` +
+    `origin=${encodeURIComponent(from)}&destination=${encodeURIComponent(to)}` +
+    `&mode=${mode}&language=pl&key=${apiKey}`;
+
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.status !== "OK" || !data.routes?.length) {
+    log("maps_error", { status: data.status, from, to });
+    return null;
+  }
+
+  const leg = data.routes[0].legs[0];
+  const lines: string[] = [];
+
+  for (const step of leg.steps ?? []) {
+    const arrow = maneuverArrow(step.maneuver ?? "");
+    const street = extractStreet(step.html_instructions ?? "");
+    const dist = step.distance?.text ?? "";
+    // Skróć nazwę do 40 znaków żeby zmieścić się w SMS
+    const shortStreet = street.length > 40 ? street.slice(0, 40) : street;
+    lines.push(dist ? `${arrow} ${shortStreet} (${dist})` : `${arrow} ${shortStreet}`);
+  }
+
+  const totalDist = leg.distance?.text ?? "";
+  const totalTime = leg.duration?.text ?? "";
+  const dest = stripHtml(leg.end_address ?? to);
+  const destShort = dest.length > 35 ? dest.slice(0, 35) : dest;
+  lines.push(`★ ${destShort}${totalDist ? ` (${totalDist}, ~${totalTime})` : ""}`);
+
+  return lines.join("\n");
+}
+
 // --- Handler ---
 
 Deno.serve(async (req: Request) => {
@@ -363,38 +428,25 @@ Deno.serve(async (req: Request) => {
     }
 
     const transport = profileTransport ?? "pieszo";
-    const transportHints: Record<string, string> = {
-      "samochód":    "Trasa samochodowa. Preferuj drogi szybkiego ruchu i główne arterie.",
-      "rower":       "Trasa rowerowa. Preferuj ścieżki rowerowe i spokojne ulice.",
-      "pieszo":      "Trasa piesza. Preferuj chodniki i przejścia dla pieszych.",
-      "hulajnoga":   "Trasa hulajnogą elektryczną. PRIORYTET 1: ścieżki rowerowe. PRIORYTET 2: chodniki. PRIORYTET 3: drogi z ograniczeniem do 30 km/h. Bezwzględnie unikaj dróg ekspresowych, autostrad i ulic bez ograniczeń prędkości.",
-    };
-    const hint = transportHints[transport] ?? transportHints["pieszo"];
-
-    const navPrompt = `Wygeneruj trasę nawigacyjną turn-by-turn z "${fromAddr}" do "${toAddr}".
-${hint}
-
-Format każdego kroku (osobna linia, bez numeracji):
-↑ ul. Nazwa (Xm)        — jedź prosto, podaj dystans
-↰ ul. Nazwa nr XX       — skręć w lewo; nr = numer budynku przy skręcie
-↱ ul. Nazwa nr XX       — skręć w prawo; nr = numer budynku przy skręcie
-↩ zawróć (Xm)          — zawróć
-★ CEL: dokładny adres   — punkt docelowy
-
-Zasady:
-- Tylko powyższe strzałki, zero innych znaków specjalnych
-- Przy każdym skręcie podaj numer najbliższego budynku (orientacyjny)
-- Dystans tylko dla odcinków prosto
-- Zero wstępów, komentarzy, czysty format nawigacyjny
-- Skorzystaj z Google Search po aktualną trasę`;
 
     // Nawigacja zawsze z extended mode i continuation
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true });
     await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
 
-    const navRaw = await askAi([{ role: "user", content: navPrompt }],
-      "Jesteś systemem nawigacji SMS. Odpowiadaj WYŁĄCZNIE wskazówkami w podanym formacie. Bez wstępów i komentarzy.", 800);
-    const navText = sanitizeForSms(navRaw);
+    const mapsResult = await getDirections(fromAddr, toAddr, transport);
+
+    if (!mapsResult) {
+      // Brak klucza Maps API lub błąd
+      const noKey = !Deno.env.get("GOOGLE_MAPS_API_KEY");
+      const errMsg = noKey
+        ? "Nawigacja wymaga klucza Google Maps API. Dodaj sekret GOOGLE_MAPS_API_KEY w Supabase."
+        : "Nie udalo sie pobrac trasy. Sprawdz adresy i sprobuj ponownie.";
+      const suffix2 = `\n${convCodeFinal}`;
+      if (!dryRun) await sendSms(senderPhone, `${errMsg}${suffix2}`, recipientDid);
+      return new Response(JSON.stringify({ ok: true, nav_error: noKey ? "no_api_key" : "no_route" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+    }
+
+    const navText = sanitizeForSms(mapsResult);
 
     const CHUNK_SIZE = 160 - suffix.length;
     const firstChunk = navText.length > CHUNK_SIZE - 3 ? navText.slice(0, CHUNK_SIZE - 3) + "..." : navText;
