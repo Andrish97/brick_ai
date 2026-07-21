@@ -185,24 +185,18 @@ async function askAi(messages: Array<{ role: string; content: string }>, system:
   return (await callGemini(messages, system, maxOutputTokens)) ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
 }
 
-// --- Google Maps Directions ---
-
-function stripHtml(html: string): string {
-  return html.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim();
-}
-
-function extractStreet(html: string): string {
-  // Ostatni <b>...</b> to zazwyczaj nazwa ulicy
-  const bolds = [...html.matchAll(/<b>([^<]+)<\/b>/g)].map(m => m[1]);
-  return bolds[bolds.length - 1] ?? stripHtml(html);
-}
+// --- Google Maps Routes API ---
 
 function maneuverArrow(maneuver: string): string {
-  if (!maneuver || maneuver.includes("straight") || maneuver.includes("merge") || maneuver.includes("ramp") && !maneuver.includes("left") && !maneuver.includes("right")) return "↑";
-  if (maneuver.includes("uturn")) return "↩";
-  if (maneuver.includes("left"))  return "↰";
-  if (maneuver.includes("right")) return "↱";
+  if (!maneuver) return "↑";
+  if (maneuver.includes("U_TURN")) return "↩";
+  if (maneuver.includes("LEFT"))   return "↰";
+  if (maneuver.includes("RIGHT"))  return "↱";
   return "↑";
+}
+
+function formatDistance(meters: number): string {
+  return meters >= 1000 ? `${(meters / 1000).toFixed(1)}km` : `${meters}m`;
 }
 
 async function getDirections(from: string, to: string, transport: string): Promise<string | null> {
@@ -210,42 +204,52 @@ async function getDirections(from: string, to: string, transport: string): Promi
   if (!apiKey) return null;
 
   const modeMap: Record<string, string> = {
-    "samochód":  "driving",
-    "rower":     "bicycling",
-    "hulajnoga": "bicycling",
-    "pieszo":    "walking",
+    "samochód":  "DRIVE",
+    "rower":     "BICYCLE",
+    "hulajnoga": "BICYCLE",
+    "pieszo":    "WALK",
   };
-  const mode = modeMap[transport] ?? "walking";
+  const travelMode = modeMap[transport] ?? "WALK";
 
-  const url = `https://maps.googleapis.com/maps/api/directions/json?` +
-    `origin=${encodeURIComponent(from)}&destination=${encodeURIComponent(to)}` +
-    `&mode=${mode}&language=pl&key=${apiKey}`;
+  const res = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": "routes.legs.steps.navigationInstruction,routes.legs.steps.distanceMeters,routes.legs.distanceMeters,routes.legs.duration",
+    },
+    body: JSON.stringify({
+      origin:      { address: from },
+      destination: { address: to },
+      travelMode,
+      languageCode: "pl",
+    }),
+  });
 
-  const res = await fetch(url);
-  if (!res.ok) return null;
+  if (!res.ok) {
+    log("maps_error", { status: res.status, body: (await res.text()).slice(0, 200) });
+    return null;
+  }
   const data = await res.json();
-  if (data.status !== "OK" || !data.routes?.length) {
-    log("maps_error", { status: data.status, from, to });
+  const leg = data.routes?.[0]?.legs?.[0];
+  if (!leg) {
+    log("maps_error", { reason: "no_route", from, to });
     return null;
   }
 
-  const leg = data.routes[0].legs[0];
   const lines: string[] = [];
-
   for (const step of leg.steps ?? []) {
-    const arrow = maneuverArrow(step.maneuver ?? "");
-    const street = extractStreet(step.html_instructions ?? "");
-    const dist = step.distance?.text ?? "";
-    // Skróć nazwę do 40 znaków żeby zmieścić się w SMS
-    const shortStreet = street.length > 40 ? street.slice(0, 40) : street;
-    lines.push(dist ? `${arrow} ${shortStreet} (${dist})` : `${arrow} ${shortStreet}`);
+    const nav = step.navigationInstruction;
+    if (!nav) continue;
+    const arrow = maneuverArrow(nav.maneuver ?? "");
+    const instr = (nav.instructions ?? "").slice(0, 45);
+    const dist = step.distanceMeters ? ` (${formatDistance(step.distanceMeters)})` : "";
+    lines.push(`${arrow} ${instr}${dist}`);
   }
 
-  const totalDist = leg.distance?.text ?? "";
-  const totalTime = leg.duration?.text ?? "";
-  const dest = stripHtml(leg.end_address ?? to);
-  const destShort = dest.length > 35 ? dest.slice(0, 35) : dest;
-  lines.push(`★ ${destShort}${totalDist ? ` (${totalDist}, ~${totalTime})` : ""}`);
+  const totalDist = leg.distanceMeters ? formatDistance(leg.distanceMeters) : "";
+  const totalTime = leg.duration ? `~${Math.round(parseInt(leg.duration) / 60)}min` : "";
+  lines.push(`★ ${to.slice(0, 35)}${totalDist ? ` (${totalDist}, ${totalTime})` : ""}`);
 
   return lines.join("\n");
 }
