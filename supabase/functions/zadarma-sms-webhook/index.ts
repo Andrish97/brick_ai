@@ -341,6 +341,85 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, extended_mode: false }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
+  // Nawigacja: "nawigacja A > B" (A/B mogą być "dom" lub "praca")
+  const navMatch = effectiveContent.match(/^nawigacja\s+(.+?)\s*>\s*(.+)$/i);
+  if (navMatch) {
+    const resolve = (s: string): string | null => {
+      const t = s.trim().toLowerCase();
+      if (t === "dom") return profileHome;
+      if (t === "praca") return profileWork;
+      return s.trim();
+    };
+    const fromAddr = resolve(navMatch[1]);
+    const toAddr = resolve(navMatch[2]);
+
+    const suffix = `\n${convCodeFinal}`;
+
+    if (!fromAddr || !toAddr) {
+      const missing = !fromAddr ? "dom" : "praca";
+      const err = `Brak adresu "${missing}" w profilu. Uzupelnij w panelu admina.`;
+      if (!dryRun) await sendSms(senderPhone, `${err}${suffix}`, recipientDid);
+      return new Response(JSON.stringify({ ok: true, nav_error: "missing_address" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+    }
+
+    const transport = profileTransport ?? "pieszo";
+    const transportHints: Record<string, string> = {
+      "samochód":    "Trasa samochodowa. Preferuj drogi szybkiego ruchu i główne arterie.",
+      "rower":       "Trasa rowerowa. Preferuj ścieżki rowerowe i spokojne ulice.",
+      "pieszo":      "Trasa piesza. Preferuj chodniki i przejścia dla pieszych.",
+      "hulajnoga":   "Trasa hulajnogą elektryczną. PRIORYTET 1: ścieżki rowerowe. PRIORYTET 2: chodniki. PRIORYTET 3: drogi z ograniczeniem do 30 km/h. Bezwzględnie unikaj dróg ekspresowych, autostrad i ulic bez ograniczeń prędkości.",
+    };
+    const hint = transportHints[transport] ?? transportHints["pieszo"];
+
+    const navPrompt = `Wygeneruj trasę nawigacyjną turn-by-turn z "${fromAddr}" do "${toAddr}".
+${hint}
+
+Format każdego kroku (osobna linia, bez numeracji):
+↑ ul. Nazwa (Xm)        — jedź prosto, podaj dystans
+↰ ul. Nazwa nr XX       — skręć w lewo; nr = numer budynku przy skręcie
+↱ ul. Nazwa nr XX       — skręć w prawo; nr = numer budynku przy skręcie
+↩ zawróć (Xm)          — zawróć
+★ CEL: dokładny adres   — punkt docelowy
+
+Zasady:
+- Tylko powyższe strzałki, zero innych znaków specjalnych
+- Przy każdym skręcie podaj numer najbliższego budynku (orientacyjny)
+- Dystans tylko dla odcinków prosto
+- Zero wstępów, komentarzy, czysty format nawigacyjny
+- Skorzystaj z Google Search po aktualną trasę`;
+
+    // Nawigacja zawsze z extended mode i continuation
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true });
+    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
+
+    const navRaw = await askAi([{ role: "user", content: navPrompt }],
+      "Jesteś systemem nawigacji SMS. Odpowiadaj WYŁĄCZNIE wskazówkami w podanym formacie. Bez wstępów i komentarzy.", 800);
+    const navText = sanitizeForSms(navRaw);
+
+    const CHUNK_SIZE = 160 - suffix.length;
+    const firstChunk = navText.length > CHUNK_SIZE - 3 ? navText.slice(0, CHUNK_SIZE - 3) + "..." : navText;
+    const remaining = navText.length > CHUNK_SIZE - 3 ? navText.slice(CHUNK_SIZE - 3) : null;
+
+    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: navText });
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, {
+      last_activity_at: new Date().toISOString(),
+      pending_reply: remaining,
+    });
+    log("nav_sent", { convId, from: fromAddr, to: toAddr, transport, chars: navText.length, hasMore: !!remaining });
+
+    if (dryRun) {
+      return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${firstChunk}${suffix}` }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+    }
+    try {
+      await sendSms(senderPhone, `${firstChunk}${suffix}`, recipientDid);
+      sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
+    } catch (e) {
+      log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
+      return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ ok: true, navigation: true, has_more: !!remaining }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+
   // Kontynuacja — wysyłamy następny chunk bez angażowania AI
   if (CONTINUE_KEYWORDS.includes(effectiveContent.trim().toLowerCase()) && pendingReply) {
     const suffix = `\n${convCodeFinal}`;

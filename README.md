@@ -1,6 +1,6 @@
 # Brick AI — SMS Gateway
 
-AI asystent dostępny przez SMS. Użytkownik wysyła SMS z kodem → Gemini odpowiada w 160 znakach.
+AI asystent dostępny przez SMS. Użytkownik wysyła SMS → Gemini odpowiada w 160 znakach.
 
 ## Jak to działa
 
@@ -8,18 +8,71 @@ AI asystent dostępny przez SMS. Użytkownik wysyła SMS z kodem → Gemini odpo
 Użytkownik → SMS → Zadarma → webhook → Supabase Edge Function → Gemini → SMS odpowiedź
 ```
 
-**Format SMS od użytkownika:**
+**Format SMS — znany numer (telefon w profilu):**
+```
+789012        ← kod rozmowy (opcjonalny, brak = nowa rozmowa)
+treść wiadomości
+```
+
+**Format SMS — nieznany numer:**
 ```
 1234          ← kod użytkownika (4 cyfry)
-789012        ← kod rozmowy (6 cyfr) — opcjonalny, brak = nowa rozmowa
+789012        ← kod rozmowy (opcjonalny)
 treść wiadomości
 ```
 
 **Odpowiedź (max 160 znaków łącznie):**
 ```
 Odpowiedź AI (max 153 znaki)
-789012        ← kod rozmowy (6 cyfr) — użyj go w kolejnym SMS
+789012        ← kod rozmowy — użyj go w kolejnym SMS, aby kontynuować tę rozmowę
 ```
+
+---
+
+## Komendy SMS
+
+| Komenda | Opis |
+|---------|------|
+| `tryb długi` / `rozwiń` | Włącza tryb rozszerzony dla tej rozmowy — AI może pisać do 3 SMS-ów |
+| `tryb krótki` | Wyłącza tryb rozszerzony |
+| `dalej` / `więcej` | Wysyła następną część długiej odpowiedzi |
+| `nawigacja A > B` | Trasa turn-by-turn z A do B |
+| `nawigacja dom > B` | Używa adresu domowego z profilu jako punkt startowy |
+| `nawigacja A > praca` | Używa adresu pracy z profilu jako cel |
+| `koniec` / `stop` | Zamyka bieżącą rozmowę |
+
+### Nawigacja
+
+Format odpowiedzi nawigacyjnej:
+```
+↑ ul. Marszałkowska (200m)
+↰ ul. Świętokrzyska nr 14
+↑ (300m)
+↱ Al. Jerozolimskie nr 54
+★ CEL: Puławska 17, Warszawa
+```
+
+Tryb transportu pobierany z profilu użytkownika:
+- **Samochód** — główne arterie, drogi szybkiego ruchu
+- **Rower** — ścieżki rowerowe, spokojne ulice
+- **Pieszo** — chodniki, przejścia dla pieszych
+- **Hulajnoga** — ścieżki rowerowe → chodniki → drogi ≤30 km/h (unika ruchliwych ulic)
+
+Nawigacja zawsze włącza tryb rozszerzony — trasa dzielona automatycznie na SMS-y, `dalej` po kolejne kroki.
+
+---
+
+## Profil użytkownika
+
+Każdy użytkownik może mieć w panelu admina:
+
+| Pole | Opis |
+|------|------|
+| Imię | AI zwraca się po imieniu |
+| Dom | Adres z ulicą — skrót `dom` w nawigacji |
+| Praca | Adres z ulicą — skrót `praca` w nawigacji |
+| Transport | Domyślny środek transportu (samochód / rower / pieszo / hulajnoga) |
+| Prompt | Własny prompt systemowy (puste = globalny) |
 
 ---
 
