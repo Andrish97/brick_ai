@@ -10,9 +10,11 @@ const CORS = {
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
 const MAX_REPLY_CHARS = 153;  // 160 - '\n' - 6 cyfr kodu rozmowy (jeden SMS)
 const MAX_CONT_CHARS = 459;   // 3x SMS — max długość odpowiedzi AI z kontynuacją
-const CONTINUE_KEYWORDS = ["-->"];
-const EXTENDED_ON_KEYWORDS = ["->"];
-const EXTENDED_OFF_KEYWORDS = ["<-"];
+// Domyślne komendy — można nadpisać w ustawieniach bazy (settings table)
+const DEFAULT_CONTINUE_KEYWORD = "-->";
+const DEFAULT_EXTENDED_ON_KEYWORD = "->";
+const DEFAULT_EXTENDED_OFF_KEYWORD = "<-";
+const DEFAULT_NAV_KEYWORD = "nav";
 
 function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
@@ -383,9 +385,17 @@ Deno.serve(async (req: Request) => {
   let pendingReply = conv.pending_reply ?? null;
   const extendedMode = conv.extended_mode ?? false;
 
+  // Wczytaj ustawienia komend z bazy
+  const cmdSettings = await sbGet(SB, KEY, `settings?key=in.(close_keywords,nav_keyword,continue_keyword,extended_on_keyword,extended_off_keyword)&select=key,value`) as Array<{ key: string; value: string }>;
+  const cmdMap: Record<string, string> = {};
+  for (const s of cmdSettings) cmdMap[s.key] = s.value;
+  const CLOSE_KEYWORDS = (cmdMap.close_keywords ?? "koniec,stop,zamknij,end").split(",").map(k => k.trim().toLowerCase()).filter(Boolean);
+  const NAV_KEYWORD = (cmdMap.nav_keyword ?? DEFAULT_NAV_KEYWORD).trim().toLowerCase();
+  const CONTINUE_KW = (cmdMap.continue_keyword ?? DEFAULT_CONTINUE_KEYWORD).trim().toLowerCase();
+  const EXTENDED_ON_KW = (cmdMap.extended_on_keyword ?? DEFAULT_EXTENDED_ON_KEYWORD).trim().toLowerCase();
+  const EXTENDED_OFF_KW = (cmdMap.extended_off_keyword ?? DEFAULT_EXTENDED_OFF_KEYWORD).trim().toLowerCase();
+
   // Zamknięcie rozmowy słowem kluczowym
-  const kwSettings = await sbGet(SB, KEY, `settings?key=eq.close_keywords&select=value`) as Array<{ value: string }>;
-  const CLOSE_KEYWORDS = (kwSettings[0]?.value ?? "koniec,stop,zamknij,end").split(",").map(k => k.trim().toLowerCase()).filter(Boolean);
   if (CLOSE_KEYWORDS.includes(effectiveContent.trim().toLowerCase())) {
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { status: "closed" });
     log("conv_closed", { convId, convCode: convCodeFinal, userId, trigger: effectiveContent.trim() });
@@ -394,7 +404,7 @@ Deno.serve(async (req: Request) => {
 
   // Włączanie / wyłączanie trybu rozszerzonego przez SMS
   const msgLower = effectiveContent.trim().toLowerCase();
-  if (EXTENDED_ON_KEYWORDS.includes(msgLower)) {
+  if (msgLower === EXTENDED_ON_KW) {
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true, pending_reply: null });
     log("extended_mode_on", { convId, convCode: convCodeFinal });
     const suffix = `\n${convCodeFinal}`;
@@ -402,7 +412,7 @@ Deno.serve(async (req: Request) => {
     if (!dryRun) await sendSms(senderPhone, `${info}${suffix}`, recipientDid);
     return new Response(JSON.stringify({ ok: true, extended_mode: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
-  if (EXTENDED_OFF_KEYWORDS.includes(msgLower)) {
+  if (msgLower === EXTENDED_OFF_KW) {
     await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: false, pending_reply: null });
     log("extended_mode_off", { convId, convCode: convCodeFinal });
     const suffix = `\n${convCodeFinal}`;
@@ -411,8 +421,8 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, extended_mode: false }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  // Nawigacja: "nawigacja A > B" (A/B mogą być "dom" lub "praca")
-  const navMatch = effectiveContent.match(/^nav\s+(.+?)\s*>\s*(.+)$/i);
+  // Nawigacja: "<nav_keyword> A > B" (A/B mogą być "dom" lub "praca")
+  const navMatch = effectiveContent.match(new RegExp(`^${NAV_KEYWORD}\\s+(.+?)\\s*>\\s*(.+)$`, "i"));
   if (navMatch) {
     const resolve = (s: string): string | null => {
       const t = s.trim().toLowerCase();
@@ -486,7 +496,7 @@ Deno.serve(async (req: Request) => {
   }
 
   // Kontynuacja — wysyłamy następny chunk bez angażowania AI
-  if (CONTINUE_KEYWORDS.includes(effectiveContent.trim().toLowerCase()) && pendingReply) {
+  if (effectiveContent.trim().toLowerCase() === CONTINUE_KW && pendingReply) {
     const suffix = `\n${convCodeFinal}`;
     const chunkSize = 160 - suffix.length;
     const chunk = pendingReply.slice(0, chunkSize);
