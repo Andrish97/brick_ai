@@ -33,46 +33,77 @@ Odpowiedź AI (max 153 znaki)
 
 | Komenda | Opis |
 |---------|------|
-| `tryb długi` / `rozwiń` | Włącza tryb rozszerzony dla tej rozmowy — AI może pisać do 3 SMS-ów |
-| `tryb krótki` | Wyłącza tryb rozszerzony |
-| `dalej` / `więcej` | Wysyła następną część długiej odpowiedzi |
+| `tryb długi` / `rozwiń` / `extended on` | Włącza tryb rozszerzony dla **tej rozmowy** |
+| `tryb krótki` / `extended off` | Wyłącza tryb rozszerzony |
+| `dalej` / `więcej` / `next` / `kontynuuj` | Wysyła następną część długiej odpowiedzi |
 | `nawigacja A > B` | Trasa turn-by-turn z A do B |
-| `nawigacja dom > B` | Używa adresu domowego z profilu jako punkt startowy |
-| `nawigacja A > praca` | Używa adresu pracy z profilu jako cel |
-| `koniec` / `stop` | Zamyka bieżącą rozmowę |
+| `koniec` / `stop` / `zamknij` / `end` | Zamyka bieżącą rozmowę |
 
-### Nawigacja
+---
 
-Format odpowiedzi nawigacyjnej:
+## Tryb rozszerzony i kontynuacja
+
+Domyślnie AI odpowiada w jednym SMS (max 153 znaki treści). Tryb rozszerzony pozwala na odpowiedzi do ~450 znaków (3 SMS), dzielone automatycznie.
+
+**Jak to działa:**
+1. Wysyłasz `tryb długi` — system potwierdza, flaga ustawiona na tę rozmowę
+2. AI dostaje instrukcję że może pisać dłużej
+3. Jeśli odpowiedź nie mieści się w jednym SMS — pierwszy fragment wysłany z `...` na końcu, reszta zapamiętana
+4. Piszesz `dalej` — dostajesz kolejny fragment bez angażowania AI
+5. Kolejne `dalej` aż do końca odpowiedzi
+6. Gdy piszesz nową wiadomość (nie `dalej`) — zapamiętana reszta jest kasowana, zaczynasz od nowa
+
+**Tryb rozszerzony można też włączyć z panelu admina** — toggle w kolumnie "Rozszerz." w tabeli Rozmowy. Ustawienie dotyczy konkretnej rozmowy, nie użytkownika.
+
+---
+
+## Nawigacja
+
+Wymaga sekretu `GOOGLE_MAPS_API_KEY` z włączonym **Routes API**.
+
+**Format komendy:**
 ```
-↑ ul. Marszałkowska (200m)
-↰ ul. Świętokrzyska nr 14
-↑ (300m)
-↱ Al. Jerozolimskie nr 54
-★ CEL: Puławska 17, Warszawa
+nawigacja Marszałkowska 1, Warszawa > Puławska 17, Warszawa
+nawigacja dom > praca
+nawigacja dom > Dworzec Centralny, Warszawa
 ```
 
-Tryb transportu pobierany z profilu użytkownika:
-- **Samochód** — główne arterie, drogi szybkiego ruchu
-- **Rower** — ścieżki rowerowe, spokojne ulice
-- **Pieszo** — chodniki, przejścia dla pieszych
-- **Hulajnoga** — ścieżki rowerowe → chodniki → drogi ≤30 km/h (unika ruchliwych ulic)
+Skróty `dom` i `praca` pobierane z profilu użytkownika.
 
-Nawigacja zawsze włącza tryb rozszerzony — trasa dzielona automatycznie na SMS-y, `dalej` po kolejne kroki.
+**Format odpowiedzi** (Google Routes API, język polski):
+```
+↑ Jedź prosto ul. Marszałkowska (350m)
+↰ Skręć w lewo ul. Świętokrzyska (120m)
+↱ Skręć w prawo Al. Jerozolimskie (800m)
+★ Puławska 17, Warszawa (2.1km, ~8min)
+```
+
+Strzałki: `↑` prosto · `↰` lewo · `↱` prawo · `↩` zawróć
+
+**Tryby transportu** (pobierane z profilu użytkownika):
+
+| Tryb | Routing |
+|------|---------|
+| Samochód | DRIVE — główne arterie |
+| Rower | BICYCLE — ścieżki rowerowe |
+| Pieszo | WALK — chodniki i przejścia |
+| Hulajnoga | BICYCLE — ścieżki rowerowe, unika ruchliwych ulic |
+
+Nawigacja **zawsze włącza tryb rozszerzony** i dzieli trasę na fragmenty. Pisz `dalej` po kolejne kroki.
 
 ---
 
 ## Profil użytkownika
 
-Każdy użytkownik może mieć w panelu admina:
+Ustawiany w panelu admina → Użytkownicy → edycja. Dane wstrzykiwane automatycznie do kontekstu AI.
 
-| Pole | Opis |
-|------|------|
-| Imię | AI zwraca się po imieniu |
-| Dom | Adres z ulicą — skrót `dom` w nawigacji |
-| Praca | Adres z ulicą — skrót `praca` w nawigacji |
-| Transport | Domyślny środek transportu (samochód / rower / pieszo / hulajnoga) |
-| Prompt | Własny prompt systemowy (puste = globalny) |
+| Pole | Opis | Gdzie używane |
+|------|------|---------------|
+| Imię | Jak AI się zwraca do użytkownika | Każda rozmowa |
+| Dom | Pełny adres z ulicą i miastem | Skrót `dom` w nawigacji, kontekst dla pogody/tras |
+| Praca | Pełny adres z ulicą i miastem | Skrót `praca` w nawigacji |
+| Transport | samochód / rower / pieszo / hulajnoga | Tryb routingu w nawigacji |
+| Prompt | Własny system prompt (puste = globalny) | Każda rozmowa |
 
 ---
 
@@ -230,6 +261,7 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 | SMS wychodzący | 0.18 PLN/sms |
 | Supabase | Free tier |
 | Gemini API | Free tier (60 req/min) |
+| Google Routes API | $5/1000 tras (200$ kredytu/mies. gratis ≈ 40 000 tras) |
 | GitHub Pages | Darmowe |
 
 ## Technologie
@@ -237,5 +269,6 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 - **Supabase** — PostgreSQL + Edge Functions (Deno)
 - **Zadarma** — bramka SMS
 - **Google Gemini 2.0 Flash** — model AI z wbudowaną wyszukiwarką Google (dane w czasie rzeczywistym)
+- **Google Routes API** — precyzyjna nawigacja turn-by-turn (opcjonalna)
 - **GitHub Actions** — CI/CD
 - **GitHub Pages** — panel admina (vanilla HTML/JS)
