@@ -1074,6 +1074,24 @@ async function openUserModal(userId = null) {
       <label>Praca (adres z ulicą)</label>
       <input type="text" id="um-profile-work" placeholder="np. ul. Puławska 17, Warszawa" value="${escHtml(user?.profile_work || '')}" />
     </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:4px">
+      <div>
+        <label>Preferowana stacja przy domu</label>
+        <input type="text" id="um-profile-home-station" placeholder="np. Katowice" value="${escHtml(user?.profile_home_station || '')}" />
+      </div>
+      <div>
+        <label>Preferowana stacja przy pracy</label>
+        <input type="text" id="um-profile-work-station" placeholder="np. Warszawa Centralna" value="${escHtml(user?.profile_work_station || '')}" />
+      </div>
+    </div>
+    <div style="margin-bottom:4px">
+      <label>Maksymalna liczba SMS-ów odpowiedzi rozszerzonej</label>
+      <select id="um-profile-max-reply-sms-parts">
+        <option value="1" ${(user?.profile_max_reply_sms_parts ?? 4) === 1 ? 'selected' : ''}>1 SMS</option>
+        <option value="3" ${(user?.profile_max_reply_sms_parts ?? 4) === 3 ? 'selected' : ''}>3 SMS-y</option>
+        <option value="4" ${(user?.profile_max_reply_sms_parts ?? 4) === 4 ? 'selected' : ''}>4 SMS-y</option>
+      </select>
+    </div>
     <div class="uni-section">Prompt</div>
     <textarea id="um-prompt" style="min-height:60px" placeholder="Puste = globalny prompt systemowy">${escHtml(user?.system_prompt || '')}</textarea>
     <div class="err-msg" id="um-err"></div>
@@ -1122,6 +1140,9 @@ async function openUserModal(userId = null) {
       const profileHome = document.getElementById('um-profile-home').value.trim();
       const profileWork = document.getElementById('um-profile-work').value.trim();
       const profileTransport = document.getElementById('um-profile-transport').value;
+      const profileHomeStation = document.getElementById('um-profile-home-station').value.trim();
+      const profileWorkStation = document.getElementById('um-profile-work-station').value.trim();
+      const profileMaxReplySmsParts = Number(document.getElementById('um-profile-max-reply-sms-parts').value);
       const errEl = document.getElementById('um-err');
       errEl.textContent = '';
       if (!/^\d{4}$/.test(code)) { errEl.textContent = 'Kod musi składać się z 4 cyfr.'; return; }
@@ -1135,6 +1156,9 @@ async function openUserModal(userId = null) {
         profile_home: profileHome || null,
         profile_work: profileWork || null,
         profile_transport: profileTransport || null,
+        profile_home_station: profileHomeStation || null,
+        profile_work_station: profileWorkStation || null,
+        profile_max_reply_sms_parts: profileMaxReplySmsParts,
       };
       let error;
       if (user) {
@@ -1932,14 +1956,16 @@ const SETTING_LABELS = {
   sms_count:              'SMS wysłanych',
   sms_price:              'Cena za SMS (PLN)',
   system_prompt_default:  'Prompt systemowy (własny)',
-  close_keywords:         'Słowa kluczowe zamknięcia rozmowy (przecinkami)',
-  nav_keyword:            'Komenda nawigacji',
-  continue_keyword:       'Komenda kontynuacji (następna część)',
-  extended_on_keyword:    'Komenda włączenia trybu rozszerzonego',
-  extended_off_keyword:   'Komenda wyłączenia trybu rozszerzonego',
 };
 // Keys hidden from Settings UI (managed elsewhere)
-const SETTING_HIDDEN = new Set(['zadarma_caller_id']);
+const SETTING_HIDDEN = new Set([
+  'zadarma_caller_id',
+  'close_keywords',
+  'nav_keyword',
+  'continue_keyword',
+  'extended_on_keyword',
+  'extended_off_keyword',
+]);
 
 async function renderSettings() {
   const { data: rows } = await sb.from('settings').select('key,value').order('key');
