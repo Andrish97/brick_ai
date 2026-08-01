@@ -62,6 +62,20 @@ Deklaracje funkcji mają zawierać precyzyjny opis, wymagane argumenty oraz enum
 
 Dotychczasowe komendy nie będą już dokumentowane ani potrzebne do normalnej obsługi. Decyzja implementacyjna: zachować je przejściowo jako niedokumentowaną zgodność wsteczną albo usunąć je całkowicie po wdrożeniu endpointów.
 
+## Usunięcie komend z panelu i limit kontynuacji
+
+Komendy techniczne mają zniknąć nie tylko z instrukcji SMS, ale również z panelu administracyjnego.
+
+1. Usunąć z widoku Ustawienia pola konfigurujące `nav_keyword`, `continue_keyword`, `extended_on_keyword` i `extended_off_keyword`.
+2. Dodać migrację usuwającą te nieużywane wpisy z tabeli `settings`. Nie usuwać w ciemno innych ustawień ani danych rozmów.
+3. Usunąć z webhooka rozpoznawanie tych komend i pobieranie ich konfiguracji z bazy. Jedyną drogą do nawigacji i dłuższej odpowiedzi są wywołania endpointów przez model.
+4. W edycji użytkownika w panelu dodać pole „Maksymalna liczba SMS-ów odpowiedzi rozszerzonej”, np. wybór `1`, `3` lub `4`, z wartością domyślną `4`.
+5. Dodać do `users` pole `profile_max_reply_sms_parts` z walidacją wartości `1`, `3`, `4`. To jest limit bezpieczeństwa konkretnego użytkownika, a nie bieżące zezwolenie na dłuższą odpowiedź.
+6. Endpoint `allow_long_reply` przyjmuje żądane `parts`, ale ustawia dla rozmowy najwyżej wartość zapisaną w `profile_max_reply_sms_parts`. Przykład: użytkownik pozwala na 4 SMS-y, lecz jego profil ma limit 3 — endpoint aktywuje 3 SMS-y.
+7. Endpoint zwraca modelowi faktycznie przyznany limit. Model musi dostosować długość odpowiedzi do tej wartości i nie może sam wysyłać większej liczby SMS-ów.
+8. W panelu objaśnić różnicę: użytkownik w SMS-ie wyraża zgodę na dłuższą wiadomość, a ustawienie profilu ogranicza maksymalny koszt i długość tej wiadomości.
+9. Zaktualizować README: nie ma komend ani ich ustawień; limit SMS-ów jest ustawiany w profilu użytkownika i egzekwowany przez endpoint.
+
 ## Dane profilu użytkownika
 
 Obecnie webhook dopisuje imię, dom, pracę i preferowany transport do każdego system promptu. Zastąpić to narzędziem `get_user_profile`, aby model pobierał wyłącznie pola niezbędne do aktualnej odpowiedzi.
@@ -158,7 +172,7 @@ W tym samym wdrożeniu uzupełnić `README.md` o:
 1. Dodać migrację rozszerzającą `conversations` o `reply_sms_parts`.
 2. Dopuszczalne wartości: `1`, `3`, `4`; wartość domyślna: `1`.
 3. `extended_mode` zachować na czas migracji zgodności, a potem przestać używać go jako źródła prawdy.
-4. Po wyraźnej zgodzie `allow_long_reply` zapisuje `3` albo `4` dla bieżącej rozmowy.
+4. Po wyraźnej zgodzie `allow_long_reply` zapisuje dla bieżącej rozmowy `3` albo `4`, ograniczone przez `profile_max_reply_sms_parts` użytkownika.
 5. Generator Gemini dostaje limit tokenów wyliczony dla danego limitu SMS, a system prompt jasno określa maksymalną długość odpowiedzi.
 6. Odpowiedź w limicie ma zostać od razu podzielona i wysłana we wszystkich dozwolonych SMS-ach. Użytkownik nie wpisuje `-->` po kolejne fragmenty.
 7. Gdy odpowiedź przekroczy limit, endpoint bezpiecznie skraca ją na granicy zdania lub słowa, zapisuje zdarzenie w logu i nie wysyła nieograniczonej liczby SMS-ów.
@@ -288,18 +302,21 @@ Przed wdrożeniem przygotować testy z atrapami Gemini, Google i Zadarma:
 12. PKP PLK: jednoznaczne i niejednoznaczne stacje, przejazd bezpośredni, jedna i wiele przesiadek, minimalny czas przesiadki, brak połączenia, anulowanie, opóźnienie i przekroczony limit API.
 13. PKP PLK: wybór trasy o najwcześniejszym przyjeździe dla czasu „wyjazd po” oraz wybór wariantu spełniającego „przyjazd przed”.
 14. PKP PLK: preferowana stacja z profilu, automatyczne znalezienie najbliższej stacji dla domu/pracy, wynik niejednoznaczny oraz naturalne terminy „w sobotę rano od 6”, „jutro po 17” i „przed 9”.
+15. Usunięte komendy: brak pól w panelu, brak wpisów w `settings` i brak uruchamiania starej logiki przez SMS.
+16. Limit kontynuacji: profil z limitem 1/3/4, żądanie 3/4 SMS-ów, ograniczenie przez endpoint i liczba części faktycznie wysłanych.
 
 ## Kolejność realizacji
 
 1. Dodać migrację i kontrakt endpointu `assistant-tools`.
 2. Dodać `get_user_profile` oraz serwerowe rozwijanie `home`/`work` w endpointach tras.
-3. Zaimplementować function calling Gemini oraz walidację akcji w webhooku.
-4. Zaimplementować długie odpowiedzi i zamykanie rozmowy.
-5. Zastąpić integrację tras Directions API oraz formatter ASCII.
-6. Dodać `get_fastest_arrival`, `transit` i zatwierdzony format odcinków komunikacji miejskiej.
-7. Dodać adapter PKP PLK, wyszukiwanie stacji, dane planowe, realizację, utrudnienia oraz `plan_train_journey` z przesiadkami.
-8. Dodać rozwiązywanie adresu domu/pracy do stacji, preferowane stacje w profilu oraz normalizację dat i godzin podróży.
-9. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
-10. Zaktualizować README, w tym `PKP_API_KEY`, działanie planera kolejowego i ograniczenia źródeł danych.
-11. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
-12. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
+3. Dodać limit SMS-ów do profilu użytkownika, usunąć konfigurację komend z panelu i wykonać migrację starych ustawień.
+4. Zaimplementować function calling Gemini oraz walidację akcji w webhooku.
+5. Zaimplementować długie odpowiedzi i zamykanie rozmowy.
+6. Zastąpić integrację tras Directions API oraz formatter ASCII.
+7. Dodać `get_fastest_arrival`, `transit` i zatwierdzony format odcinków komunikacji miejskiej.
+8. Dodać adapter PKP PLK, wyszukiwanie stacji, dane planowe, realizację, utrudnienia oraz `plan_train_journey` z przesiadkami.
+9. Dodać rozwiązywanie adresu domu/pracy do stacji, preferowane stacje w profilu oraz normalizację dat i godzin podróży.
+10. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
+11. Zaktualizować README, w tym `PKP_API_KEY`, działanie planera kolejowego, brak komend oraz limit SMS-ów kontynuacji.
+12. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
+13. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
