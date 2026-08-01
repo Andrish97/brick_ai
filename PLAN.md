@@ -1,0 +1,200 @@
+# Plan: rozmowa naturalnym językiem i nawigacja przez endpointy
+
+## Cel
+
+Użytkownik SMS nie wpisuje komend technicznych. Model rozpoznaje intencję w zwykłej wypowiedzi i, gdy jest to konieczne, wywołuje kontrolowane endpointy aplikacji.
+
+Zakres obejmuje:
+
+- dłuższe odpowiedzi po wyraźnej zgodzie użytkownika;
+- definitywne zamykanie rozmowy;
+- nawigację Google Directions API;
+- komunikację miejską przez tryb `transit` Google Directions API;
+- aktualizację README w tym samym wdrożeniu.
+
+Integracja danych kolejowych PKP PLK jest odłożona i nie wchodzi w zakres tej zmiany.
+
+## Stan obecny
+
+`supabase/functions/zadarma-sms-webhook/index.ts` obsługuje całą logikę w jednym webhooku. Rozpoznaje techniczne komendy `->`, `<-`, `-->` i `nav A > B`, przechowuje pozostałą część odpowiedzi w `pending_reply` oraz używa Google Routes API. Format nawigacji korzysta obecnie z Unicode i nie spełnia nowego formatu SMS.
+
+`README.md` dokumentuje te komendy, Routes API i konieczność proszenia o kolejne części trasy. Będzie wymagał aktualizacji równolegle z kodem.
+
+## Architektura endpointów
+
+1. Dodać prywatzną Supabase Edge Function `assistant-tools`.
+2. Główny webhook wywołuje ją wyłącznie serwerowo, z uwierzytelnieniem opartym o sekret. Nie będzie publicznym interfejsem dla numerów SMS ani modelem otrzymującym sekrety.
+3. Gemini otrzymuje deklaracje funkcji. Gdy rozpozna odpowiednią intencję, zwraca nazwę funkcji i walidowane argumenty.
+4. Webhook waliduje wywołanie, uruchamia `assistant-tools`, zapisuje wynik w logu i przekazuje rezultat modelowi lub wysyła gotowy wynik bezpośrednio, jeśli jest to deterministyczna trasa.
+5. Model nigdy nie tworzy formatu nawigacji. Formatowanie wykonuje endpoint, aby zachować jednolitość i bezpieczeństwo.
+
+Pierwszy zestaw akcji endpointu:
+
+| Akcja | Argumenty | Efekt |
+|---|---|---|
+| `allow_long_reply` | `parts`: `3` lub `4` | Ustawia limit odpowiedzi dla rozmowy. |
+| `close_conversation` | `conversation_id` | Definitywnie zamyka daną rozmowę. |
+| `get_directions` | początek, cel, transport | Pobiera i formatuje pełną trasę. |
+| `get_transit` | początek, cel, czas wyjazdu | Pobiera trasę transportem miejskim i jej szczegóły. |
+
+## Naturalne intencje
+
+Usunąć wymóg wpisywania komend SMS. Przykłady oczekiwanego działania:
+
+| Wypowiedź użytkownika | Akcja |
+|---|---|
+| „możesz odpisać szerzej” | `allow_long_reply(parts: 3)` |
+| „możesz pisać w czterech SMS-ach” | `allow_long_reply(parts: 4)` |
+| „kontynuuj” / „możesz kontynuować” | `allow_long_reply`, tylko gdy sens wypowiedzi jest zgodą na dłuższą odpowiedź |
+| „to koniec”, „żegnam się”, „nie kontynuuj” | `close_conversation` |
+| „poprowadź mnie z domu do pracy rowerem” | `get_directions` |
+| „jak dojadę tramwajem do rynku?” | `get_transit` |
+
+Deklaracje funkcji mają zawierać precyzyjny opis, wymagane argumenty oraz enumerację trybów transportu. Model nie może wywołać akcji zamknięcia wyłącznie dlatego, że w tekście wystąpiło słowo podobne do „koniec”; musi rozpoznać realną intencję zakończenia.
+
+Dotychczasowe komendy nie będą już dokumentowane ani potrzebne do normalnej obsługi. Decyzja implementacyjna: zachować je przejściowo jako niedokumentowaną zgodność wsteczną albo usunąć je całkowicie po wdrożeniu endpointów.
+
+## Dłuższe odpowiedzi
+
+1. Dodać migrację rozszerzającą `conversations` o `reply_sms_parts`.
+2. Dopuszczalne wartości: `1`, `3`, `4`; wartość domyślna: `1`.
+3. `extended_mode` zachować na czas migracji zgodności, a potem przestać używać go jako źródła prawdy.
+4. Po wyraźnej zgodzie `allow_long_reply` zapisuje `3` albo `4` dla bieżącej rozmowy.
+5. Generator Gemini dostaje limit tokenów wyliczony dla danego limitu SMS, a system prompt jasno określa maksymalną długość odpowiedzi.
+6. Odpowiedź w limicie ma zostać od razu podzielona i wysłana we wszystkich dozwolonych SMS-ach. Użytkownik nie wpisuje `-->` po kolejne fragmenty.
+7. Gdy odpowiedź przekroczy limit, endpoint bezpiecznie skraca ją na granicy zdania lub słowa, zapisuje zdarzenie w logu i nie wysyła nieograniczonej liczby SMS-ów.
+8. `pending_reply` nie będzie elementem nowego normalnego przepływu. Nie należy usuwać kolumny w tej zmianie, aby nie wykonywać niepotrzebnej destrukcyjnej migracji.
+
+## Zamykanie rozmowy
+
+1. `close_conversation` zmienia status bieżącej rozmowy na `closed`.
+2. Czyści `pending_reply` i zapisuje w logu źródłową intencję oraz czas.
+3. Kolejny SMS zawierający kod zamkniętej rozmowy nie może jej reaktywować.
+4. Brak kodu nadal może utworzyć nową rozmowę dla tego samego użytkownika, o ile nie zostanie podjęta odrębna decyzja o globalnej blokadzie numeru.
+5. Endpoint powinien zwrócić krótkie, opcjonalne potwierdzenie, mieszczące się w jednym SMS-ie, albo zakończyć bez odpowiedzi — tę decyzję należy ustalić przed implementacją UX.
+
+## Google Directions API
+
+Zastąpić obecne wywołanie Routes API żądaniem do Google Directions API. Jest to wymagane do otrzymania pól `maneuver` i `html_instructions`, a API obsługuje `driving`, `walking`, `bicycling` i `transit`.
+
+Mapowanie profilu użytkownika:
+
+| Profil | `mode` Google |
+|---|---|
+| pieszo | `walking` |
+| samochód | `driving` |
+| rower | `bicycling` |
+| hulajnoga | `bicycling` |
+| komunikacja miejska | `transit` |
+
+Hulajnoga zawsze używa `bicycling`, bez rozróżniania miasta i trasy pozamiejskiej. Adresy „dom” oraz „praca” są rozwijane przez serwer z profilu użytkownika. Jeżeli brakuje któregoś z adresów, model dostaje błąd endpointu i prosi krótko o brakującą wartość, bez zgadywania.
+
+## Format nawigacji ASCII
+
+Endpoint formatuje każdy krok w postaci:
+
+```text
+symbol dystans nazwa_ulicy
+```
+
+Przykład:
+
+```text
+< 300m Chorzowska
+^ 850m Aleja Roździeńskiego
+O2 120m ul. Katowicka
+* 0m Cel
+```
+
+Zasady:
+
+1. Symbol wynika wyłącznie z pola `maneuver`; nie wolno wyciągać kierunku z polskiej treści instrukcji.
+2. Dystans pochodzi z liczbowego pola `distance.value`, jest zaokrąglony do metrów i zawsze ma postać np. `1250m`, bez kilometrowego skrótu.
+3. Symbole są ASCII. Nazwy własne ulic mogą zachować polskie znaki.
+4. Nie pomijać krótkich kroków: wynik ma zawierać całą trasę.
+5. Ostatnia linia ma zawsze postać `* 0m <cel>`.
+6. Cały gotowy tekst trasy jest wysyłany od razu, niezależnie od liczby SMS-ów. Limit 3/4 SMS-ów dotyczy odpowiedzi modelu, nie pełnej trasy nawigacyjnej.
+
+Tabela mapowania:
+
+| `maneuver` | Symbol |
+|---|---|
+| `straight` | `^` |
+| `turn-left` | `<` |
+| `turn-right` | `>` |
+| `turn-slight-left`, `keep-left` | `<^` |
+| `turn-slight-right`, `keep-right` | `>^` |
+| `turn-sharp-left` | `<<` |
+| `turn-sharp-right` | `>>` |
+| `uturn-left`, `uturn-right` | `<>` |
+| `roundabout-left`, `roundabout-right` | `O<numer zjazdu>` |
+| `merge` lub zmiana drogi bez skrętu | `|` |
+| brak manewru lub łagodny łuk | `~` |
+
+### Nazwa ulicy z `html_instructions`
+
+Google nie zwraca odrębnego pola nazwy ulicy w kroku Directions API. Wymaganie użycia `html_instructions` zostanie zrealizowane bez językowego parsowania polskiej instrukcji: serwer pobierze oznaczony przez Google fragment nazwy drogi, usunie wyłącznie HTML i zachowa tekst bez skracania, tłumaczenia lub zmiany. Gdy API nie oznaczy nazwy drogi, endpoint użyje oczyszczonej instrukcji i zapisze ostrzeżenie w logu.
+
+To wymaga akceptacji ryzyka: dokumentacja Google traktuje `html_instructions` jako treść prezentacyjną i zaleca nie parsować jej programowo. Nie istnieje jednak osobne pole ulicy spełniające wskazane wymaganie.
+
+## Komunikacja miejska
+
+`get_transit` korzysta z Directions API z `mode=transit` i bieżącym czasem wyjazdu, chyba że użytkownik poda inny.
+
+Endpoint ma zwrócić całą podróż, w tym:
+
+- dojście pieszo do przystanku i z przystanku;
+- linię i jej kierunek;
+- przystanek wejścia i wyjścia;
+- planowany odjazd oraz przyjazd;
+- czas przejazdu;
+- wszystkie przesiadki.
+
+Odcinki piesze przechodzą przez standardowy formatter manewrów. Przejazd linią wymaga ustalonego formatu tekstowego, np.:
+
+```text
+| 0m 4 Dworzec -> Rynek 12:03-12:19
+```
+
+Należy zatwierdzić ten format lub wskazać alternatywę, ponieważ obecna tablica symboli opisuje manewry drogowe, a nie przejazd autobusem, tramwajem lub metrem.
+
+## Zmiany w README
+
+W tym samym zestawie zmian zaktualizować `README.md`:
+
+1. Usunąć sekcję „Komendy SMS”.
+2. Opisać naturalny język, zgodę na 3/4 SMS-y i przesyłanie wszystkich części bez `-->`.
+3. Opisać definitywne zamknięcie rozmowy.
+4. Opisać endpointy/narzędzia i ich granice bezpieczeństwa.
+5. Zastąpić Routes API przez Google Directions API w instrukcji sekretów, wymaganiach, kosztach i liście technologii.
+6. Dodać pełny format ASCII oraz tabelę symboli.
+7. Dodać działanie transportu miejskiego.
+8. Nie umieszczać integracji PKP PLK w dokumentacji tej wersji.
+
+## Testy i odbiór
+
+Przed wdrożeniem przygotować testy z atrapami Gemini, Google i Zadarma:
+
+1. Zgoda na 3 oraz 4 SMS-y.
+2. Brak zgody: odpowiedź ograniczona do 1 SMS-a.
+3. Wysłanie wszystkich dozwolonych części bez komendy kontynuacji.
+4. Zamknięcie rozmowy i brak reaktywacji po podaniu jej kodu.
+5. Wszystkie wpisy z tabeli manewrów, w tym rondo i zawracanie.
+6. Dystanse poniżej i powyżej kilometra, zawsze w metrach.
+7. Nazwa ulicy z `html_instructions`, brak oznaczonej ulicy oraz znaki diakrytyczne.
+8. Pieszo, samochód, rower, hulajnoga i komunikacja miejska.
+9. Trasa dłuższa niż jeden, trzy lub cztery SMS-y: zawsze cała i od razu wysłana.
+10. Brak klucza Google, niepoprawny adres, brak adresu domu/pracy i brak trasy.
+11. Zachowanie obecnego rozpoznawania użytkownika, kodów rozmów, logowania i ochrony przed duplikatem webhooka.
+
+## Kolejność realizacji
+
+1. Dodać migrację i kontrakt endpointu `assistant-tools`.
+2. Zaimplementować function calling Gemini oraz walidację akcji w webhooku.
+3. Zaimplementować długie odpowiedzi i zamykanie rozmowy.
+4. Zastąpić integrację tras Directions API oraz formatter ASCII.
+5. Dodać `transit` i zatwierdzony format odcinków komunikacji miejskiej.
+6. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
+7. Zaktualizować README.
+8. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
+9. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
