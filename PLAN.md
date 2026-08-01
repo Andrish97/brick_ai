@@ -34,8 +34,10 @@ Pierwszy zestaw akcji endpointu:
 |---|---|---|
 | `allow_long_reply` | `parts`: `3` lub `4` | Ustawia limit odpowiedzi dla rozmowy. |
 | `close_conversation` | `conversation_id` | Definitywnie zamyka daną rozmowę. |
+| `get_user_profile` | opcjonalna lista pól | Zwraca wyłącznie potrzebne dane profilu bieżącego użytkownika. |
 | `get_directions` | początek, cel, transport | Pobiera i formatuje pełną trasę. |
 | `get_transit` | początek, cel, czas wyjazdu | Pobiera trasę transportem miejskim i jej szczegóły. |
+| `get_fastest_arrival` | początek, cel, czas wyjścia, opcje transportu | Porównuje czasy tras i zwraca najwcześniejsze dotarcie. |
 
 ## Naturalne intencje
 
@@ -53,6 +55,20 @@ Usunąć wymóg wpisywania komend SMS. Przykłady oczekiwanego działania:
 Deklaracje funkcji mają zawierać precyzyjny opis, wymagane argumenty oraz enumerację trybów transportu. Model nie może wywołać akcji zamknięcia wyłącznie dlatego, że w tekście wystąpiło słowo podobne do „koniec”; musi rozpoznać realną intencję zakończenia.
 
 Dotychczasowe komendy nie będą już dokumentowane ani potrzebne do normalnej obsługi. Decyzja implementacyjna: zachować je przejściowo jako niedokumentowaną zgodność wsteczną albo usunąć je całkowicie po wdrożeniu endpointów.
+
+## Dane profilu użytkownika
+
+Obecnie webhook dopisuje imię, dom, pracę i preferowany transport do każdego system promptu. Zastąpić to narzędziem `get_user_profile`, aby model pobierał wyłącznie pola niezbędne do aktualnej odpowiedzi.
+
+1. System prompt informuje jedynie, że narzędzie jest dostępne i kiedy należy go użyć; nie zawiera domyślnie adresów ani innych danych profilu.
+2. Endpoint działa w kontekście uwierzytelnionego `user_id` bieżącej rozmowy. Model nie przekazuje identyfikatora użytkownika i nie może odczytać cudzego profilu.
+3. Argument `fields` jest listą dozwolonych wartości: `name`, `home`, `work`, `transport`.
+4. Endpoint zwraca wyłącznie zażądane pola, z pominięciem pustych wartości.
+5. Endpointy tras oraz `get_fastest_arrival` powinny samodzielnie rozwijać techniczne wartości `home` i `work` na adresy z bazy. W zwykłym przypadku model nie musi więc otrzymywać adresu domu lub pracy.
+6. Przykład: „o której najszybciej będę w pracy, jeśli teraz wyjdę z domu?” powoduje wywołanie `get_fastest_arrival(origin: "home", destination: "work", departure_time: "now")`. Endpoint odczytuje profil serwerowo, porównuje dozwolone środki transportu i zwraca gotowy wynik.
+7. `get_user_profile` jest potrzebne tylko wtedy, gdy odpowiedź rzeczywiście wymaga danych profilu, np. imienia lub potwierdzenia ustawionego transportu.
+
+To ogranicza długość promptów, ekspozycję danych osobowych oraz liczbę miejsc, w których adresy muszą być obsługiwane.
 
 ## Dłuższe odpowiedzi
 
@@ -190,11 +206,12 @@ Przed wdrożeniem przygotować testy z atrapami Gemini, Google i Zadarma:
 ## Kolejność realizacji
 
 1. Dodać migrację i kontrakt endpointu `assistant-tools`.
-2. Zaimplementować function calling Gemini oraz walidację akcji w webhooku.
-3. Zaimplementować długie odpowiedzi i zamykanie rozmowy.
-4. Zastąpić integrację tras Directions API oraz formatter ASCII.
-5. Dodać `transit` i zatwierdzony format odcinków komunikacji miejskiej.
-6. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
-7. Zaktualizować README.
-8. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
-9. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
+2. Dodać `get_user_profile` oraz serwerowe rozwijanie `home`/`work` w endpointach tras.
+3. Zaimplementować function calling Gemini oraz walidację akcji w webhooku.
+4. Zaimplementować długie odpowiedzi i zamykanie rozmowy.
+5. Zastąpić integrację tras Directions API oraz formatter ASCII.
+6. Dodać `get_fastest_arrival`, `transit` i zatwierdzony format odcinków komunikacji miejskiej.
+7. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
+8. Zaktualizować README.
+9. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
+10. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
