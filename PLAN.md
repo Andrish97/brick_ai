@@ -43,6 +43,7 @@ Pierwszy zestaw akcji endpointu:
 | `get_train_status` | identyfikator pociągu, data kursowania | Pobiera rzeczywiste wykonanie, opóźnienie i status pociągu PKP PLK. |
 | `get_train_disruptions` | stacje lub zakres dat | Pobiera utrudnienia ruchu kolejowego PKP PLK. |
 | `plan_train_journey` | początek, cel, czas wyjazdu/przyjazdu, preferencje | Wyszukuje najszybszą podróż pociągiem, również z przesiadkami. |
+| `resolve_rail_station` | adres lub skrót `home`/`work`, preferencja | Dobiera jednoznaczną stację kolejową dla punktu początkowego albo końcowego. |
 
 ## Naturalne intencje
 
@@ -95,6 +96,29 @@ Oficjalne API Otwarte Dane Kolejowe PKP PLK zostanie podłączone jako niezależ
 14. Cache'ować słownik stacji i dane rozkładu według daty; nie pobierać całego krajowego rozkładu dla każdego SMS-a. Cache ma wygasać po zmianie wersji danych PLK i po końcu dnia rozkładowego.
 15. W razie braku trasy, zbyt wielu dopasowań stacji albo przekroczonych limitów API endpoint zwraca ustrukturyzowaną przyczynę, a AI zadaje jedno konkretne pytanie lub informuje o braku połączenia.
 
+### Wybór stacji dla adresu domu i pracy
+
+PKP PLK rozpoznaje stacje, a nie adresy. Aby użytkownik mógł napisać „jadę z domu”, dodać `resolve_rail_station` oraz pola profilu `profile_home_station` i `profile_work_station`.
+
+1. Preferowana stacja domowa lub służbowa, jeśli została zapisana w profilu, zawsze ma pierwszeństwo. Użytkownik może więc ustawić np. „Katowice” zamiast automatycznie wybranego przystanku w pobliżu domu.
+2. Gdy preferowana stacja nie jest ustawiona, endpoint geokoduje adres domu/pracy oraz porównuje współrzędne z listą stacji PKP PLK. Zwraca najbliższą stację w rozsądnym promieniu wraz z oceną pewności.
+3. Gdy wynik jest niejednoznaczny, zbyt daleki albo lokalizacja jest niepełna, AI pyta o jedno doprecyzowanie: „Z jakiej stacji lub miasta chcesz wyjechać?”. Nie wybiera stacji przypadkowo.
+4. Adres nie jest wysyłany do modelu, jeśli endpoint może sam rozwinąć `home` lub `work` z profilu.
+5. W panelu administratora dodać opcjonalne pola „Preferowana stacja domowa” i „Preferowana stacja pracy”, z wyszukiwaniem po słowniku stacji PKP PLK i przechowywaniem zarówno nazwy, jak i identyfikatora stacji.
+
+### Naturalny czas podróży
+
+`plan_train_journey` przyjmuje ujednolicony czas w strefie `Europe/Warsaw`. Gemini normalizuje wyrażenia naturalne do parametrów strukturalnych, a endpoint waliduje otrzymaną datę i godzinę.
+
+| Wypowiedź użytkownika | Parametry planera |
+|---|---|
+| „w sobotę rano od 6” | najbliższa właściwa sobota, `departure_after=06:00` |
+| „jutro po 17” | data jutrzejsza, `departure_after=17:00` |
+| „muszę być przed 9” | `arrival_before=09:00` |
+| „teraz” | aktualny czas serwera w Polsce |
+
+Jeżeli „w sobotę” jest niejednoznaczne — np. użytkownik pisze w sobotę po 06:00 i nie wskazuje, czy chodzi o dziś czy kolejny tydzień — AI ma dopytać zamiast samodzielnie wybierać datę.
+
 Format wyniku `plan_train_journey` dla SMS-a powinien być zwięzły i deterministyczny, na przykład:
 
 ```text
@@ -116,6 +140,7 @@ Przykładowe przyszłe zapytania:
 - „Czy IC 8312 ma opóźnienie?” -> wykonanie konkretnego pociągu.
 - „Czy są utrudnienia między Katowicami a Krakowem?” -> utrudnienia dla wskazanych stacji.
 - „Jak najszybciej dojadę pociągiem z Katowic do Wrocławia, jeśli wyjadę teraz?” -> `plan_train_journey` z bieżącym czasem wyjazdu.
+- „Chcę w sobotę jechać do Włocławka, znajdź połączenia kolejowe rano od 6.” -> `resolve_rail_station(home)` oraz `plan_train_journey` z czasem wyjazdu od 06:00; endpoint zwraca 2–3 warianty o najwcześniejszym przyjeździe.
 
 ## README: sekret PKP
 
@@ -262,6 +287,7 @@ Przed wdrożeniem przygotować testy z atrapami Gemini, Google i Zadarma:
 11. Zachowanie obecnego rozpoznawania użytkownika, kodów rozmów, logowania i ochrony przed duplikatem webhooka.
 12. PKP PLK: jednoznaczne i niejednoznaczne stacje, przejazd bezpośredni, jedna i wiele przesiadek, minimalny czas przesiadki, brak połączenia, anulowanie, opóźnienie i przekroczony limit API.
 13. PKP PLK: wybór trasy o najwcześniejszym przyjeździe dla czasu „wyjazd po” oraz wybór wariantu spełniającego „przyjazd przed”.
+14. PKP PLK: preferowana stacja z profilu, automatyczne znalezienie najbliższej stacji dla domu/pracy, wynik niejednoznaczny oraz naturalne terminy „w sobotę rano od 6”, „jutro po 17” i „przed 9”.
 
 ## Kolejność realizacji
 
@@ -272,7 +298,8 @@ Przed wdrożeniem przygotować testy z atrapami Gemini, Google i Zadarma:
 5. Zastąpić integrację tras Directions API oraz formatter ASCII.
 6. Dodać `get_fastest_arrival`, `transit` i zatwierdzony format odcinków komunikacji miejskiej.
 7. Dodać adapter PKP PLK, wyszukiwanie stacji, dane planowe, realizację, utrudnienia oraz `plan_train_journey` z przesiadkami.
-8. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
-9. Zaktualizować README, w tym `PKP_API_KEY`, działanie planera kolejowego i ograniczenia źródeł danych.
-10. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
-11. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
+8. Dodać rozwiązywanie adresu domu/pracy do stacji, preferowane stacje w profilu oraz normalizację dat i godzin podróży.
+9. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
+10. Zaktualizować README, w tym `PKP_API_KEY`, działanie planera kolejowego i ograniczenia źródeł danych.
+11. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
+12. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
