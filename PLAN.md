@@ -10,9 +10,10 @@ Zakres obejmuje:
 - definitywne zamykanie rozmowy;
 - nawigację Google Directions API;
 - komunikację miejską przez tryb `transit` Google Directions API;
+- fundament integracji oficjalnego API Otwarte Dane Kolejowe PKP PLK;
 - aktualizację README w tym samym wdrożeniu.
 
-Integracja danych kolejowych PKP PLK jest odłożona i nie wchodzi w zakres tej zmiany.
+Kolej obejmuje dane planowe, bieżącą realizację, opóźnienia, utrudnienia oraz własny planer połączeń kolejowych z przesiadkami. API PLK nie udostępnia pojedynczego endpointu „znajdź najszybsze połączenie”, więc aplikacja zbuduje plan podróży nad jego danymi rozkładowymi.
 
 ## Stan obecny
 
@@ -38,6 +39,10 @@ Pierwszy zestaw akcji endpointu:
 | `get_directions` | początek, cel, transport | Pobiera i formatuje pełną trasę. |
 | `get_transit` | początek, cel, czas wyjazdu | Pobiera trasę transportem miejskim i jej szczegóły. |
 | `get_fastest_arrival` | początek, cel, czas wyjścia, opcje transportu | Porównuje czasy tras i zwraca najwcześniejsze dotarcie. |
+| `get_train_station_board` | stacja, data, przewoźnicy | Pobiera planowe odjazdy/przyjazdy ze stacji PKP PLK. |
+| `get_train_status` | identyfikator pociągu, data kursowania | Pobiera rzeczywiste wykonanie, opóźnienie i status pociągu PKP PLK. |
+| `get_train_disruptions` | stacje lub zakres dat | Pobiera utrudnienia ruchu kolejowego PKP PLK. |
+| `plan_train_journey` | początek, cel, czas wyjazdu/przyjazdu, preferencje | Wyszukuje najszybszą podróż pociągiem, również z przesiadkami. |
 
 ## Naturalne intencje
 
@@ -69,6 +74,59 @@ Obecnie webhook dopisuje imię, dom, pracę i preferowany transport do każdego 
 7. `get_user_profile` jest potrzebne tylko wtedy, gdy odpowiedź rzeczywiście wymaga danych profilu, np. imienia lub potwierdzenia ustawionego transportu.
 
 To ogranicza długość promptów, ekspozycję danych osobowych oraz liczbę miejsc, w których adresy muszą być obsługiwane.
+
+## Fundament API PKP PLK
+
+Oficjalne API Otwarte Dane Kolejowe PKP PLK zostanie podłączone jako niezależne źródło danych kolejowych. Sekret `PKP_API_KEY` jest już zapisany w Supabase Edge Function Secrets i może być odczytywany wyłącznie przez funkcje serwerowe.
+
+1. Dodać do `assistant-tools` adapter PKP PLK z bazowym URL `https://pdp-api.plk-sa.pl/api/v1`.
+2. Każde żądanie API wysyła nagłówek `X-API-Key: <PKP_API_KEY>`; klucz nie może trafić do SMS-a, promptu Gemini, logów ani panelu administracyjnego.
+3. Dodać wyszukanie stacji przez `/dictionaries/stations?search=...` i jednoznaczne mapowanie nazwy stacji na identyfikator PKP PLK. Przy wielu pasujących stacjach AI dopytuje użytkownika, zamiast wybierać przypadkową.
+4. Dodać odczyt rozkładu planowego dla stacji przez `/schedules` z parametrami daty i identyfikatora stacji.
+5. Dodać odczyt realizacji w czasie rzeczywistym przez `/operations` z `withPlanned=true`, aby zwracać planowy czas oraz opóźnienie.
+6. Dodać odczyt utrudnień przez `/disruptions` oraz szczegółowej trasy znanego pociągu przez endpoint trasy dostępny w API PLK.
+7. Wprowadzić limity, cache dla słownika stacji oraz obsługę kodów `401`, `403`, `429` i `5xx`. Brak danych lub limit API ma skutkować krótką, uczciwą odpowiedzią SMS, a nie zgadywaniem.
+8. Logować wyłącznie metadane żądania — typ endpointu, status HTTP, czas odpowiedzi i ewentualny `traceId` — bez klucza i bez pełnych danych użytkownika.
+9. Zaimplementować `plan_train_journey` jako planer nad danymi PLK. Przyjmuje stację początkową, końcową, czas „wyjazd po” albo „przyjazd przed” oraz opcjonalnie maksymalną liczbę przesiadek.
+10. Z danych planowych zbudować graf przejazdów: każdy postój pociągu jest węzłem czasowym, a kolejne postoje tego samego pociągu są krawędziami przejazdu. Przesiadka jest możliwa wyłącznie na tej samej stacji po minimalnym czasie technicznym.
+11. W pierwszej wersji zastosować algorytm earliest-arrival (połączenia przetwarzane chronologicznie): wybiera najwcześniejszy możliwy przyjazd, obsługuje połączenia bezpośrednie i przesiadki, nie zakładając stałej liczby segmentów.
+12. Ustawić bezpieczne ograniczenia: domyślnie maksymalnie 3 przesiadki, minimalny czas przesiadki 10 minut, okno wyszukiwania 24 godziny i limit liczby zwracanych wariantów. Parametry muszą być konfigurowalne.
+13. Dla kandydatów najlepszego planu dociągnąć dane `/operations` i skorygować planowane czasy o dostępne opóźnienia, odwołania oraz utrudnienia. Jeśli dane real-time są niepełne, odpowiedź wyraźnie oznacza czas jako planowy.
+14. Cache'ować słownik stacji i dane rozkładu według daty; nie pobierać całego krajowego rozkładu dla każdego SMS-a. Cache ma wygasać po zmianie wersji danych PLK i po końcu dnia rozkładowego.
+15. W razie braku trasy, zbyt wielu dopasowań stacji albo przekroczonych limitów API endpoint zwraca ustrukturyzowaną przyczynę, a AI zadaje jedno konkretne pytanie lub informuje o braku połączenia.
+
+Format wyniku `plan_train_journey` dla SMS-a powinien być zwięzły i deterministyczny, na przykład:
+
+```text
+Katowice 12:14 -> Krakow Gl. 13:05
+IC 63100, bez przesiadek, planowo 51 min
+```
+
+Dla przesiadki:
+
+```text
+Katowice 12:14 -> Gliwice 12:38 KS 407
+Gliwice 12:49 -> Wroclaw Gl. 14:31 IC 56
+1 przesiadka, planowo 2h17
+```
+
+Przykładowe przyszłe zapytania:
+
+- „Kiedy najbliższy pociąg z Katowic?” -> wyszukanie stacji + rozkład planowy/realizacja.
+- „Czy IC 8312 ma opóźnienie?” -> wykonanie konkretnego pociągu.
+- „Czy są utrudnienia między Katowicami a Krakowem?” -> utrudnienia dla wskazanych stacji.
+- „Jak najszybciej dojadę pociągiem z Katowic do Wrocławia, jeśli wyjadę teraz?” -> `plan_train_journey` z bieżącym czasem wyjazdu.
+
+## README: sekret PKP
+
+W tym samym wdrożeniu uzupełnić `README.md` o:
+
+1. sekret Edge Function `PKP_API_KEY`;
+2. informację, że jest to klucz oficjalnego API Otwarte Dane Kolejowe PKP PLK;
+3. zakres danych: planowy rozkład, realizacja, opóźnienia i utrudnienia;
+4. opis wyszukiwania tras kolejowych z przesiadkami oraz jego ograniczeń: okno czasu, minimalny czas przesiadki i liczba przesiadek;
+5. zasadę bezpiecznego przechowywania sekretu wyłącznie po stronie Supabase;
+6. odpowiednią pozycję w strukturze endpointów oraz w sekcji technologii.
 
 ## Dłuższe odpowiedzi
 
@@ -202,6 +260,8 @@ Przed wdrożeniem przygotować testy z atrapami Gemini, Google i Zadarma:
 9. Trasa dłuższa niż jeden, trzy lub cztery SMS-y: zawsze cała i od razu wysłana.
 10. Brak klucza Google, niepoprawny adres, brak adresu domu/pracy i brak trasy.
 11. Zachowanie obecnego rozpoznawania użytkownika, kodów rozmów, logowania i ochrony przed duplikatem webhooka.
+12. PKP PLK: jednoznaczne i niejednoznaczne stacje, przejazd bezpośredni, jedna i wiele przesiadek, minimalny czas przesiadki, brak połączenia, anulowanie, opóźnienie i przekroczony limit API.
+13. PKP PLK: wybór trasy o najwcześniejszym przyjeździe dla czasu „wyjazd po” oraz wybór wariantu spełniającego „przyjazd przed”.
 
 ## Kolejność realizacji
 
@@ -211,7 +271,8 @@ Przed wdrożeniem przygotować testy z atrapami Gemini, Google i Zadarma:
 4. Zaimplementować długie odpowiedzi i zamykanie rozmowy.
 5. Zastąpić integrację tras Directions API oraz formatter ASCII.
 6. Dodać `get_fastest_arrival`, `transit` i zatwierdzony format odcinków komunikacji miejskiej.
-7. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
-8. Zaktualizować README.
-9. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
-10. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
+7. Dodać adapter PKP PLK, wyszukiwanie stacji, dane planowe, realizację, utrudnienia oraz `plan_train_journey` z przesiadkami.
+8. Usunąć lub zdeprecjonować starą logikę komend i `pending_reply`.
+9. Zaktualizować README, w tym `PKP_API_KEY`, działanie planera kolejowego i ograniczenia źródeł danych.
+10. Uruchomić testy, sprawdzenie formatowania i próbne webhooki.
+11. Wdrożyć dopiero po pozytywnym odbiorze scenariuszy SMS.
