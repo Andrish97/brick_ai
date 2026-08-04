@@ -64,16 +64,23 @@ type UserProfile = {
   profile_transport: string | null;
   profile_home_station: string | null;
   profile_work_station: string | null;
-  profile_max_reply_sms_parts: number | null;
 };
 
 async function getUser(url: string, key: string, userId: string): Promise<UserProfile | null> {
   const users = await sbGet(
     url,
     key,
-    `users?id=eq.${encodeURIComponent(userId)}&select=profile_name,profile_home,profile_work,profile_transport,profile_home_station,profile_work_station,profile_max_reply_sms_parts`
+    `users?id=eq.${encodeURIComponent(userId)}&select=profile_name,profile_home,profile_work,profile_transport,profile_home_station,profile_work_station`
   ) as UserProfile[];
   return users[0] ?? null;
+}
+
+// Globalny limit SMS-ów odpowiedzi rozszerzonej — Ustawienia → max_reply_sms_parts,
+// jeden wspólny limit dla wszystkich użytkowników zamiast pola w profilu.
+async function getMaxReplySmsParts(url: string, key: string): Promise<1 | 3 | 4> {
+  const rows = await sbGet(url, key, `settings?key=eq.max_reply_sms_parts&select=value`) as Array<{ value: string }>;
+  const parsed = parseInt(rows[0]?.value ?? "4", 10);
+  return validParts(parsed) ? parsed : 4;
 }
 
 // --- Google Directions API (turn-by-turn + transit) ---
@@ -258,27 +265,25 @@ Deno.serve(async (req: Request) => {
     if (conversations.length !== 1) return json({ error: "Conversation not found" }, 404);
 
     if (input.action === "get_user_profile") {
-      const allowed = new Set(["name", "home", "work", "transport", "home_station", "work_station", "max_reply_sms_parts"]);
+      const allowed = new Set(["name", "home", "work", "transport", "home_station", "work_station"]);
       const requested = Array.isArray(input.args?.fields)
         ? input.args!.fields.filter((field): field is string => typeof field === "string" && allowed.has(field))
         : [];
-      const fields = requested.length ? requested : ["name", "home", "work", "transport", "home_station", "work_station", "max_reply_sms_parts"];
+      const fields = requested.length ? requested : ["name", "home", "work", "transport", "home_station", "work_station"];
       const user = await getUser(url, key, input.user_id);
       if (!user) return json({ error: "User not found" }, 404);
       const source: Record<string, unknown> = {
         name: user.profile_name, home: user.profile_home, work: user.profile_work,
         transport: user.profile_transport, home_station: user.profile_home_station,
-        work_station: user.profile_work_station, max_reply_sms_parts: user.profile_max_reply_sms_parts,
+        work_station: user.profile_work_station,
       };
       return json({ profile: Object.fromEntries(fields.filter((field) => source[field] != null).map((field) => [field, source[field]])) });
     }
 
     if (input.action === "allow_long_reply") {
-      const user = await getUser(url, key, input.user_id);
-      if (!user) return json({ error: "User not found" }, 404);
       const requested = input.args?.parts;
       if (!validParts(requested) || requested === 1) return json({ error: "parts must be 3 or 4" }, 400);
-      const cap = validParts(user.profile_max_reply_sms_parts) ? user.profile_max_reply_sms_parts : 4;
+      const cap = await getMaxReplySmsParts(url, key);
       const granted = Math.min(requested, cap) as 1 | 3 | 4;
       await sbPatch(url, key, "conversations", `id=eq.${encodeURIComponent(input.conversation_id)}`, {
         reply_sms_parts: granted,

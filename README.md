@@ -51,7 +51,7 @@ Słowa `koniec` / `stop` / `zamknij` / `end` jako **jedyna** treść SMS-a nadal
 
 Domyślnie AI odpowiada w jednym SMS (max 153 znaki treści). Gdy wyraźnie zgodzisz się na dłuższą odpowiedź, model włącza limit **3 lub 4 SMS-y** dla tej rozmowy — i wysyła od razu wszystkie części w jednej odpowiedzi, bez konieczności pisania czegokolwiek po kolejne fragmenty.
 
-Rzeczywisty przyznany limit nigdy nie przekracza wartości ustawionej w profilu użytkownika (panel admina → Użytkownicy → „Maksymalna liczba SMS-ów odpowiedzi rozszerzonej”, domyślnie 4). To jest twardy limit kosztu — jeśli poprosisz o 4 SMS-y, a profil pozwala tylko na 3, dostaniesz 3.
+Rzeczywisty przyznany limit nigdy nie przekracza globalnego ustawienia (panel admina → Ustawienia → „Limit SMS-ów odpowiedzi rozszerzonej (1, 3 lub 4)”, domyślnie 4) — to jeden wspólny limit dla wszystkich użytkowników, a nie ustawienie per profil. To jest twardy limit kosztu — jeśli poprosisz o 4 SMS-y, a globalny limit to 3, dostaniesz 3.
 
 Limit dotyczy pojedynczej rozmowy i obowiązuje aż do jej zamknięcia lub aż poprosisz o inną liczbę części.
 
@@ -119,8 +119,9 @@ Ustawiany w panelu admina → Użytkownicy → edycja. Model **nie** dostaje tyc
 | Dom | Pełny adres z ulicą i miastem | Skrót „dom” w nawigacji — rozwijany serwerowo |
 | Praca | Pełny adres z ulicą i miastem | Skrót „praca” w nawigacji — rozwijany serwerowo |
 | Transport | pieszo / rower / hulajnoga / komunikacja miejska | Domyślny tryb routingu w nawigacji |
-| Maks. SMS-ów odpowiedzi rozszerzonej | 1 / 3 / 4, domyślnie 4 | Twardy limit dla `allow_long_reply` |
 | Prompt | Własny system prompt (puste = globalny) | Każda rozmowa |
+
+Limit SMS-ów odpowiedzi rozszerzonej **nie** jest polem profilu — to jedno globalne ustawienie dla wszystkich użytkowników (panel admina → Ustawienia → „Limit SMS-ów odpowiedzi rozszerzonej”, domyślnie 4).
 
 ---
 
@@ -130,7 +131,7 @@ Cała logika komend żyje w prywatnej Edge Function `assistant-tools`, wywoływa
 
 | Narzędzie | Argumenty | Efekt |
 |---|---|---|
-| `allow_long_reply` | `parts`: 3 lub 4 | Ustawia limit SMS-ów odpowiedzi dla rozmowy, ograniczony profilem użytkownika |
+| `allow_long_reply` | `parts`: 3 lub 4 | Ustawia limit SMS-ów odpowiedzi dla rozmowy, ograniczony globalnym ustawieniem |
 | `close_conversation` | — | Definitywnie zamyka bieżącą rozmowę |
 | `get_user_profile` | opcjonalna lista pól | Zwraca wyłącznie zażądane pola profilu bieżącego użytkownika |
 | `get_directions` | start, cel, opcjonalny transport | Pobiera i formatuje trasę krok po kroku |
