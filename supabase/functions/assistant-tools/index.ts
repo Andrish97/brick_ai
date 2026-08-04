@@ -146,6 +146,35 @@ type DirectionsResult =
   | { ok: true; lines: string[]; destination: string; warnings: string[] }
   | { ok: false; error: string };
 
+type WalkStep = { symbol: string; distanceMeters: number; name: string };
+
+// Krok bez realnego manewru (prosto / brak instrukcji) — kolejne takie kroki
+// można bezpiecznie połączyć w jeden, bo dla użytkownika liczy się tylko
+// miejsce, w którym trzeba faktycznie skręcić.
+function isStraightish(symbol: string): boolean {
+  return symbol === "^" || symbol === "~";
+}
+
+// Google dzieli trasę na krok przy każdej zmianie nazwy ulicy, nawet gdy
+// kierunek się nie zmienia. Łączymy sąsiadujące kroki "na wprost" w jeden
+// (sumując dystans, zachowując nazwę ostatniego odcinka) i pomijamy znikome
+// mikro-odcinki bez skrętu — skraca to trasę bez utraty żadnego manewru.
+const MIN_STANDALONE_STEP_METERS = 15;
+
+function simplifyWalkSteps(steps: WalkStep[]): WalkStep[] {
+  const merged: WalkStep[] = [];
+  for (const step of steps) {
+    const last = merged[merged.length - 1];
+    if (last && isStraightish(step.symbol) && isStraightish(last.symbol)) {
+      last.distanceMeters += step.distanceMeters;
+      last.name = step.name;
+    } else {
+      merged.push({ ...step });
+    }
+  }
+  return merged.filter((s) => !(isStraightish(s.symbol) && s.distanceMeters < MIN_STANDALONE_STEP_METERS));
+}
+
 async function fetchDirections(apiKey: string, origin: string, destination: string, mode: string): Promise<DirectionsResult> {
   const params = new URLSearchParams({
     origin,
@@ -166,9 +195,18 @@ async function fetchDirections(apiKey: string, origin: string, destination: stri
 
   const lines: string[] = [];
   const warnings: string[] = [];
+  let pendingWalk: WalkStep[] = [];
+
+  const flushWalk = () => {
+    for (const s of simplifyWalkSteps(pendingWalk)) {
+      lines.push(`${s.symbol} ${Math.round(s.distanceMeters)}m ${s.name}`);
+    }
+    pendingWalk = [];
+  };
 
   for (const step of leg.steps ?? []) {
     if (step.travel_mode === "TRANSIT") {
+      flushWalk();
       const td = step.transit_details;
       const line = td?.line?.short_name || td?.line?.name || "?";
       const depStop = td?.departure_stop?.name ?? "?";
@@ -182,8 +220,9 @@ async function fetchDirections(apiKey: string, origin: string, destination: stri
     const symbol = maneuverSymbol(step.maneuver);
     const { name, usedBold } = streetNameFromHtml(step.html_instructions ?? "");
     if (!usedBold) warnings.push(`no_bold_street:${distMeters}`);
-    lines.push(`${symbol} ${distMeters}m ${name}`);
+    pendingWalk.push({ symbol, distanceMeters: distMeters, name });
   }
+  flushWalk();
 
   const destName = destination;
   lines.push(`* 0m ${destName}`);
