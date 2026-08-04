@@ -1058,7 +1058,6 @@ async function openUserModal(userId = null) {
         <label>Transport</label>
         <select id="um-profile-transport">
           <option value="">— nie ustawiony —</option>
-          <option value="samochód" ${user?.profile_transport === 'samochód' ? 'selected' : ''}>Samochód</option>
           <option value="komunikacja miejska" ${user?.profile_transport === 'komunikacja miejska' ? 'selected' : ''}>Komunikacja miejska</option>
           <option value="rower" ${user?.profile_transport === 'rower' ? 'selected' : ''}>Rower</option>
           <option value="hulajnoga" ${user?.profile_transport === 'hulajnoga' ? 'selected' : ''}>Hulajnoga</option>
@@ -1201,11 +1200,8 @@ async function renderConversations() {
           ${c.status === 'active' ? 'aktywna' : 'zamknięta'}
         </span>
       </td>
-      <td onclick="event.stopPropagation()">
-        <label class="toggle" title="Tryb rozszerzony (dłuższe odpowiedzi)">
-          <input type="checkbox" ${c.extended_mode ? 'checked' : ''} onchange="toggleExtendedMode('${c.id}', this.checked)" />
-          <span class="toggle-slider"></span>
-        </label>
+      <td onclick="event.stopPropagation()" title="Limit SMS-ów odpowiedzi — ustawiany automatycznie przez asystenta na podstawie zgody użytkownika i limitu profilu">
+        <span class="badge">${c.reply_sms_parts || 1} SMS</span>
       </td>
       <td onclick="event.stopPropagation()" style="text-align:right;white-space:nowrap">
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
@@ -1237,7 +1233,7 @@ async function renderConversations() {
               <th>Użytkownik</th>
               <th>Ostatnia aktywność</th>
               <th>Status</th>
-              <th title="Tryb rozszerzony">Rozszerz.</th>
+              <th title="Limit SMS-ów odpowiedzi">SMS-y</th>
               <th></th>
             </tr>
           </thead>
@@ -1253,9 +1249,6 @@ async function closeConv(id) {
   renderConversations();
 }
 
-async function toggleExtendedMode(id, enabled) {
-  await sb.from('conversations').update({ extended_mode: enabled }).eq('id', id);
-}
 
 async function deleteConv(id) {
   if (!await confirmModal('Usunąć rozmowę i wszystkie jej wiadomości?')) return;
@@ -1960,11 +1953,6 @@ const SETTING_LABELS = {
 // Keys hidden from Settings UI (managed elsewhere)
 const SETTING_HIDDEN = new Set([
   'zadarma_caller_id',
-  'close_keywords',
-  'nav_keyword',
-  'continue_keyword',
-  'extended_on_keyword',
-  'extended_off_keyword',
 ]);
 
 async function renderSettings() {

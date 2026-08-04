@@ -1,11 +1,11 @@
 # Brick AI — SMS Gateway
 
-AI asystent dostępny przez SMS. Użytkownik wysyła SMS → Gemini odpowiada w 160 znakach.
+AI asystent dostępny przez SMS. Użytkownik pisze zwykłym językiem — Gemini rozpoznaje intencję i, gdy trzeba, wywołuje kontrolowane endpointy aplikacji (nawigacja, dłuższa odpowiedź, zamknięcie rozmowy).
 
 ## Jak to działa
 
 ```
-Użytkownik → SMS → Zadarma → webhook → Supabase Edge Function → Gemini → SMS odpowiedź
+Użytkownik → SMS → Zadarma → webhook → Gemini (function calling) → assistant-tools → SMS odpowiedź
 ```
 
 **Format SMS — znany numer (telefon w profilu):**
@@ -29,81 +29,115 @@ Odpowiedź AI (max 153 znaki)
 
 ---
 
-## Komendy SMS
+## Naturalny język — bez komend
 
-| Komenda | Opis |
-|---------|------|
-| `->` | Włącza tryb rozszerzony dla **tej rozmowy** |
-| `<-` | Wyłącza tryb rozszerzony |
-| `-->` | Wysyła następną część długiej odpowiedzi |
-| `nav A > B` | Trasa turn-by-turn z A do B |
-| `koniec` / `stop` / `zamknij` / `end` | Zamyka bieżącą rozmowę |
+Nie ma już technicznych komend do zapamiętania. Piszesz zwykłym zdaniem, a model sam rozpoznaje intencję i w razie potrzeby wywołuje odpowiedni endpoint:
+
+| Wypowiedź | Co się dzieje |
+|---|---|
+| „możesz odpisać szerzej” / „pisz w czterech SMS-ach” | AI włącza dłuższą odpowiedź dla tej rozmowy (patrz niżej) |
+| „to koniec”, „żegnam się”, „nie kontynuuj” | AI definitywnie zamyka rozmowę |
+| „poprowadź mnie z domu do pracy rowerem” | AI pobiera trasę krok po kroku |
+| „jak dojadę tramwajem do rynku?” | AI pobiera trasę komunikacją miejską |
+| „o której najszybciej będę w pracy?” | AI porównuje dostępne środki transportu |
+
+Model nigdy nie zgaduje — jeśli intencja nie jest jednoznaczna (np. słowo „koniec” użyte w innym sensie), zwyczajnie odpowiada dalej w rozmowie zamiast wywoływać narzędzie.
+
+Słowa `koniec` / `stop` / `zamknij` / `end` jako **jedyna** treść SMS-a nadal działają jako szybka, deterministyczna ścieżka zamknięcia rozmowy (bez angażowania modelu).
 
 ---
 
-## Tryb rozszerzony i kontynuacja
+## Dłuższe odpowiedzi
 
-Domyślnie AI odpowiada w jednym SMS (max 153 znaki treści). Tryb rozszerzony pozwala na odpowiedzi do ~450 znaków (3 SMS), dzielone automatycznie.
+Domyślnie AI odpowiada w jednym SMS (max 153 znaki treści). Gdy wyraźnie zgodzisz się na dłuższą odpowiedź, model włącza limit **3 lub 4 SMS-y** dla tej rozmowy — i wysyła od razu wszystkie części w jednej odpowiedzi, bez konieczności pisania czegokolwiek po kolejne fragmenty.
 
-**Jak to działa:**
-1. Wysyłasz `->` — system potwierdza, flaga ustawiona na tę rozmowę
-2. AI dostaje instrukcję że może pisać dłużej
-3. Jeśli odpowiedź nie mieści się w jednym SMS — pierwszy fragment wysłany z `...` na końcu, reszta zapamiętana
-4. Piszesz `-->` — dostajesz kolejny fragment bez angażowania AI
-5. Kolejne `dalej` aż do końca odpowiedzi
-6. Gdy piszesz nową wiadomość (nie `dalej`) — zapamiętana reszta jest kasowana, zaczynasz od nowa
+Rzeczywisty przyznany limit nigdy nie przekracza wartości ustawionej w profilu użytkownika (panel admina → Użytkownicy → „Maksymalna liczba SMS-ów odpowiedzi rozszerzonej”, domyślnie 4). To jest twardy limit kosztu — jeśli poprosisz o 4 SMS-y, a profil pozwala tylko na 3, dostaniesz 3.
 
-**Tryb rozszerzony można też włączyć z panelu admina** — toggle w kolumnie "Rozszerz." w tabeli Rozmowy. Ustawienie dotyczy konkretnej rozmowy, nie użytkownika.
+Limit dotyczy pojedynczej rozmowy i obowiązuje aż do jej zamknięcia lub aż poprosisz o inną liczbę części.
+
+---
+
+## Zamykanie rozmowy
+
+Gdy AI rozpozna wyraźną intencję zakończenia rozmowy, zamyka ją definitywnie — bez dodatkowego potwierdzenia SMS-em (oszczędza SMS-a; kolejny SMS z kodem zamkniętej rozmowy po prostu zakłada nową rozmowę zamiast reaktywować starą).
 
 ---
 
 ## Nawigacja
 
-Wymaga sekretu `GOOGLE_MAPS_API_KEY` z włączonym **Routes API**.
+Wymaga sekretu `GOOGLE_MAPS_API_KEY` z włączonym **Directions API**.
 
-**Format komendy:**
-```
-nav Marszałkowska 1, Warszawa > Puławska 17, Warszawa
-nav dom > praca
-nav dom > Dworzec Centralny, Warszawa
-```
+Nie ma już komendy `nav` — poproś zwykłym zdaniem, np. „jak dojdę z domu do pracy?”, „poprowadź mnie rowerem na dworzec”. Skróty „dom” i „praca” są rozwijane po stronie serwera z profilu użytkownika — adres nigdy nie trafia do modelu.
 
-Skróty `dom` i `praca` pobierane z profilu użytkownika.
+**Obsługiwane środki transportu:** pieszo, rower, hulajnoga, komunikacja miejska. **Samochód nie jest obsługiwany** — celowo, aby trasa zawsze mieściła się w rozsądnej liczbie SMS-ów.
 
-**Format odpowiedzi** (Google Routes API, język polski):
+**Format odpowiedzi** — jedna linia na krok, ASCII:
+
 ```
-↑ Jedź prosto ul. Marszałkowska (350m)
-↰ Skręć w lewo ul. Świętokrzyska (120m)
-↱ Skręć w prawo Al. Jerozolimskie (800m)
-★ Puławska 17, Warszawa (2.1km, ~8min)
+< 300m Chorzowska
+^ 850m Aleja Roździeńskiego
+O2 120m ul. Katowicka
+* 0m Cel
 ```
 
-Strzałki: `↑` prosto · `↰` lewo · `↱` prawo · `↩` zawróć
+| Symbol | Manewr |
+|---|---|
+| `^` | prosto |
+| `<` / `>` | skręć w lewo / prawo |
+| `<^` / `>^` | lekko w lewo / prawo |
+| `<<` / `>>` | ostro w lewo / prawo |
+| `<>` | zawróć |
+| `O<numer>` | rondo, wskazany zjazd |
+| `\|` | zmiana drogi bez skrętu |
+| `~` | brak manewru / łagodny łuk |
 
-**Tryby transportu** (pobierane z profilu użytkownika):
+Dystans zawsze w metrach, zaokrąglony (np. `1250m`). Ostatnia linia to zawsze `* 0m <cel>`. Nazwa ulicy pochodzi z pogrubionego przez Google fragmentu instrukcji (`html_instructions`) — bez tłumaczenia ani skracania.
 
-| Tryb | Routing |
-|------|---------|
-| Samochód | DRIVE — główne arterie |
-| Rower | BICYCLE — ścieżki rowerowe |
-| Pieszo | WALK — chodniki i przejścia |
-| Hulajnoga | BICYCLE — ścieżki rowerowe, unika ruchliwych ulic |
+**Limit długości trasy:** maksymalnie **6 SMS-ów**. Jeśli trasa jest dłuższa, AI odpowiada krótką informacją, że trasa jest zbyt długa na SMS, zamiast wysyłać oszukańczo obciętą (i przez to potencjalnie mylącą) nawigację.
 
-Nawigacja **zawsze włącza tryb rozszerzony** i dzieli trasę na fragmenty. Pisz `-->` po kolejne kroki.
+---
+
+## Komunikacja miejska
+
+Poproś np. „jak dojadę tramwajem do rynku?” — AI pobiera całą podróż: dojście pieszo do przystanku, linię i kierunek, przystanek wejścia/wyjścia, godziny odjazdu/przyjazdu oraz przesiadki, licząc od bieżącego czasu.
+
+Odcinki piesze używają tego samego formatu co nawigacja. Odcinek linią:
+
+```
+| 0m 4 Dworzec -> Rynek 12:03-12:19
+```
 
 ---
 
 ## Profil użytkownika
 
-Ustawiany w panelu admina → Użytkownicy → edycja. Dane wstrzykiwane automatycznie do kontekstu AI.
+Ustawiany w panelu admina → Użytkownicy → edycja. Model **nie** dostaje tych danych automatycznie w każdej rozmowie — pobiera tylko to, czego faktycznie potrzebuje, przez narzędzie `get_user_profile` (np. imię), albo adres jest rozwijany po stronie serwera bez udziału modelu (nawigacja).
 
 | Pole | Opis | Gdzie używane |
 |------|------|---------------|
-| Imię | Jak AI się zwraca do użytkownika | Każda rozmowa |
-| Dom | Pełny adres z ulicą i miastem | Skrót `dom` w nawigacji, kontekst dla pogody/tras |
-| Praca | Pełny adres z ulicą i miastem | Skrót `praca` w nawigacji |
-| Transport | samochód / rower / pieszo / hulajnoga | Tryb routingu w nawigacji |
+| Imię | Jak AI się zwraca do użytkownika | Na żądanie, przez `get_user_profile` |
+| Dom | Pełny adres z ulicą i miastem | Skrót „dom” w nawigacji — rozwijany serwerowo |
+| Praca | Pełny adres z ulicą i miastem | Skrót „praca” w nawigacji — rozwijany serwerowo |
+| Transport | pieszo / rower / hulajnoga / komunikacja miejska | Domyślny tryb routingu w nawigacji |
+| Maks. SMS-ów odpowiedzi rozszerzonej | 1 / 3 / 4, domyślnie 4 | Twardy limit dla `allow_long_reply` |
 | Prompt | Własny system prompt (puste = globalny) | Każda rozmowa |
+
+---
+
+## Endpointy / narzędzia
+
+Cała logika komend żyje w prywatnej Edge Function `assistant-tools`, wywoływanej wyłącznie serwerowo przez `zadarma-sms-webhook` (uwierzytelnienie nagłówkiem `X-Internal-Secret`). Nie jest to publiczny interfejs — SMS-y nigdy nie trafiają do niej bezpośrednio, a model nigdy nie otrzymuje sekretów.
+
+| Narzędzie | Argumenty | Efekt |
+|---|---|---|
+| `allow_long_reply` | `parts`: 3 lub 4 | Ustawia limit SMS-ów odpowiedzi dla rozmowy, ograniczony profilem użytkownika |
+| `close_conversation` | — | Definitywnie zamyka bieżącą rozmowę |
+| `get_user_profile` | opcjonalna lista pól | Zwraca wyłącznie zażądane pola profilu bieżącego użytkownika |
+| `get_directions` | start, cel, opcjonalny transport | Pobiera i formatuje trasę krok po kroku |
+| `get_transit` | start, cel | Pobiera trasę komunikacją miejską z przesiadkami |
+| `get_fastest_arrival` | start, cel | Porównuje dostępne środki transportu i zwraca najszybszy |
+
+Wyniki nawigacji i komunikacji miejskiej formatuje wyłącznie endpoint — model nigdy nie tworzy własnego formatu trasy, co gwarantuje spójność i bezpieczeństwo (żadnych zmyślonych ulic czy odległości).
 
 ---
 
@@ -157,7 +191,8 @@ supabase secrets set \
   ZADARMA_API_SECRET='...' \
   GEMINI_API_KEY='...' \
   SUPABASE_ANON_KEY='...' \
-  SETUP_SECRET='...'
+  SETUP_SECRET='...' \
+  ASSISTANT_TOOLS_SECRET='...'
 ```
 
 > Sekrety ustawione w jednym miejscu działają dla wszystkich Edge Functions w projekcie.
@@ -169,9 +204,10 @@ supabase secrets set \
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
 | `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
-| `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Enable **Routes API** → Credentials → Create API Key — wymagany do komendy `nawigacja` |
+| `ASSISTANT_TOOLS_SECRET` | Dowolny losowy string — autoryzuje wywołania webhooka do `assistant-tools`. Jeśli pominięty, funkcja spada na `SUPABASE_SERVICE_ROLE_KEY`. |
+| `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Enable **Directions API** → Credentials → Create API Key — wymagany do nawigacji i komunikacji miejskiej |
 
-> **Dlaczego tylko Gemini?** Gemini 2.0 Flash ma wbudowaną wyszukiwarkę Google (`googleSearch`) — jedyny darmowy model z dostępem do danych w czasie rzeczywistym (pogoda, kursy walut, aktualności) bez dodatkowych integracji.
+> **Dlaczego tylko Gemini?** Gemini ma wbudowaną wyszukiwarkę Google (`googleSearch`) — jedyny darmowy model z dostępem do danych w czasie rzeczywistym (pogoda, kursy walut, aktualności) bez dodatkowych integracji.
 
 ### 5. Deploy
 
@@ -240,7 +276,8 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 │   └── favicon.svg
 ├── supabase/
 │   ├── functions/
-│   │   ├── zadarma-sms-webhook/    # Odbiera SMS, odpowiada przez AI
+│   │   ├── zadarma-sms-webhook/    # Odbiera SMS, rozpoznaje intencję, wysyła odpowiedź
+│   │   ├── assistant-tools/        # Prywatne narzędzia wywoływane przez webhook (nigdy publicznie)
 │   │   └── admin-send-sms/         # Wysyła SMS z panelu admina
 │   ├── migrations/                 # Migracje SQL
 │   └── config.toml
@@ -261,14 +298,16 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 | SMS wychodzący | 0.18 PLN/sms |
 | Supabase | Free tier |
 | Gemini API | Free tier (60 req/min) |
-| Google Routes API | $5/1000 tras (200$ kredytu/mies. gratis ≈ 40 000 tras) |
+| Google Directions API | $5/1000 tras (200$ kredytu/mies. gratis ≈ 40 000 tras) |
 | GitHub Pages | Darmowe |
+
+Odpowiedzi domyślnie mieszczą się w 1 SMS-ie; dłuższe odpowiedzi (3–4 SMS-y) wymagają wyraźnej zgody użytkownika i są dodatkowo ograniczone limitem profilu. Trasy nawigacyjne mają twardy limit 6 SMS-ów za zapytanie — dłuższe trasy są odrzucane zamiast wysyłane w całości.
 
 ## Technologie
 
 - **Supabase** — PostgreSQL + Edge Functions (Deno)
 - **Zadarma** — bramka SMS
-- **Google Gemini 2.0 Flash** — model AI z wbudowaną wyszukiwarką Google (dane w czasie rzeczywistym)
-- **Google Routes API** — precyzyjna nawigacja turn-by-turn (opcjonalna)
+- **Google Gemini** — model AI z wbudowaną wyszukiwarką Google i function calling
+- **Google Directions API** — nawigacja turn-by-turn i komunikacja miejska (opcjonalna)
 - **GitHub Actions** — CI/CD
 - **GitHub Pages** — panel admina (vanilla HTML/JS)

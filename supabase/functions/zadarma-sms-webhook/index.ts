@@ -8,13 +8,12 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
-const MAX_REPLY_CHARS = 153;  // 160 - '\n' - 6 cyfr kodu rozmowy (jeden SMS)
-const MAX_CONT_CHARS = 459;   // 3x SMS — max długość odpowiedzi AI z kontynuacją
-// Domyślne komendy — można nadpisać w ustawieniach bazy (settings table)
-const DEFAULT_CONTINUE_KEYWORD = "-->";
-const DEFAULT_EXTENDED_ON_KEYWORD = "->";
-const DEFAULT_EXTENDED_OFF_KEYWORD = "<-";
-const DEFAULT_NAV_KEYWORD = "nav";
+const SUFFIX_LEN = 7; // "\n" + 6-cyfrowy kod rozmowy
+const SMS_PART_CHARS = 160 - SUFFIX_LEN; // 153 — treść jednej części SMS bez suffixu
+const CLOSE_KEYWORDS = ["koniec", "stop", "zamknij", "end"]; // szybka ścieżka bez wywoływania modelu
+
+// Liczba tokenów wyjściowych Gemini w zależności od przyznanego limitu SMS-ów odpowiedzi
+const TOKENS_FOR_PARTS: Record<number, number> = { 1: 100, 3: 300, 4: 400 };
 
 function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
@@ -41,6 +40,19 @@ function sanitizeForSms(text: string): string {
     .replace(/[\u200B-\u200D\uFEFF]/g, '')               // znaki zerowej szerokości
     .replace(/\r\n|\r/g, '\n')                            // CRLF/CR → LF
     .trim();
+}
+
+// Dzieli tekst na maks. `maxParts` części po `SMS_PART_CHARS` znaków. Jeśli tekst
+// jest dłuższy, obcina go najpierw na granicy zdania/słowa (smartTrim), więc nigdy
+// nie wysyłamy więcej niż `maxParts` SMS-ów za jedną odpowiedź.
+function chunkForSms(text: string, maxParts: number): string[] {
+  const budget = SMS_PART_CHARS * maxParts;
+  const fitted = text.length > budget ? smartTrim(text, budget - 3) + "..." : text;
+  const parts: string[] = [];
+  for (let i = 0; i < fitted.length; i += SMS_PART_CHARS) {
+    parts.push(fitted.slice(i, i + SMS_PART_CHARS));
+  }
+  return parts.length ? parts : [""];
 }
 
 // --- Zadarma auth ---
@@ -138,14 +150,101 @@ function generateCode(length: number): string {
   return Array.from({ length }, () => Math.floor(Math.random() * 10)).join("");
 }
 
-// --- AI ---
+// --- Gemini function calling ---
 
-async function callGemini(messages: Array<{ role: string; content: string }>, system: string, maxOutputTokens = 100): Promise<string | null> {
+type GeminiContent = { role: string; parts: Array<Record<string, unknown>> };
+
+const TOOLS = [
+  { google_search: {} },
+  {
+    functionDeclarations: [
+      {
+        name: "allow_long_reply",
+        description:
+          "Pozwala AI odpowiedzieć dłużej niż jednym SMS-em w BIEŻĄCEJ rozmowie. Wywołaj WYŁĄCZNIE gdy użytkownik wyraźnie zgadza się na dłuższą odpowiedź (np. 'możesz odpisać szerzej', 'pisz w czterech SMS-ach', 'możesz kontynuować' w kontekście zgody na dłuższą odpowiedź). Nie wywołuj tylko dlatego, że Twoja odpowiedź mogłaby być długa.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            parts: { type: "INTEGER", description: "Liczba SMS-ów, na jaką zgodził się użytkownik: 3 lub 4." },
+          },
+          required: ["parts"],
+        },
+      },
+      {
+        name: "close_conversation",
+        description:
+          "Definitywnie zamyka bieżącą rozmowę. Wywołaj WYŁĄCZNIE gdy użytkownik naprawdę chce zakończyć rozmowę (np. 'to koniec', 'żegnam się', 'nie kontynuuj'). Nie wywołuj tylko dlatego, że w tekście pojawiło się słowo podobne do 'koniec' bez takiej intencji.",
+        parameters: { type: "OBJECT", properties: {} },
+      },
+      {
+        name: "get_user_profile",
+        description:
+          "Pobiera wybrane pola profilu bieżącego użytkownika (imię, dom, praca, transport). Wywołaj tylko gdy odpowiedź faktycznie tego wymaga — np. użytkownik pyta o swoje imię albo ustawiony transport. Nie wywołuj, aby uzyskać adres domu/pracy do nawigacji — get_directions/get_transit/get_fastest_arrival rozwiązują to samodzielnie.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            fields: {
+              type: "ARRAY",
+              items: { type: "STRING", enum: ["name", "home", "work", "transport"] },
+              description: "Lista pól do pobrania. Domyślnie wszystkie.",
+            },
+          },
+        },
+      },
+      {
+        name: "get_directions",
+        description:
+          "Pobiera i formatuje trasę krok po kroku między dwoma punktami (bez samochodu — tylko pieszo, rower, hulajnoga lub komunikacja miejska). Słowa 'dom' i 'praca' zostaną automatycznie rozwinięte z profilu użytkownika po stronie serwera — przekaż je dosłownie, nie pytaj o adres.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            origin: { type: "STRING", description: "Punkt startowy: adres albo 'dom'/'praca'." },
+            destination: { type: "STRING", description: "Cel podróży: adres albo 'dom'/'praca'." },
+            mode: {
+              type: "STRING",
+              enum: ["pieszo", "rower", "hulajnoga", "komunikacja miejska"],
+              description: "Środek transportu. Jeśli pominięty, użyty zostanie transport z profilu użytkownika.",
+            },
+          },
+          required: ["origin", "destination"],
+        },
+      },
+      {
+        name: "get_transit",
+        description:
+          "Pobiera szczegółową trasę komunikacją miejską (autobus/tramwaj/metro) między dwoma punktami, z przesiadkami i godzinami odjazdu/przyjazdu, wyliczoną od teraz.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            origin: { type: "STRING", description: "Punkt startowy: adres albo 'dom'/'praca'." },
+            destination: { type: "STRING", description: "Cel podróży: adres albo 'dom'/'praca'." },
+          },
+          required: ["origin", "destination"],
+        },
+      },
+      {
+        name: "get_fastest_arrival",
+        description:
+          "Porównuje dostępne środki transportu (pieszo, rower, komunikacja miejska — bez samochodu) i zwraca najszybszy sposób dotarcia do celu wraz z przewidywaną godziną przyjazdu, licząc od teraz.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            origin: { type: "STRING", description: "Punkt startowy: adres albo 'dom'/'praca'." },
+            destination: { type: "STRING", description: "Cel podróży: adres albo 'dom'/'praca'." },
+          },
+          required: ["origin", "destination"],
+        },
+      },
+    ],
+  },
+];
+
+const DETERMINISTIC_ACTIONS = new Set(["get_directions", "get_transit", "get_fastest_arrival"]);
+
+type GeminiTurn = { functionCall: { name: string; args: Record<string, unknown> } | null; text: string | null };
+
+async function generateContent(contents: GeminiContent[], system: string, maxOutputTokens: number): Promise<GeminiTurn> {
   try {
-    const contents = messages.map((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${Deno.env.get("GEMINI_API_KEY")}`,
       {
@@ -154,7 +253,7 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
         body: JSON.stringify({
           contents,
           systemInstruction: { parts: [{ text: system }] },
-          tools: [{ google_search: {} }],
+          tools: TOOLS,
           generationConfig: { maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
         }),
       }
@@ -162,99 +261,113 @@ async function callGemini(messages: Array<{ role: string; content: string }>, sy
     const resText = await res.text();
     if (!res.ok) {
       log("gemini_error", { status: res.status, body: resText.slice(0, 500) });
-      return null;
+      return { functionCall: null, text: null };
     }
     const data = JSON.parse(resText);
     const candidate = data.candidates?.[0];
-    const parts = candidate?.content?.parts ?? [];
-    const text = parts.filter((p: { thought?: boolean }) => !p.thought).map((p: { text?: string }) => p.text ?? "").join("").trim();
+    const parts: Array<Record<string, unknown>> = candidate?.content?.parts ?? [];
+    const functionCallPart = parts.find((p) => p.functionCall) as { functionCall?: { name: string; args?: Record<string, unknown> } } | undefined;
+    const text = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text as string).join("").trim();
     log("gemini_raw", {
       model: "gemini-3.5-flash",
       finishReason: candidate?.finishReason,
       partsCount: parts.length,
+      functionCall: functionCallPart?.functionCall?.name ?? null,
       chars: text.length,
-      usedSearch: !!candidate?.groundingMetadata,
-      preview: text.slice(0, 100),
     });
-    return text || null;
+    return {
+      functionCall: functionCallPart?.functionCall ? { name: functionCallPart.functionCall.name, args: functionCallPart.functionCall.args ?? {} } : null,
+      text: text || null,
+    };
   } catch (e) {
     log("gemini_error", { exception: String(e) });
-    return null;
+    return { functionCall: null, text: null };
   }
 }
 
-async function askAi(messages: Array<{ role: string; content: string }>, system: string, maxOutputTokens = 100): Promise<string> {
-  return (await callGemini(messages, system, maxOutputTokens)) ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
+async function callAssistantTool(action: string, args: Record<string, unknown>, userId: string, conversationId: string): Promise<Record<string, unknown>> {
+  const url = Deno.env.get("SUPABASE_URL");
+  const secret = Deno.env.get("ASSISTANT_TOOLS_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  try {
+    const res = await fetch(`${url}/functions/v1/assistant-tools`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Internal-Secret": secret ?? "" },
+      body: JSON.stringify({ action, user_id: userId, conversation_id: conversationId, args }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { error: "tool_unreachable", detail: String(e) };
+  }
 }
 
-// --- Google Maps Routes API ---
-
-function maneuverArrow(maneuver: string): string {
-  if (!maneuver) return "↑";
-  if (maneuver.includes("U_TURN")) return "↩";
-  if (maneuver.includes("LEFT"))   return "↰";
-  if (maneuver.includes("RIGHT"))  return "↱";
-  return "↑";
+function directionsErrorMessage(toolResult: Record<string, unknown>): string {
+  const error = String(toolResult.error ?? "");
+  if (error === "no_api_key") return "Nawigacja jest chwilowo niedostępna (brak konfiguracji).";
+  if (error === "missing_address") return `Brak adresu "${toolResult.missing ?? "?"}" w profilu. Uzupełnij go w panelu admina.`;
+  if (error === "unsupported_transport") return String(toolResult.message ?? "Ustaw obsługiwany transport w profilu.");
+  if (error === "route_too_long") return `Trasa jest zbyt długa na SMS (limit ${toolResult.max_sms_parts ?? 6} części). Wybierz bliższy cel.`;
+  if (error === "no_route") return "Nie udało się znaleźć trasy. Sprawdź adresy i spróbuj ponownie.";
+  return "Nie udało się pobrać trasy. Spróbuj ponownie.";
 }
 
-function formatDistance(meters: number): string {
-  return meters >= 1000 ? `${(meters / 1000).toFixed(1)}km` : `${meters}m`;
+function formatFastestArrival(toolResult: Record<string, unknown>): string {
+  if (toolResult.error) return directionsErrorMessage(toolResult);
+  const mode = String(toolResult.best_mode ?? "?");
+  const minutes = toolResult.minutes;
+  const arrival = toolResult.arrival_time;
+  return `Najszybciej: ${mode}, ${minutes} min (przyjazd ~${arrival}).`;
 }
 
-async function getDirections(from: string, to: string, transport: string): Promise<string | null> {
-  const apiKey = Deno.env.get("GOOGLE_MAPS_API_KEY");
-  if (!apiKey) return null;
+type ToolContext = { userId: string; convId: string };
 
-  const modeMap: Record<string, string> = {
-    "samochód":  "DRIVE",
-    "rower":     "BICYCLE",
-    "hulajnoga": "BICYCLE",
-    "pieszo":    "WALK",
-  };
-  const travelMode = modeMap[transport] ?? "WALK";
+type AssistantOutcome =
+  | { kind: "closed" }
+  | { kind: "route"; text: string }
+  | { kind: "text"; text: string; grantedParts?: 1 | 3 | 4 };
 
-  const res = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask": "routes.legs.steps.navigationInstruction,routes.legs.steps.distanceMeters,routes.legs.distanceMeters,routes.legs.duration",
-    },
-    body: JSON.stringify({
-      origin:      { address: from },
-      destination: { address: to },
-      travelMode,
-      languageCode: "pl",
-    }),
-  });
-
-  if (!res.ok) {
-    log("maps_error", { status: res.status, body: (await res.text()).slice(0, 200) });
-    return null;
-  }
-  const data = await res.json();
-  const leg = data.routes?.[0]?.legs?.[0];
-  if (!leg) {
-    log("maps_error", { reason: "no_route", from, to });
-    return null;
+async function runAssistant(contents: GeminiContent[], systemPrompt: string, maxOutputTokens: number, ctx: ToolContext): Promise<AssistantOutcome> {
+  const first = await generateContent(contents, systemPrompt, maxOutputTokens);
+  if (!first.functionCall) {
+    return { kind: "text", text: first.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie." };
   }
 
-  const lines: string[] = [];
-  for (const step of leg.steps ?? []) {
-    if ((step.distanceMeters ?? 0) < 30) continue;
-    const nav = step.navigationInstruction;
-    if (!nav) continue;
-    const arrow = maneuverArrow(nav.maneuver ?? "");
-    const dist = step.distanceMeters ? formatDistance(step.distanceMeters) : "";
-    const instr = (nav.instructions ?? "").replace(/^(Skręć\s+\w+\s+w\s+|Jedź\s+prosto\s+(przez\s+|na\s+|ul\.\s*)?)/i, "").slice(0, 30);
-    lines.push(`${arrow}${dist} ${instr}`);
+  const { name, args } = first.functionCall;
+  log("tool_call", { convId: ctx.convId, name, args });
+
+  if (name === "close_conversation") {
+    await callAssistantTool("close_conversation", {}, ctx.userId, ctx.convId);
+    return { kind: "closed" };
   }
 
-  const totalDist = leg.distanceMeters ? formatDistance(leg.distanceMeters) : "";
-  const totalTime = leg.duration ? `~${Math.round(parseInt(leg.duration) / 60)}min` : "";
-  lines.push(`★ ${to.slice(0, 25)} ${totalDist} ${totalTime}`.trimEnd());
+  if (DETERMINISTIC_ACTIONS.has(name)) {
+    const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId);
+    log("tool_result", { convId: ctx.convId, name, result: toolResult });
+    if (toolResult.error) {
+      return { kind: "text", text: directionsErrorMessage(toolResult) };
+    }
+    if (name === "get_fastest_arrival") {
+      return { kind: "text", text: formatFastestArrival(toolResult) };
+    }
+    return { kind: "route", text: String(toolResult.route ?? "") };
+  }
 
-  return lines.join("\n");
+  // get_user_profile / allow_long_reply: wynik wraca do modelu, który układa właściwą odpowiedź
+  const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId);
+  log("tool_result", { convId: ctx.convId, name, result: toolResult });
+
+  const grantedParts = name === "allow_long_reply" && [1, 3, 4].includes(toolResult.granted_parts as number)
+    ? (toolResult.granted_parts as 1 | 3 | 4)
+    : undefined;
+
+  const followupContents: GeminiContent[] = [
+    ...contents,
+    { role: "model", parts: [{ functionCall: { name, args } }] },
+    { role: "function", parts: [{ functionResponse: { name, response: toolResult } }] },
+  ];
+  const followupMax = grantedParts ? TOKENS_FOR_PARTS[grantedParts] : maxOutputTokens;
+  const second = await generateContent(followupContents, systemPrompt, followupMax);
+
+  return { kind: "text", text: second.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.", grantedParts };
 }
 
 // --- Handler ---
@@ -309,8 +422,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // Identyfikacja użytkownika: najpierw po numerze telefonu, fallback na kod
-  type UserRow = { id: string; active: boolean; system_prompt: string | null; profile_name: string | null; profile_home: string | null; profile_work: string | null; profile_transport: string | null };
-  const usersByPhone = await sbGet(SB, KEY, `users?phone_number=eq.${encodeURIComponent(senderPhone)}&active=eq.true&select=id,active,system_prompt,profile_name,profile_home,profile_work,profile_transport`) as UserRow[];
+  type UserRow = { id: string; active: boolean; system_prompt: string | null };
+  const usersByPhone = await sbGet(SB, KEY, `users?phone_number=eq.${encodeURIComponent(senderPhone)}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
 
   let matchedUsers: UserRow[];
   let convCode: string | null;
@@ -330,7 +443,7 @@ Deno.serve(async (req: Request) => {
     effectiveContent = parsed.content;
     log("sms_parsed", { from: senderPhone, to: recipientDid, knownPhone: false, userCode: parsed.userCode, convCode, content: effectiveContent, smsBody });
 
-    matchedUsers = await sbGet(SB, KEY, `users?code=eq.${parsed.userCode}&active=eq.true&select=id,active,system_prompt,profile_name,profile_home,profile_work,profile_transport`) as UserRow[];
+    matchedUsers = await sbGet(SB, KEY, `users?code=eq.${parsed.userCode}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
     if (!matchedUsers.length) {
       log("error", { reason: "unknown_user", userCode: parsed.userCode, from: senderPhone });
       return new Response("Unknown user", { status: 200, headers: CORS });
@@ -344,19 +457,15 @@ Deno.serve(async (req: Request) => {
 
   const userId = matchedUsers[0].id;
   const userSystemPrompt = matchedUsers[0].system_prompt ?? null;
-  const profileName = matchedUsers[0].profile_name ?? null;
-  const profileHome = matchedUsers[0].profile_home ?? null;
-  const profileWork = matchedUsers[0].profile_work ?? null;
-  const profileTransport = matchedUsers[0].profile_transport ?? null;
 
   log("sms_in", { from: senderPhone, to: recipientDid, convCode, content: effectiveContent });
 
   // Znalezienie lub utworzenie rozmowy
-  type Conv = { id: string; code: string; summary: string | null; pending_reply: string | null; extended_mode: boolean };
+  type Conv = { id: string; code: string; summary: string | null; reply_sms_parts: number };
   let conv: Conv | null = null;
 
   if (convCode) {
-    const found = await sbGet(SB, KEY, `conversations?code=eq.${convCode}&user_id=eq.${userId}&status=eq.active&select=id,code,summary,pending_reply,extended_mode`) as Conv[];
+    const found = await sbGet(SB, KEY, `conversations?code=eq.${convCode}&user_id=eq.${userId}&status=eq.active&select=id,code,summary,reply_sms_parts`) as Conv[];
     conv = found[0] ?? null;
     if (!conv) log("error", { reason: "conv_not_found", convCode, userId });
   }
@@ -369,7 +478,7 @@ Deno.serve(async (req: Request) => {
       if (!existing.length) break;
     }
     await sbPost(SB, KEY, "conversations", { user_id: userId, code: newCode, status: "active" });
-    const created = await sbGet(SB, KEY, `conversations?code=eq.${newCode}&select=id,code,summary,pending_reply,extended_mode`) as Conv[];
+    const created = await sbGet(SB, KEY, `conversations?code=eq.${newCode}&select=id,code,summary,reply_sms_parts`) as Conv[];
     conv = created[0] ?? null;
     if (conv) log("conv_new", { convCode: newCode, userId, requestedConvCode: convCode ?? null });
   }
@@ -382,151 +491,14 @@ Deno.serve(async (req: Request) => {
   const convId = conv.id;
   const convCodeFinal = conv.code;
   let summary = conv.summary ?? null;
-  let pendingReply = conv.pending_reply ?? null;
-  const extendedMode = conv.extended_mode ?? false;
+  let replySmsParts = ([1, 3, 4].includes(conv.reply_sms_parts) ? conv.reply_sms_parts : 1) as 1 | 3 | 4;
+  const suffix = `\n${convCodeFinal}`;
 
-  // Wczytaj ustawienia komend z bazy
-  const cmdSettings = await sbGet(SB, KEY, `settings?key=in.(close_keywords,nav_keyword,continue_keyword,extended_on_keyword,extended_off_keyword)&select=key,value`) as Array<{ key: string; value: string }>;
-  const cmdMap: Record<string, string> = {};
-  for (const s of cmdSettings) cmdMap[s.key] = s.value;
-  const CLOSE_KEYWORDS = (cmdMap.close_keywords ?? "koniec,stop,zamknij,end").split(",").map(k => k.trim().toLowerCase()).filter(Boolean);
-  const NAV_KEYWORD = (cmdMap.nav_keyword ?? DEFAULT_NAV_KEYWORD).trim().toLowerCase();
-  const CONTINUE_KW = (cmdMap.continue_keyword ?? DEFAULT_CONTINUE_KEYWORD).trim().toLowerCase();
-  const EXTENDED_ON_KW = (cmdMap.extended_on_keyword ?? DEFAULT_EXTENDED_ON_KEYWORD).trim().toLowerCase();
-  const EXTENDED_OFF_KW = (cmdMap.extended_off_keyword ?? DEFAULT_EXTENDED_OFF_KEYWORD).trim().toLowerCase();
-
-  // Zamknięcie rozmowy słowem kluczowym
+  // Zamknięcie rozmowy szybką ścieżką — bez angażowania modelu dla oczywistej intencji
   if (CLOSE_KEYWORDS.includes(effectiveContent.trim().toLowerCase())) {
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { status: "closed" });
+    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { status: "closed", pending_reply: null });
     log("conv_closed", { convId, convCode: convCodeFinal, userId, trigger: effectiveContent.trim() });
     return new Response(JSON.stringify({ ok: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  }
-
-  // Włączanie / wyłączanie trybu rozszerzonego przez SMS
-  const msgLower = effectiveContent.trim().toLowerCase();
-  if (msgLower === EXTENDED_ON_KW) {
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true, pending_reply: null });
-    log("extended_mode_on", { convId, convCode: convCodeFinal });
-    const suffix = `\n${convCodeFinal}`;
-    const info = `Tryb rozszerzony wlaczony. Pisz --> po kolejne czesci.`;
-    if (!dryRun) await sendSms(senderPhone, `${info}${suffix}`, recipientDid);
-    return new Response(JSON.stringify({ ok: true, extended_mode: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  }
-  if (msgLower === EXTENDED_OFF_KW) {
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: false, pending_reply: null });
-    log("extended_mode_off", { convId, convCode: convCodeFinal });
-    const suffix = `\n${convCodeFinal}`;
-    const info = `Tryb rozszerzony wylaczony.`;
-    if (!dryRun) await sendSms(senderPhone, `${info}${suffix}`, recipientDid);
-    return new Response(JSON.stringify({ ok: true, extended_mode: false }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  }
-
-  // Nawigacja: "<nav_keyword> A > B" (A/B mogą być "dom" lub "praca")
-  const navMatch = effectiveContent.match(new RegExp(`^${NAV_KEYWORD}\\s+(.+?)\\s*>\\s*(.+)$`, "i"));
-  if (navMatch) {
-    const resolve = (s: string): string | null => {
-      const t = s.trim().toLowerCase();
-      if (t === "dom") return profileHome;
-      if (t === "praca") return profileWork;
-      return s.trim();
-    };
-    const fromAddr = resolve(navMatch[1]);
-    const toAddr = resolve(navMatch[2]);
-
-    const suffix = `\n${convCodeFinal}`;
-
-    if (!fromAddr || !toAddr) {
-      const missing = !fromAddr ? "dom" : "praca";
-      const err = `Brak adresu "${missing}" w profilu. Uzupelnij w panelu admina.`;
-      if (!dryRun) await sendSms(senderPhone, `${err}${suffix}`, recipientDid);
-      return new Response(JSON.stringify({ ok: true, nav_error: "missing_address" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-    }
-
-    const transport = profileTransport ?? "pieszo";
-    const modeMap: Record<string, string> = { "samochód": "DRIVE", "rower": "BICYCLE", "hulajnoga": "BICYCLE", "pieszo": "WALK" };
-    log("nav_request", { convId, from: fromAddr, to: toAddr, transport, travelMode: modeMap[transport] ?? "WALK" });
-
-    // Nawigacja zawsze z extended mode i continuation
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { extended_mode: true });
-    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
-
-    const mapsResult = await getDirections(fromAddr, toAddr, transport);
-
-    if (!mapsResult) {
-      const noKey = !Deno.env.get("GOOGLE_MAPS_API_KEY");
-      log("nav_failed", { convId, from: fromAddr, to: toAddr, transport, reason: noKey ? "no_api_key" : "no_route" });
-      const errMsg = noKey
-        ? "Nawigacja wymaga klucza Google Maps API. Dodaj sekret GOOGLE_MAPS_API_KEY w Supabase."
-        : "Nie udalo sie pobrac trasy. Sprawdz adresy i sprobuj ponownie.";
-      const suffix2 = `\n${convCodeFinal}`;
-      if (!dryRun) await sendSms(senderPhone, `${errMsg}${suffix2}`, recipientDid);
-      return new Response(JSON.stringify({ ok: true, nav_error: noKey ? "no_api_key" : "no_route" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-    }
-
-    const navText = sanitizeForSms(mapsResult);
-
-    // Dzielimy na części po 153 znaki (concatenated SMS — operator łączy po stronie odbiorcy)
-    // Każda część zawiera suffix z kodem rozmowy
-    const PART_SIZE = 153 - suffix.length;
-    const parts: string[] = [];
-    for (let i = 0; i < navText.length; i += PART_SIZE) {
-      parts.push(navText.slice(i, i + PART_SIZE));
-    }
-
-    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: navText });
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, {
-      last_activity_at: new Date().toISOString(),
-      pending_reply: null,
-    });
-    log("nav_sent", { convId, from: fromAddr, to: toAddr, transport, chars: navText.length, parts: parts.length });
-
-    if (dryRun) {
-      return new Response(JSON.stringify({ ok: true, dry_run: true, reply: parts.map(p => `${p}${suffix}`).join("\n---\n"), parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-    }
-    try {
-      for (const part of parts) {
-        await sendSms(senderPhone, `${part}${suffix}`, recipientDid);
-        sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
-      }
-    } catch (e) {
-      log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
-      return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
-    }
-    return new Response(JSON.stringify({ ok: true, navigation: true, parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  }
-
-  // Kontynuacja — wysyłamy następny chunk bez angażowania AI
-  if (effectiveContent.trim().toLowerCase() === CONTINUE_KW && pendingReply) {
-    const suffix = `\n${convCodeFinal}`;
-    const chunkSize = 160 - suffix.length;
-    const chunk = pendingReply.slice(0, chunkSize);
-    const remaining = pendingReply.slice(chunkSize) || null;
-
-    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
-    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: chunk });
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, {
-      pending_reply: remaining,
-      last_activity_at: new Date().toISOString(),
-    });
-    log("continuation_sent", { convId, convCode: convCodeFinal, chunkLen: chunk.length, hasMore: !!remaining });
-
-    if (dryRun) {
-      return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${chunk}${suffix}`, has_more: !!remaining }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-    }
-    try {
-      await sendSms(senderPhone, `${chunk}${suffix}`, recipientDid);
-      sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
-    } catch (e) {
-      log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
-      return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
-    }
-    return new Response(JSON.stringify({ ok: true, continuation: true, has_more: !!remaining }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  }
-
-  // Nowa wiadomość — czyścimy ewentualne pending_reply
-  if (pendingReply) {
-    pendingReply = null;
-    await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { pending_reply: null });
   }
 
   // Historia wiadomości
@@ -544,111 +516,91 @@ Deno.serve(async (req: Request) => {
   }
 
   // Kontekst dla AI
-  const aiMessages: Array<{ role: string; content: string }> = [];
+  const aiContents: GeminiContent[] = [];
   let needsCompaction = false;
 
   if (msgs.length >= COMPACT_THRESHOLD) {
     needsCompaction = true;
     log("compaction", { convId, convCode: convCodeFinal, msgCount: msgs.length });
     const historyText = msgs.map((m) => `${m.direction === "in" ? "User" : "AI"}: ${m.content}`).join("\n");
-    aiMessages.push({
+    aiContents.push({
       role: "user",
-      content: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość użytkownika: ${effectiveContent}\n\nZadanie: Odpowiedz w JSON z dwoma polami:\n1. "summary": szczegółowe podsumowanie całej historii rozmowy — bez ograniczeń długości, zachowaj wszystkie istotne fakty, kontekst i ustalenia\n2. "reply": odpowiedź do użytkownika, maksymalnie ${MAX_REPLY_CHARS} znaków\n\nFormat: {"summary":"...","reply":"..."}`,
+      parts: [{
+        text: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość użytkownika: ${effectiveContent}\n\nZadanie: Odpowiedz w JSON z dwoma polami:\n1. "summary": szczegółowe podsumowanie całej historii rozmowy — bez ograniczeń długości, zachowaj wszystkie istotne fakty, kontekst i ustalenia\n2. "reply": odpowiedź do użytkownika, maksymalnie ${SMS_PART_CHARS} znaków\n\nFormat: {"summary":"...","reply":"..."}`,
+      }],
     });
   } else {
-    if (summary) aiMessages.push({ role: "user", content: `[Kontekst rozmowy: ${summary}]` });
+    if (summary) aiContents.push({ role: "user", parts: [{ text: `[Kontekst rozmowy: ${summary}]` }] });
     for (const m of msgs) {
-      aiMessages.push({ role: m.direction === "in" ? "user" : "assistant", content: m.content });
+      aiContents.push({ role: m.direction === "in" ? "user" : "model", parts: [{ text: m.content }] });
     }
-    aiMessages.push({ role: "user", content: effectiveContent });
+    aiContents.push({ role: "user", parts: [{ text: effectiveContent }] });
   }
 
   let systemPrompt = userSystemPrompt ?? null;
   if (!systemPrompt) {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
-    systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${MAX_REPLY_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
+    systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
-  if (extendedMode) {
-    systemPrompt = systemPrompt.replace(
-      new RegExp(`MAKSYMALNIE ${MAX_REPLY_CHARS} ZNAKÓW`, 'g'),
-      `MAKSYMALNIE ${MAX_CONT_CHARS} ZNAKÓW`
-    ) + ` Możesz pisać do ${MAX_CONT_CHARS} znaków — odpowiedź zostanie automatycznie podzielona na SMS-y.`;
-  }
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji formatuje sam endpoint; nie twórz własnego formatu trasy. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków).`;
 
-  // Dołącz profil użytkownika do system promptu
-  const profileLines: string[] = [];
-  if (profileName) profileLines.push(`Imię: ${profileName}`);
-  if (profileHome) profileLines.push(`Adres domowy: ${profileHome}`);
-  if (profileWork) profileLines.push(`Adres pracy: ${profileWork}`);
-  if (profileTransport) {
-    const transportNote = profileTransport === "hulajnoga"
-      ? `Domyślny środek transportu: hulajnoga elektryczna (ścieżki rowerowe priorytetowo; chodniki gdy brak ścieżki; drogi do 30 km/h; zakaz autostrad i dróg ekspresowych; max 25 km/h)`
-      : `Domyślny środek transportu: ${profileTransport}`;
-    profileLines.push(transportNote);
-  }
-  if (profileLines.length) {
-    systemPrompt = `[Profil użytkownika]\n${profileLines.join("\n")}\n\n${systemPrompt}`;
-    if (profileTransport) log("ai_transport_context", { convId, transport: profileTransport });
-  }
-
-  // Wywołaj AI
-  const rawReply = await askAi(aiMessages, systemPrompt, needsCompaction ? 600 : extendedMode ? 300 : 100);
-  let aiReply: string;
+  let outcome: AssistantOutcome;
 
   if (needsCompaction) {
+    const compactionReply = await generateContent(aiContents, systemPrompt, 600);
+    let reply = compactionReply.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
     try {
-      const json = JSON.parse(rawReply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-      summary = json.summary ?? "";
-      aiReply = sanitizeForSms(smartTrim(stripUrls(json.reply ?? rawReply), extendedMode ? MAX_CONT_CHARS : MAX_REPLY_CHARS));
-      // Usuń stare wiadomości i zapisz summary PRZED zapisem nowych
+      const parsed = JSON.parse(reply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+      summary = parsed.summary ?? summary;
+      reply = parsed.reply ?? reply;
       await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
       await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
-    } catch {
-      aiReply = sanitizeForSms(smartTrim(rawReply, extendedMode ? MAX_CONT_CHARS : MAX_REPLY_CHARS));
-    }
+    } catch { /* fall back to raw reply */ }
+    outcome = { kind: "text", text: reply };
   } else {
-    aiReply = sanitizeForSms(smartTrim(stripUrls(rawReply), extendedMode ? MAX_CONT_CHARS : MAX_REPLY_CHARS));
+    outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
   }
 
-  // Podziel odpowiedź na chunki jeśli dłuższa niż jeden SMS
-  const suffix = `\n${convCodeFinal}`;
-  const CHUNK_SIZE = 160 - suffix.length; // 153
-  let safeReply: string;
-  let newPendingReply: string | null = null;
-
-  if (aiReply.length > CHUNK_SIZE) {
-    // Pierwsza część + "...", reszta trafia do pending_reply
-    safeReply = aiReply.slice(0, CHUNK_SIZE - 3) + "...";
-    newPendingReply = aiReply.slice(CHUNK_SIZE - 3);
-  } else {
-    safeReply = aiReply;
+  // Zamknięcie rozmowy przez narzędzie — bez odpowiedzi SMS, zgodnie z ustaloną decyzją produktową
+  if (outcome.kind === "closed") {
+    await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
+    log("conv_closed", { convId, convCode: convCodeFinal, userId, trigger: "tool" });
+    return new Response(JSON.stringify({ ok: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  // Zapis wiadomości użytkownika i pełnej odpowiedzi AI
+  if (outcome.kind === "text" && outcome.grantedParts) {
+    replySmsParts = outcome.grantedParts;
+    log("reply_sms_parts_granted", { convId, convCode: convCodeFinal, granted: replySmsParts });
+  }
+
+  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripUrls(outcome.text));
+  const maxParts = outcome.kind === "route" ? 6 : replySmsParts;
+  const parts = chunkForSms(cleanReply, maxParts);
+
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
-  await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: aiReply });
-
-  // Aktualizuj aktywność i pending_reply
+  await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "out", content: cleanReply });
   await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, {
     last_activity_at: new Date().toISOString(),
-    pending_reply: newPendingReply,
+    reply_sms_parts: replySmsParts,
+    pending_reply: null,
   });
 
-  log("ai_response", { convId, convCode: convCodeFinal, reply: safeReply, chars: safeReply.length, hasMore: !!newPendingReply });
+  log("ai_response", { convId, convCode: convCodeFinal, kind: outcome.kind, chars: cleanReply.length, parts: parts.length });
 
   if (dryRun) {
-    return new Response(JSON.stringify({ ok: true, dry_run: true, reply: `${safeReply}${suffix}` }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ok: true, dry_run: true, reply: parts.map((p) => `${p}${suffix}`).join("\n---\n"), parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  // Wyślij SMS
   try {
-    await sendSms(senderPhone, `${safeReply}${suffix}`, recipientDid);
-    log("sms_sent", { to: senderPhone, from: recipientDid, chars: safeReply.length + suffix.length });
-    sbPost(SB, KEY, 'rpc/increment_sms_count', {}).catch(() => {});
+    for (const part of parts) {
+      await sendSms(senderPhone, `${part}${suffix}`, recipientDid);
+      sbPost(SB, KEY, "rpc/increment_sms_count", {}).catch(() => {});
+    }
+    log("sms_sent", { to: senderPhone, from: recipientDid, parts: parts.length });
   } catch (e) {
     log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
     return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  return new Response(JSON.stringify({ ok: true, parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
 });
