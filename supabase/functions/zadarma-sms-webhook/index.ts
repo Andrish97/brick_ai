@@ -243,7 +243,7 @@ const DETERMINISTIC_ACTIONS = new Set(["get_directions", "get_transit", "get_fas
 
 type GeminiTurn = { functionCall: { name: string; args: Record<string, unknown> } | null; text: string | null };
 
-async function generateContent(contents: GeminiContent[], system: string, maxOutputTokens: number): Promise<GeminiTurn> {
+async function generateContent(contents: GeminiContent[], system: string, maxOutputTokens: number, includeTools = true): Promise<GeminiTurn> {
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${Deno.env.get("GEMINI_API_KEY")}`,
@@ -253,7 +253,7 @@ async function generateContent(contents: GeminiContent[], system: string, maxOut
         body: JSON.stringify({
           contents,
           systemInstruction: { parts: [{ text: system }] },
-          tools: TOOLS,
+          tools: includeTools ? TOOLS : undefined,
           generationConfig: { maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
         }),
       }
@@ -515,27 +515,43 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, duplicate: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  // Kontekst dla AI
-  const aiContents: GeminiContent[] = [];
-  let needsCompaction = false;
-
+  // Kompaktowanie historii — czysto techniczny krok utrzymania pamięci, osobny
+  // od odpowiadania na wiadomość. Dzięki temu narzędzia (nawigacja, dłuższa
+  // odpowiedź, zamknięcie rozmowy) działają zawsze, niezależnie od długości
+  // rozmowy — nie tylko wtedy, gdy akurat nie trafiamy na próg kompaktowania.
   if (msgs.length >= COMPACT_THRESHOLD) {
-    needsCompaction = true;
     log("compaction", { convId, convCode: convCodeFinal, msgCount: msgs.length });
     const historyText = msgs.map((m) => `${m.direction === "in" ? "User" : "AI"}: ${m.content}`).join("\n");
-    aiContents.push({
+    const summaryPrompt: GeminiContent[] = [{
       role: "user",
       parts: [{
-        text: `Historia rozmowy:\n${historyText}\n\nNowa wiadomość użytkownika: ${effectiveContent}\n\nZadanie: Odpowiedz w JSON z dwoma polami:\n1. "summary": szczegółowe podsumowanie całej historii rozmowy — bez ograniczeń długości, zachowaj wszystkie istotne fakty, kontekst i ustalenia\n2. "reply": odpowiedź do użytkownika, maksymalnie ${SMS_PART_CHARS} znaków\n\nFormat: {"summary":"...","reply":"..."}`,
+        text: `Historia rozmowy SMS:\n${historyText}${summary ? `\n\nPoprzednie streszczenie: ${summary}` : ""}\n\nZadanie: zwróć wyłącznie zwięzłe, ale kompletne podsumowanie całej rozmowy — zachowaj wszystkie istotne fakty, ustalenia i kontekst potrzebny do dalszej rozmowy. Nie odpowiadaj na żadną wiadomość, tylko podsumuj.`,
       }],
-    });
-  } else {
-    if (summary) aiContents.push({ role: "user", parts: [{ text: `[Kontekst rozmowy: ${summary}]` }] });
-    for (const m of msgs) {
-      aiContents.push({ role: m.direction === "in" ? "user" : "model", parts: [{ text: m.content }] });
+    }];
+    const summaryResult = await generateContent(
+      summaryPrompt,
+      "Jesteś systemem podsumowującym rozmowy SMS. Zwróć czysty tekst podsumowania, bez wstępów i bez JSON-a.",
+      600,
+      false, // bez narzędzi — to tylko streszczenie, nie odpowiedź na wiadomość
+    );
+    if (summaryResult.text) {
+      summary = summaryResult.text;
+      await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
+      await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
+      msgs.length = 0; // historia już w streszczeniu — nie dubluj jej w kontekście odpowiedzi
+    } else {
+      log("compaction_failed", { convId, convCode: convCodeFinal });
     }
-    aiContents.push({ role: "user", parts: [{ text: effectiveContent }] });
   }
+
+  // Kontekst dla AI — zawsze ta sama ścieżka, z narzędziami, niezależnie od tego,
+  // czy chwilę wcześniej doszło do kompaktowania.
+  const aiContents: GeminiContent[] = [];
+  if (summary) aiContents.push({ role: "user", parts: [{ text: `[Kontekst rozmowy: ${summary}]` }] });
+  for (const m of msgs) {
+    aiContents.push({ role: m.direction === "in" ? "user" : "model", parts: [{ text: m.content }] });
+  }
+  aiContents.push({ role: "user", parts: [{ text: effectiveContent }] });
 
   let systemPrompt = userSystemPrompt ?? null;
   if (!systemPrompt) {
@@ -544,22 +560,7 @@ Deno.serve(async (req: Request) => {
   }
   systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji formatuje sam endpoint; nie twórz własnego formatu trasy. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków).`;
 
-  let outcome: AssistantOutcome;
-
-  if (needsCompaction) {
-    const compactionReply = await generateContent(aiContents, systemPrompt, 600);
-    let reply = compactionReply.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.";
-    try {
-      const parsed = JSON.parse(reply.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-      summary = parsed.summary ?? summary;
-      reply = parsed.reply ?? reply;
-      await sbDelete(SB, KEY, "messages", `conversation_id=eq.${convId}`);
-      await sbPatch(SB, KEY, "conversations", `id=eq.${convId}`, { summary });
-    } catch { /* fall back to raw reply */ }
-    outcome = { kind: "text", text: reply };
-  } else {
-    outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
-  }
+  const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
 
   // Zamknięcie rozmowy przez narzędzie — bez odpowiedzi SMS, zgodnie z ustaloną decyzją produktową
   if (outcome.kind === "closed") {
