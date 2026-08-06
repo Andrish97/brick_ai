@@ -254,6 +254,9 @@ async function generateContent(contents: GeminiContent[], system: string, maxOut
           contents,
           systemInstruction: { parts: [{ text: system }] },
           tools: includeTools ? TOOLS : undefined,
+          // Wymagane przez API, gdy w tools łączymy wbudowane narzędzie (google_search)
+          // z własnymi functionDeclarations — bez tego 400 INVALID_ARGUMENT.
+          tool_config: includeTools ? { include_server_side_tool_invocations: true } : undefined,
           generationConfig: { maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
         }),
       }
