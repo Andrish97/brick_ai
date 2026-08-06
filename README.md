@@ -140,6 +140,20 @@ Cała logika komend żyje w prywatnej Edge Function `assistant-tools`, wywoływa
 
 Wyniki nawigacji i komunikacji miejskiej formatuje wyłącznie endpoint — model nigdy nie tworzy własnego formatu trasy, co gwarantuje spójność i bezpieczeństwo (żadnych zmyślonych ulic czy odległości).
 
+### Logowanie
+
+`assistant-tools` i `zadarma-sms-webhook` zapisują zdarzenia do wspólnej tabeli `logs`, widocznej w panelu admina → Logi. Wywołanie narzędzia i jego wynik (`Narzędzie` / `Wynik narzędzia`) są widoczne od strony webhooka; błędy Google Directions (`Directions błąd`) i nieobsłużone wyjątki (`Endpoint błąd`) są logowane od strony samego `assistant-tools`, więc nie trzeba zaglądać do surowej konsoli Deno, żeby zdiagnozować problem.
+
+### Testowanie bez wysyłania SMS-ów
+
+Doklej `?dry_run=1` do URL-a `zadarma-sms-webhook` — cała logika (Gemini, function calling, wywołania narzędzi) działa normalnie, ale zamiast SMS-a webhook zwraca treść odpowiedzi jako JSON. Zero kosztu SMS (Gemini i Google Maps są nadal wywoływane naprawdę, w ramach darmowych limitów).
+
+```bash
+deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL> <KOD_UZYTKOWNIKA>
+```
+
+Skrypt przepuszcza po kolei zdania wyzwalające każde narzędzie (nawigację, transit, dłuższą odpowiedź, zamknięcie rozmowy, profil) i drukuje surową odpowiedź JSON każdego z nich. Wymaga prawdziwego kodu użytkownika z bazy; dla nawigacji ten użytkownik musi mieć ustawiony adres domu i pracy w panelu.
+
 ---
 
 ## Setup od zera
@@ -283,7 +297,8 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 │   ├── migrations/                 # Migracje SQL
 │   └── config.toml
 ├── scripts/
-│   └── test-zadarma.ts             # Lokalny test API Zadarma
+│   ├── test-zadarma.ts             # Lokalny test API Zadarma
+│   └── test-endpoints.ts           # Testuje wszystkie narzędzia asystenta przez dry_run — bez SMS-ów
 └── .github/workflows/
     ├── deploy.yml                  # Deploy Edge Functions + migracje
     └── pages.yml                   # Deploy panelu admina

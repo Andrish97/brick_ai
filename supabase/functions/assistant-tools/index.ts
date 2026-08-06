@@ -53,6 +53,16 @@ async function sbPost(url: string, key: string, table: string, body: object): Pr
   });
 }
 
+// Zapis do tej samej tabeli `logs`, którą przegląda panel admina — webhook już loguje
+// wywołanie i wynik narzędzia, ale szczegóły błędów Google Maps i nieobsłużone wyjątki
+// wewnątrz tego endpointu wcześniej trafiały tylko do konsoli Deno (niewidoczne w panelu).
+let _sbLog: { url: string; key: string } | null = null;
+function initLog(url: string, key: string) { _sbLog = { url, key }; }
+function log(type: string, data: object) {
+  if (!_sbLog) return;
+  sbPost(_sbLog.url, _sbLog.key, "logs", { type, data }).catch(() => {});
+}
+
 function validParts(value: unknown): value is 1 | 3 | 4 {
   return value === 1 || value === 3 || value === 4;
 }
@@ -193,12 +203,21 @@ async function fetchDirections(apiKey: string, origin: string, destination: stri
   if (mode === "transit") params.set("departure_time", "now");
 
   const res = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`);
-  if (!res.ok) return { ok: false, error: `directions_http_${res.status}` };
+  if (!res.ok) {
+    log("directions_error", { status: res.status, body: (await res.text()).slice(0, 300), mode });
+    return { ok: false, error: `directions_http_${res.status}` };
+  }
   const data = await res.json();
-  if (data.status !== "OK") return { ok: false, error: `directions_status_${data.status}` };
+  if (data.status !== "OK") {
+    log("directions_error", { googleStatus: data.status, errorMessage: data.error_message, mode, origin, destination });
+    return { ok: false, error: `directions_status_${data.status}` };
+  }
 
   const leg = data.routes?.[0]?.legs?.[0];
-  if (!leg) return { ok: false, error: "no_route" };
+  if (!leg) {
+    log("directions_error", { reason: "no_leg_in_response", mode });
+    return { ok: false, error: "no_route" };
+  }
 
   const lines: string[] = [];
   const warnings: string[] = [];
@@ -259,6 +278,8 @@ Deno.serve(async (req: Request) => {
   const url = Deno.env.get("SUPABASE_URL");
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!url || !key) return json({ error: "Server configuration error" }, 500);
+  initLog(url, key);
+  log("endpoint_call", { action: input.action, args: input.args ?? {} });
 
   try {
     const conversations = await sbGet(url, key, `conversations?id=eq.${encodeURIComponent(input.conversation_id)}&user_id=eq.${encodeURIComponent(input.user_id)}&select=id,status`);
@@ -369,12 +390,17 @@ Deno.serve(async (req: Request) => {
         });
         if (googleMode === "transit") params.set("departure_time", "now");
         const res = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`);
-        if (!res.ok) continue;
+        if (!res.ok) {
+          log("directions_error", { status: res.status, mode, action: "get_fastest_arrival" });
+          continue;
+        }
         const data = await res.json();
         const leg = data.routes?.[0]?.legs?.[0];
         const seconds = leg?.duration?.value;
         if (data.status === "OK" && typeof seconds === "number") {
           results.push({ mode, minutes: Math.round(seconds / 60) });
+        } else {
+          log("directions_error", { googleStatus: data.status, errorMessage: data.error_message, mode, action: "get_fastest_arrival" });
         }
       }
 
@@ -395,6 +421,7 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Unknown action" }, 400);
   } catch (error) {
     console.error("assistant-tools error", String(error));
+    log("endpoint_error", { action: input.action, error: String(error) });
     return json({ error: "Tool execution failed" }, 500);
   }
 });

@@ -1704,6 +1704,9 @@ const LOG_TYPE_STYLE = {
   tool_result:             { label: 'Wynik narzędzia',cls: 'badge-green'  },
   tools_call_failed_retry: { label: 'Retry bez narzędzi', cls: 'badge-red' },
   reply_sms_parts_granted: { label: 'Limit SMS przyznany', cls: 'badge-yellow' },
+  endpoint_call:           { label: 'Endpoint wywołany', cls: 'badge-yellow' },
+  endpoint_error:          { label: 'Endpoint błąd',  cls: 'badge-red'    },
+  directions_error:        { label: 'Directions błąd', cls: 'badge-red'   },
   raw_webhook:              { label: 'Raw webhook',   cls: 'badge-yellow' },
 };
 
@@ -1827,6 +1830,9 @@ function renderLogsContent() {
               tool_result:  'wynik wywołania narzędzia z assistant-tools — sukces albo błąd',
               tools_call_failed_retry: 'zapytanie do Gemini z narzędziami zawiodło — ponowiona próba bez narzędzi',
               reply_sms_parts_granted: 'przyznano limit SMS-ów odpowiedzi rozszerzonej dla tej rozmowy',
+              endpoint_call: 'assistant-tools: wywołana akcja i argumenty (logowane wewnątrz endpointu, nie tylko przez webhook)',
+              endpoint_error: 'assistant-tools: nieobsłużony wyjątek podczas wykonywania akcji',
+              directions_error: 'Google Directions API zwróciło błąd lub status inny niż OK — pełny status/treść odpowiedzi',
               raw_webhook:  'surowy payload z Zadarmy przed jakimkolwiek przetworzeniem',
             }[key] || '';
             return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
