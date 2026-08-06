@@ -326,7 +326,15 @@ type AssistantOutcome =
   | { kind: "text"; text: string; grantedParts?: 1 | 3 | 4 };
 
 async function runAssistant(contents: GeminiContent[], systemPrompt: string, maxOutputTokens: number, ctx: ToolContext): Promise<AssistantOutcome> {
-  const first = await generateContent(contents, systemPrompt, maxOutputTokens);
+  let first = await generateContent(contents, systemPrompt, maxOutputTokens);
+  if (!first.functionCall && !first.text) {
+    // Zapytanie z narzędziami (funkcje + wbudowane wyszukiwanie) całkowicie zawiodło
+    // (np. błąd API 400 przy łączeniu obu typów tools) — spróbuj bez narzędzi, żeby
+    // użytkownik dostał realną odpowiedź zamiast zmarnowanego SMS-a z błędem. Tymczasowy
+    // bezpiecznik: dopóki przyczyna nie jest naprawiona, narzędzia w tej turze nie zadziałają.
+    log("tools_call_failed_retry", { convId: ctx.convId });
+    first = await generateContent(contents, systemPrompt, maxOutputTokens, false);
+  }
   if (!first.functionCall) {
     return { kind: "text", text: first.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie." };
   }
