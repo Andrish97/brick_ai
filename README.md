@@ -137,8 +137,14 @@ Cała logika komend żyje w prywatnej Edge Function `assistant-tools`, wywoływa
 | `get_directions` | start, cel, opcjonalny transport | Pobiera i formatuje trasę krok po kroku |
 | `get_transit` | start, cel | Pobiera trasę komunikacją miejską z przesiadkami |
 | `get_fastest_arrival` | start, cel | Porównuje dostępne środki transportu i zwraca najszybszy |
+| `resolve_rail_station` | `point`: 'dom'/'praca'/nazwa | Ustala jednoznaczną stację kolejową PKP PLK dla punktu podróży |
+| `get_train_station_board` | stacja, opcjonalna data | Pobiera planowe odjazdy/przyjazdy pociągów dla stacji |
+| `get_train_status` | numer pociągu, opcjonalna data | Sprawdza rzeczywiste wykonanie i opóźnienie pociągu |
+| `get_train_disruptions` | opcjonalne stacje | Pobiera bieżące utrudnienia ruchu kolejowego |
 
-Wyniki nawigacji i komunikacji miejskiej formatuje wyłącznie endpoint — model nigdy nie tworzy własnego formatu trasy, co gwarantuje spójność i bezpieczeństwo (żadnych zmyślonych ulic czy odległości).
+Wyniki nawigacji, komunikacji miejskiej i danych kolejowych formatuje wyłącznie endpoint — model nigdy nie tworzy własnego formatu trasy ani rozkładu, co gwarantuje spójność i bezpieczeństwo (żadnych zmyślonych ulic, godzin czy opóźnień).
+
+> **Status modułu kolejowego:** fundament (wyszukiwanie stacji, tablica odjazdów, status pociągu, utrudnienia) jest zaimplementowany, ale nieprzetestowany na żywo — sekret `PKP_API_KEY` czekał na aktywację administratora PKP PLK w momencie wdrożenia tego kodu. Dokładny kształt odpowiedzi JSON API nie był możliwy do zweryfikowania z tego środowiska, więc parsowanie próbuje kilku prawdopodobnych nazw pól i loguje pełną surową odpowiedź przy błędzie (`Directions błąd`-podobny wpis `pkp_error` w Logach) — po pierwszym realnym wywołaniu może wymagać drobnej korekty. Planer połączeń z przesiadkami (`plan_train_journey`) nie jest jeszcze zaimplementowany — to osobny, znacznie większy krok (algorytm earliest-arrival na grafie czasowym), celowo odłożony do czasu zweryfikowania fundamentu na żywych danych.
 
 ### Logowanie
 
@@ -225,6 +231,7 @@ supabase secrets set \
 | `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
 | `ASSISTANT_TOOLS_SECRET` | Dowolny losowy string — autoryzuje wywołania webhooka do `assistant-tools`. Jeśli pominięty, funkcja spada na `SUPABASE_SERVICE_ROLE_KEY`. |
 | `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Library → włącz **Directions API** (to legacy API, osobne od nowszego Routes API — trzeba je włączyć jawnie, samo posiadanie klucza z Routes API nie wystarczy, inaczej dostaniesz `REQUEST_DENIED`) → Credentials → Create API Key — wymagany do nawigacji i komunikacji miejskiej |
+| `PKP_API_KEY` | (opcjonalny) [pdp-api.plk-sa.pl](https://pdp-api.plk-sa.pl/) → wniosek o klucz API Otwarte Dane Kolejowe PKP PLK. Klucz jest widoczny od razu, ale **nieaktywny** do czasu ręcznej weryfikacji administratora (deklarowane 3-5 dni roboczych) — sprawdź aktywację zapytaniem do `/dictionaries/stations`, błąd `PendingActivation` oznacza brak aktywacji. Wymagany do danych kolejowych. |
 
 > **Dlaczego tylko Gemini?** Gemini ma wbudowaną wyszukiwarkę Google (`googleSearch`) — jedyny darmowy model z dostępem do danych w czasie rzeczywistym (pogoda, kursy walut, aktualności) bez dodatkowych integracji.
 
@@ -331,5 +338,6 @@ Odpowiedzi domyślnie mieszczą się w 1 SMS-ie; dłuższe odpowiedzi (3–4 SMS
 - **Zadarma** — bramka SMS
 - **Google Gemini** — model AI z wbudowaną wyszukiwarką Google i function calling
 - **Google Directions API** — nawigacja turn-by-turn i komunikacja miejska (opcjonalna)
+- **PKP PLK Otwarte Dane Kolejowe** — dane kolejowe: stacje, rozkład, opóźnienia, utrudnienia (opcjonalna, fundament bez planera przesiadek)
 - **GitHub Actions** — CI/CD
 - **GitHub Pages** — panel admina (vanilla HTML/JS)

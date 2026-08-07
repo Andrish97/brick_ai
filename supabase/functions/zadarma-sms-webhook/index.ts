@@ -235,11 +235,60 @@ const TOOLS = [
           required: ["origin", "destination"],
         },
       },
+      {
+        name: "resolve_rail_station",
+        description:
+          "Ustala jednoznaczną stację kolejową PKP PLK dla 'dom'/'praca' albo nazwy miejscowości/stacji podanej przez użytkownika. Wywołaj przed pytaniem o rozkład lub pociąg, jeśli punkt nie jest już jednoznaczną nazwą stacji.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            point: { type: "STRING", description: "'dom', 'praca' albo nazwa stacji/miejscowości podana wprost przez użytkownika." },
+          },
+          required: ["point"],
+        },
+      },
+      {
+        name: "get_train_station_board",
+        description: "Pobiera planowe odjazdy/przyjazdy pociągów dla podanej stacji kolejowej PKP PLK.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            station: { type: "STRING", description: "Jednoznaczna nazwa stacji kolejowej — nie 'dom'/'praca'." },
+            date: { type: "STRING", description: "Data w formacie YYYY-MM-DD. Domyślnie dziś, jeśli pominięta." },
+          },
+          required: ["station"],
+        },
+      },
+      {
+        name: "get_train_status",
+        description: "Sprawdza rzeczywiste wykonanie i opóźnienie konkretnego pociągu PKP PLK po jego numerze.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            train_id: { type: "STRING", description: "Numer/identyfikator pociągu, np. 'IC 8312'." },
+            date: { type: "STRING", description: "Data kursowania YYYY-MM-DD. Domyślnie dziś." },
+          },
+          required: ["train_id"],
+        },
+      },
+      {
+        name: "get_train_disruptions",
+        description: "Pobiera bieżące utrudnienia ruchu kolejowego PKP PLK, opcjonalnie dla wskazanych stacji.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            stations: { type: "STRING", description: "Opcjonalna nazwa stacji lub odcinka, do którego ograniczyć wynik." },
+          },
+        },
+      },
     ],
   },
 ];
 
-const DETERMINISTIC_ACTIONS = new Set(["get_directions", "get_transit", "get_fastest_arrival"]);
+const DETERMINISTIC_ACTIONS = new Set([
+  "get_directions", "get_transit", "get_fastest_arrival",
+  "get_train_station_board", "get_train_status", "get_train_disruptions",
+]);
 
 type GeminiTurn = {
   functionCall: { name: string; args: Record<string, unknown> } | null;
@@ -329,6 +378,40 @@ function formatFastestArrival(toolResult: Record<string, unknown>): string {
   return `Najszybciej: ${mode}, ${minutes} min (przyjazd ~${arrival}).`;
 }
 
+function pkpErrorMessage(toolResult: Record<string, unknown>): string {
+  const error = String(toolResult.error ?? "");
+  if (error === "no_api_key" || error === "pkp_unauthorized") return "Dane kolejowe są chwilowo niedostępne.";
+  if (error === "pkp_rate_limited") return "Za dużo zapytań do systemu kolejowego, spróbuj za chwilę.";
+  if (error === "pkp_server_error" || error === "pkp_unreachable" || error === "pkp_invalid_response") return "System kolejowy jest chwilowo niedostępny.";
+  if (error === "station_not_found") return `Nie znaleziono stacji "${toolResult.query ?? ""}".`;
+  if (error === "ambiguous_station") {
+    const candidates = Array.isArray(toolResult.candidates) ? (toolResult.candidates as string[]).join(", ") : "";
+    return `Kilka stacji pasuje do "${toolResult.query ?? ""}": ${candidates}. Doprecyzuj, o którą chodzi.`;
+  }
+  if (error === "no_schedule_data" || error === "no_train_data") return "Brak danych rozkładowych dla tego zapytania.";
+  return "Nie udało się pobrać danych kolejowych. Spróbuj ponownie.";
+}
+
+function formatTrainStationBoard(toolResult: Record<string, unknown>): string {
+  if (toolResult.error) return pkpErrorMessage(toolResult);
+  return `${toolResult.station}:\n${toolResult.board}`;
+}
+
+function formatTrainStatus(toolResult: Record<string, unknown>): string {
+  if (toolResult.error) return pkpErrorMessage(toolResult);
+  const delay = toolResult.delay_minutes;
+  const status = toolResult.status;
+  const delayText = typeof delay === "number" ? (delay > 0 ? `opóźnienie ${delay} min` : "planowo") : "brak danych o opóźnieniu";
+  return `Pociąg ${toolResult.train_id}: ${delayText}${status ? ` (${status})` : ""}.`;
+}
+
+function formatTrainDisruptions(toolResult: Record<string, unknown>): string {
+  if (toolResult.error) return pkpErrorMessage(toolResult);
+  const list = Array.isArray(toolResult.disruptions) ? toolResult.disruptions as string[] : [];
+  if (!list.length) return "Brak zgłoszonych utrudnień.";
+  return list.map((d) => `- ${d}`).join("\n");
+}
+
 type ToolContext = { userId: string; convId: string };
 
 type AssistantOutcome =
@@ -361,12 +444,14 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
   if (DETERMINISTIC_ACTIONS.has(name)) {
     const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId);
     log("tool_result", { convId: ctx.convId, name, result: toolResult });
-    if (toolResult.error) {
-      return { kind: "text", text: directionsErrorMessage(toolResult) };
-    }
-    if (name === "get_fastest_arrival") {
-      return { kind: "text", text: formatFastestArrival(toolResult) };
-    }
+
+    if (name === "get_fastest_arrival") return { kind: "text", text: formatFastestArrival(toolResult) };
+    if (name === "get_train_station_board") return { kind: "text", text: formatTrainStationBoard(toolResult) };
+    if (name === "get_train_status") return { kind: "text", text: formatTrainStatus(toolResult) };
+    if (name === "get_train_disruptions") return { kind: "text", text: formatTrainDisruptions(toolResult) };
+
+    // get_directions / get_transit: pełen, sformatowany tekst trasy, wysyłany bez zmian.
+    if (toolResult.error) return { kind: "text", text: directionsErrorMessage(toolResult) };
     return { kind: "route", text: String(toolResult.route ?? "") };
   }
 
@@ -426,7 +511,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Prom
 
   const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
   let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji formatuje sam endpoint; nie twórz własnego formatu trasy. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków).`;
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków).`;
 
   log("endpoint_test_start", { convId, content });
   const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[1], { userId: TEST_MODE_USER_ID, convId });
@@ -648,7 +733,7 @@ Deno.serve(async (req: Request) => {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
     systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji formatuje sam endpoint; nie twórz własnego formatu trasy. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków).`;
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków).`;
 
   const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
 

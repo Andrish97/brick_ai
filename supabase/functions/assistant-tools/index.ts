@@ -10,7 +10,11 @@ type ToolAction =
   | "close_conversation"
   | "get_directions"
   | "get_transit"
-  | "get_fastest_arrival";
+  | "get_fastest_arrival"
+  | "resolve_rail_station"
+  | "get_train_station_board"
+  | "get_train_status"
+  | "get_train_disruptions";
 
 type ToolRequest = {
   action: ToolAction;
@@ -270,6 +274,87 @@ async function fetchDirections(apiKey: string, origin: string, destination: stri
   return { ok: true, lines, destination: destName, warnings };
 }
 
+// --- PKP PLK "Otwarte Dane Kolejowe" (fundament — bez planera przesiadek) ---
+//
+// Dokładny kształt odpowiedzi JSON tego API nie jest zweryfikowany na żywo (klucz
+// PKP_API_KEY czekał na aktywację w momencie pisania tego kodu, a dokumentacja API
+// jest niedostępna z tego środowiska). Parsowanie poniżej próbuje kilku prawdopodobnych
+// nazw pól i loguje pełną surową odpowiedź przy błędzie/braku dopasowania (`pkp_error`),
+// żeby dało się to szybko doprecyzować po pierwszym realnym wywołaniu — tak jak
+// wcześniej z błędem Gemini i Google Directions w tej samej integracji.
+
+const PKP_BASE_URL = "https://pdp-api.plk-sa.pl/api/v1";
+
+type PkpResult<T> = { ok: true; data: T } | { ok: false; error: string; status?: number };
+
+async function pkpFetch(path: string, params: Record<string, string> = {}): Promise<PkpResult<unknown>> {
+  const apiKey = Deno.env.get("PKP_API_KEY");
+  if (!apiKey) return { ok: false, error: "no_api_key" };
+
+  const qs = new URLSearchParams(params).toString();
+  const started = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(`${PKP_BASE_URL}${path}${qs ? `?${qs}` : ""}`, { headers: { "X-API-Key": apiKey } });
+  } catch (e) {
+    log("pkp_error", { path, exception: String(e) });
+    return { ok: false, error: "pkp_unreachable" };
+  }
+  const elapsedMs = Date.now() - started;
+  const text = await res.text();
+
+  if (!res.ok) {
+    // Metadane + skrócona treść błędu — nigdy klucz, nigdy pełne dane użytkownika.
+    log("pkp_error", { path, status: res.status, elapsedMs, bodyPreview: text.slice(0, 500) });
+    if (res.status === 401 || res.status === 403) return { ok: false, error: "pkp_unauthorized", status: res.status };
+    if (res.status === 429) return { ok: false, error: "pkp_rate_limited", status: res.status };
+    if (res.status >= 500) return { ok: false, error: "pkp_server_error", status: res.status };
+    return { ok: false, error: `pkp_status_${res.status}`, status: res.status };
+  }
+
+  log("pkp_call", { path, status: res.status, elapsedMs });
+  try {
+    return { ok: true, data: JSON.parse(text) };
+  } catch {
+    log("pkp_error", { path, reason: "invalid_json", bodyPreview: text.slice(0, 300) });
+    return { ok: false, error: "pkp_invalid_response" };
+  }
+}
+
+function asList(data: unknown): Record<string, unknown>[] {
+  if (Array.isArray(data)) return data as Record<string, unknown>[];
+  const obj = data as Record<string, unknown> | null;
+  const candidate = obj?.items ?? obj?.data ?? obj?.stations ?? obj?.schedules ?? obj?.value;
+  return Array.isArray(candidate) ? candidate as Record<string, unknown>[] : [];
+}
+
+type PkpStation = { id: string; name: string };
+
+async function pkpSearchStations(query: string): Promise<PkpResult<PkpStation[]>> {
+  const result = await pkpFetch("/dictionaries/stations", { search: query });
+  if (!result.ok) return result;
+  const list = asList(result.data);
+  const stations = list
+    .map((s): PkpStation => ({
+      id: String(s.id ?? s.stationId ?? s.Id ?? s.code ?? ""),
+      name: String(s.name ?? s.stationName ?? s.Name ?? s.fullName ?? ""),
+    }))
+    .filter((s) => s.id);
+  if (list.length && !stations.length) {
+    log("pkp_error", { reason: "stations_unparsed", query, rawPreview: JSON.stringify(result.data).slice(0, 400) });
+  }
+  return { ok: true, data: stations };
+}
+
+function formatScheduleRow(row: Record<string, unknown>): string {
+  const time = String(row.plannedTime ?? row.departureTime ?? row.time ?? row.scheduledTime ?? "?:??").slice(0, 5);
+  const train = String(row.trainNumber ?? row.trainId ?? row.number ?? row.trainFullName ?? "?");
+  const carrier = row.carrierCode ?? row.carrier ?? null;
+  const dest = String(row.destination ?? row.direction ?? row.to ?? row.endStation ?? "?");
+  const track = row.platform ?? row.track ?? row.trackNumber;
+  return `${time} ${carrier ? `${carrier} ` : ""}${train} -> ${dest}${track != null ? ` tor ${track}` : ""}`;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -438,6 +523,94 @@ Deno.serve(async (req: Request) => {
         arrival_time: arrivalTime,
         alternatives: results.slice(1),
       });
+    }
+
+    if (input.action === "resolve_rail_station") {
+      const pointArg = typeof input.args?.point === "string" ? input.args.point.trim() : "";
+      if (!pointArg) return json({ error: "point is required" }, 400);
+      const user = await getUser(url, key, input.user_id);
+      if (!user) return json({ error: "User not found" }, 404);
+
+      const t = pointArg.toLowerCase();
+      let query: string | null = null;
+      let addressFallback: string | null = null;
+      if (t === "dom" || t === "home") { query = user.profile_home_station; addressFallback = user.profile_home; }
+      else if (t === "praca" || t === "pracy" || t === "work") { query = user.profile_work_station; addressFallback = user.profile_work; }
+      else { query = pointArg; }
+
+      if (!query) {
+        return json({ error: "no_preferred_station", hint: addressFallback ? "ask_user" : "missing_address" }, 200);
+      }
+
+      const search = await pkpSearchStations(query);
+      if (!search.ok) return json({ error: search.error }, 200);
+      if (search.data.length === 0) return json({ error: "station_not_found", query }, 200);
+      if (search.data.length > 1) {
+        return json({ error: "ambiguous_station", query, candidates: search.data.slice(0, 5).map((s) => s.name) }, 200);
+      }
+      return json({ station: search.data[0] });
+    }
+
+    if (input.action === "get_train_station_board") {
+      const stationArg = typeof input.args?.station === "string" ? input.args.station : "";
+      if (!stationArg) return json({ error: "station is required" }, 400);
+      const dateArg = typeof input.args?.date === "string" ? input.args.date : "";
+
+      const search = await pkpSearchStations(stationArg);
+      if (!search.ok) return json({ error: search.error }, 200);
+      if (search.data.length === 0) return json({ error: "station_not_found", query: stationArg }, 200);
+      if (search.data.length > 1) {
+        return json({ error: "ambiguous_station", query: stationArg, candidates: search.data.slice(0, 5).map((s) => s.name) }, 200);
+      }
+      const station = search.data[0];
+
+      const params: Record<string, string> = { stationId: station.id };
+      if (dateArg) params.date = dateArg;
+      const result = await pkpFetch("/schedules", params);
+      if (!result.ok) return json({ error: result.error }, 200);
+
+      const list = asList(result.data);
+      if (!list.length) {
+        log("pkp_error", { reason: "no_schedule_entries", stationId: station.id, rawPreview: JSON.stringify(result.data).slice(0, 400) });
+        return json({ error: "no_schedule_data" }, 200);
+      }
+      return json({ station: station.name, board: list.slice(0, 8).map(formatScheduleRow).join("\n") });
+    }
+
+    if (input.action === "get_train_status") {
+      const trainIdArg = typeof input.args?.train_id === "string" ? input.args.train_id : "";
+      if (!trainIdArg) return json({ error: "train_id is required" }, 400);
+      const dateArg = typeof input.args?.date === "string" ? input.args.date : "";
+
+      const params: Record<string, string> = { trainId: trainIdArg, withPlanned: "true" };
+      if (dateArg) params.date = dateArg;
+      const result = await pkpFetch("/operations", params);
+      if (!result.ok) return json({ error: result.error }, 200);
+
+      const list = asList(result.data);
+      const entry = list[0] ?? (typeof result.data === "object" && result.data !== null ? result.data as Record<string, unknown> : null);
+      if (!entry) {
+        log("pkp_error", { reason: "no_operation_entry", trainId: trainIdArg, rawPreview: JSON.stringify(result.data).slice(0, 400) });
+        return json({ error: "no_train_data" }, 200);
+      }
+      return json({
+        train_id: trainIdArg,
+        delay_minutes: entry.delayMinutes ?? entry.delay ?? entry.delayMin ?? null,
+        status: entry.status ?? entry.trainStatus ?? null,
+        planned_time: entry.plannedTime ?? entry.scheduledTime ?? null,
+      });
+    }
+
+    if (input.action === "get_train_disruptions") {
+      const stationsArg = typeof input.args?.stations === "string" ? input.args.stations : "";
+      const params: Record<string, string> = {};
+      if (stationsArg) params.stations = stationsArg;
+      const result = await pkpFetch("/disruptions", params);
+      if (!result.ok) return json({ error: result.error }, 200);
+
+      const list = asList(result.data);
+      const summaries = list.slice(0, 5).map((d) => String(d.description ?? d.message ?? d.title ?? "utrudnienie"));
+      return json({ disruptions: summaries });
     }
 
     return json({ error: "Unknown action" }, 400);
