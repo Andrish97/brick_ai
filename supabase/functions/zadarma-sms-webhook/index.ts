@@ -389,6 +389,26 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
   return { kind: "text", text: second.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.", grantedParts };
 }
 
+// TYMCZASOWE — wyłącznie do zweryfikowania aktywacji PKP_API_KEY, przed zbudowaniem
+// właściwego modułu kolejowego. Usunąć razem z przyciskiem w panelu po weryfikacji.
+async function handlePkpTest(): Promise<Response> {
+  const apiKey = Deno.env.get("PKP_API_KEY");
+  if (!apiKey) {
+    return new Response(JSON.stringify({ ok: false, error: "PKP_API_KEY not set" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+  try {
+    const res = await fetch("https://pdp-api.plk-sa.pl/api/v1/dictionaries/stations?search=Katowice", {
+      headers: { "X-API-Key": apiKey },
+    });
+    const body = await res.text();
+    log("pkp_test", { status: res.status, bodyPreview: body.slice(0, 500) });
+    return new Response(JSON.stringify({ ok: res.ok, status: res.status, body: body.slice(0, 2000) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  } catch (e) {
+    log("pkp_test", { exception: String(e) });
+    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+}
+
 // Sentinel user_id rozpoznawany też przez assistant-tools — musi być identyczny w obu miejscach.
 const TEST_MODE_USER_ID = "00000000-0000-0000-0000-000000000000";
 
@@ -440,6 +460,7 @@ Deno.serve(async (req: Request) => {
   }
   const dryRun = new URL(req.url).searchParams.get("dry_run") === "1";
   const testMode = new URL(req.url).searchParams.get("endpoint_test") === "1";
+  const pkpTest = new URL(req.url).searchParams.get("pkp_test") === "1";
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: CORS });
 
   let raw: Record<string, string>;
@@ -457,6 +478,10 @@ Deno.serve(async (req: Request) => {
   const SB = Deno.env.get("SUPABASE_URL")!;
   const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   initLog(SB, KEY);
+
+  if (pkpTest) {
+    return await handlePkpTest();
+  }
 
   // Zapisz raw payload do webhook_logs
   await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });

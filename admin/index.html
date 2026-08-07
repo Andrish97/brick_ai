@@ -1454,6 +1454,8 @@ let _smsSendUserId = '';
 let _smsTestUserId = '';
 let _endpointTestResults = [];  // [{label, msg, status, ok, data}]
 let _endpointTestsRunning = false;
+let _pkpTestResult = null;      // tymczasowe — test aktywacji PKP_API_KEY
+let _pkpTestRunning = false;
 
 // Jedno zdanie na narzędzie — dry_run=1, więc zero wysłanych SMS-ów.
 // Ten sam zestaw co scripts/test-endpoints.ts, żeby wynik był porównywalny.
@@ -1635,6 +1637,17 @@ function renderEndpointTestsForm() {
       ${_endpointTestsRunning ? 'Testuję…' : `▶ Uruchom wszystkie testy (${ENDPOINT_TEST_CASES.length})`}
     </button>
     <div id="endpoint-test-results" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">${resultsHtml}</div>
+
+    <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+      <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
+        <strong>Tymczasowe</strong> — tylko do zweryfikowania aktywacji <code>PKP_API_KEY</code>, usunąć po sprawdzeniu.
+        Bez Gemini, bez bazy — bezpośrednie zapytanie do PKP PLK.
+      </p>
+      <button class="btn btn-ghost btn-sm" onclick="runPkpTest()" ${_pkpTestRunning ? 'disabled' : ''}>
+        ${_pkpTestRunning ? 'Testuję…' : '🚆 Test połączenia PKP'}
+      </button>
+      <div id="pkp-test-result" style="margin-top:10px">${_pkpTestResult ? renderEndpointTestResult(_pkpTestResult) : ''}</div>
+    </div>
   `;
 }
 
@@ -1680,6 +1693,28 @@ async function runEndpointTests() {
   }
 
   _endpointTestsRunning = false;
+  renderSmsContent();
+}
+
+// Tymczasowe — usunąć razem z sekcją w renderEndpointTestsForm po weryfikacji PKP_API_KEY.
+async function runPkpTest() {
+  _pkpTestRunning = true;
+  _pkpTestResult = { label: 'Test połączenia PKP', msg: 'GET /dictionaries/stations?search=Katowice', status: 'running', ok: null, data: null };
+  renderSmsContent();
+
+  try {
+    const res = await fetch(`${SB_URL}/functions/v1/zadarma-sms-webhook?pkp_test=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const text = await res.text();
+    _pkpTestResult = { label: 'Test połączenia PKP', msg: 'GET /dictionaries/stations?search=Katowice', status: 'done', ok: res.ok, data: `HTTP ${res.status}\n${text}` };
+  } catch (e) {
+    _pkpTestResult = { label: 'Test połączenia PKP', msg: 'GET /dictionaries/stations?search=Katowice', status: 'done', ok: false, data: String(e) };
+  }
+
+  _pkpTestRunning = false;
   renderSmsContent();
 }
 
