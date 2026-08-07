@@ -224,7 +224,7 @@ supabase secrets set \
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
 | `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
 | `ASSISTANT_TOOLS_SECRET` | Dowolny losowy string — autoryzuje wywołania webhooka do `assistant-tools`. Jeśli pominięty, funkcja spada na `SUPABASE_SERVICE_ROLE_KEY`. |
-| `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Enable **Directions API** → Credentials → Create API Key — wymagany do nawigacji i komunikacji miejskiej |
+| `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Library → włącz **Directions API** (to legacy API, osobne od nowszego Routes API — trzeba je włączyć jawnie, samo posiadanie klucza z Routes API nie wystarczy, inaczej dostaniesz `REQUEST_DENIED`) → Credentials → Create API Key — wymagany do nawigacji i komunikacji miejskiej |
 
 > **Dlaczego tylko Gemini?** Gemini ma wbudowaną wyszukiwarkę Google (`googleSearch`) — jedyny darmowy model z dostępem do danych w czasie rzeczywistym (pogoda, kursy walut, aktualności) bez dodatkowych integracji.
 
@@ -297,7 +297,9 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 │   ├── functions/
 │   │   ├── zadarma-sms-webhook/    # Odbiera SMS, rozpoznaje intencję, wysyła odpowiedź
 │   │   ├── assistant-tools/        # Prywatne narzędzia wywoływane przez webhook (nigdy publicznie)
-│   │   └── admin-send-sms/         # Wysyła SMS z panelu admina
+│   │   ├── admin-send-sms/         # Wysyła SMS z panelu admina
+│   │   ├── setup-zadarma-webhook/  # Konfiguruje webhook Zadarma przy każdym deployu
+│   │   └── zadarma-balance/        # Odczytuje saldo konta Zadarma dla panelu admina
 │   ├── migrations/                 # Migracje SQL
 │   └── config.toml
 ├── scripts/
@@ -321,7 +323,7 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 | Google Directions API | $5/1000 tras (200$ kredytu/mies. gratis ≈ 40 000 tras) |
 | GitHub Pages | Darmowe |
 
-Odpowiedzi domyślnie mieszczą się w 1 SMS-ie; dłuższe odpowiedzi (3–4 SMS-y) wymagają wyraźnej zgody użytkownika i są dodatkowo ograniczone limitem profilu. Trasy nawigacyjne mają twardy limit 6 SMS-ów za zapytanie — dłuższe trasy są odrzucane zamiast wysyłane w całości.
+Odpowiedzi domyślnie mieszczą się w 1 SMS-ie; dłuższe odpowiedzi (3–4 SMS-y) wymagają wyraźnej zgody użytkownika i są dodatkowo ograniczone globalnym limitem (Ustawienia → „Limit SMS-ów odpowiedzi rozszerzonej”). Trasy nawigacyjne mają twardy limit 6 SMS-ów za zapytanie — dłuższe trasy są odrzucane zamiast wysyłane w całości.
 
 ## Technologie
 
