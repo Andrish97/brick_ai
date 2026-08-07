@@ -154,6 +154,8 @@ deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL> <KOD_UZYTKOWNIKA>
 
 Skrypt przepuszcza po kolei zdania wyzwalające każde narzędzie (nawigację, transit, dłuższą odpowiedź, zamknięcie rozmowy, profil) i drukuje surową odpowiedź JSON każdego z nich. Wymaga prawdziwego kodu użytkownika z bazy; dla nawigacji ten użytkownik musi mieć ustawiony adres domu i pracy w panelu.
 
+Ten sam zestaw testów jest też dostępny bez terminala — panel admina → **Testy → 🔌 Test endpointów**. Wybierz użytkownika testowego i kliknij „Uruchom wszystkie testy” — panel woła webhook z `dry_run=1` bezpośrednio z przeglądarki (ma normalny dostęp do Twojego Supabase, więc działa nawet tam, gdzie lokalny `deno`/sieć nie sięgają) i pokazuje wynik każdego scenariusza.
+
 ---
 
 ## Setup od zera

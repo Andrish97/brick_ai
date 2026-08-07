@@ -1446,15 +1446,30 @@ async function deletePhoneNumber(id) {
 // ══════════════════════════════════════════════════════
 //  PAGE: WYSYŁKA SMS (Wyślij + Test odbioru)
 // ══════════════════════════════════════════════════════
-let smsToolsMode = 'send'; // 'send' | 'test'
+let smsToolsMode = 'send'; // 'send' | 'test' | 'endpoints'
 let smsToMode = 'user';    // 'user' | 'other' (only send)
 let smsUsers = [];
 let smsAllConvs = {};      // userId -> [{id, code}]
 let _smsSendUserId = '';
 let _smsTestUserId = '';
+let _smsEndpointsUserId = '';
+let _endpointTestResults = [];  // [{label, msg, status, ok, data}]
+let _endpointTestsRunning = false;
+
+// Jedno zdanie na narzędzie — dry_run=1, więc zero wysłanych SMS-ów.
+// Ten sam zestaw co scripts/test-endpoints.ts, żeby wynik był porównywalny.
+const ENDPOINT_TEST_CASES = [
+  { label: 'Zwykłe pytanie (bez narzędzi)', msg: 'jaka jest stolica Francji?' },
+  { label: 'get_user_profile', msg: 'jakie mam ustawione imię w tym systemie?' },
+  { label: 'allow_long_reply', msg: 'mozesz napisac dluzej, uzyj 4 smsow i opisz krotko historie Polski' },
+  { label: 'get_directions (pieszo, dom → praca)', msg: 'poprowadz mnie pieszo z domu do pracy' },
+  { label: 'get_transit (dom → praca)', msg: 'jak dojade komunikacja miejska z domu do pracy?' },
+  { label: 'get_fastest_arrival', msg: 'o ktorej najszybciej bede w pracy jesli wyjde teraz z domu?' },
+  { label: 'close_conversation (intencja, nie słowo-klucz)', msg: 'dzieki, to na razie wszystko, nie musisz juz odpisywac, konczymy' },
+];
 
 async function renderSmsTools(mode) {
-  if (mode === 'send' || mode === 'test') smsToolsMode = mode;
+  if (mode === 'send' || mode === 'test' || mode === 'endpoints') smsToolsMode = mode;
   await loadPhoneNumbers();
 
   const [{ data: users }, { data: convs }] = await Promise.all([
@@ -1471,6 +1486,7 @@ async function renderSmsTools(mode) {
 
   if (!_smsSendUserId) _smsSendUserId = smsUsers.find(u => u.phone_number)?.id || '';
   if (!_smsTestUserId) _smsTestUserId = smsUsers[0]?.id || '';
+  if (!_smsEndpointsUserId) _smsEndpointsUserId = smsUsers[0]?.id || '';
 
   renderSmsContent();
 }
@@ -1490,13 +1506,16 @@ function _convOpts(userId, includeNew) {
 
 function renderSmsContent() {
   const isSend = smsToolsMode === 'send';
+  const isEndpoints = smsToolsMode === 'endpoints';
   const pnOpts = _pnOpts();
   const defaultPn = phoneNumbers[0]?.number || '';
   const noPn = 'Brak numerów — dodaj w sekcji Numery';
 
   let formHtml;
 
-  if (isSend) {
+  if (isEndpoints) {
+    formHtml = renderEndpointTestsForm(pnOpts, defaultPn, noPn);
+  } else if (isSend) {
     const isUser = smsToMode === 'user';
     const usersWithPhone = smsUsers.filter(u => u.phone_number);
     const sendUserOpts = usersWithPhone.map(u => ({ value: u.id, label: u.phone_number + ' (' + u.code + ')' }));
@@ -1558,7 +1577,8 @@ function renderSmsContent() {
     </div>
     <div class="prompt-mode-bar" style="margin-bottom:20px">
       <button class="prompt-mode-btn ${isSend ? 'active' : ''}" onclick="renderSmsTools('send')">📤 Wyślij SMS</button>
-      <button class="prompt-mode-btn ${!isSend ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
+      <button class="prompt-mode-btn ${!isSend && !isEndpoints ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
+      <button class="prompt-mode-btn ${isEndpoints ? 'active' : ''}" onclick="renderSmsTools('endpoints')">🔌 Test endpointów</button>
     </div>
     <div class="section-card">${formHtml}</div>
   `;
@@ -1568,8 +1588,7 @@ function renderSmsContent() {
 }
 
 function _wireSmsSelects() {
-  const isSend = smsToolsMode === 'send';
-  if (isSend) {
+  if (smsToolsMode === 'send') {
     const userMenu = document.querySelector('[data-select-id="sms-user"] .ui-select-menu');
     if (userMenu) userMenu.addEventListener('click', () => setTimeout(() => {
       _smsSendUserId = getUiSelect('sms-user');
@@ -1589,13 +1608,96 @@ function _wireSmsSelects() {
           <span style="font-size:13px">Dry run <span style="color:var(--muted);font-size:12px">(symulacja bez wysyłki)</span></span>
         </div>` : '';
     }, 50));
-  } else {
+  } else if (smsToolsMode === 'test') {
     const userMenu = document.querySelector('[data-select-id="test-user"] .ui-select-menu');
     if (userMenu) userMenu.addEventListener('click', () => setTimeout(() => {
       _smsTestUserId = getUiSelect('test-user');
       renderSmsContent();
     }, 50));
+  } else if (smsToolsMode === 'endpoints') {
+    const userMenu = document.querySelector('[data-select-id="endpoint-test-user"] .ui-select-menu');
+    if (userMenu) userMenu.addEventListener('click', () => setTimeout(() => {
+      _smsEndpointsUserId = getUiSelect('endpoint-test-user');
+    }, 50));
   }
+}
+
+// ── Sub-tab: Test endpointów (dry_run=1 dla każdego narzędzia, zero SMS-ów) ──
+
+function renderEndpointTestsForm(pnOpts, defaultPn, noPn) {
+  const userOpts = smsUsers.map(u => ({ value: u.id, label: u.code + (u.phone_number ? ' — ' + u.phone_number : '') }));
+  const resultsHtml = _endpointTestResults.length
+    ? _endpointTestResults.map(renderEndpointTestResult).join('')
+    : '<p style="color:var(--muted);font-size:13px;margin-top:14px">Brak wyników — uruchom testy.</p>';
+
+  return `
+    <p style="color:var(--muted);font-size:13px;margin-bottom:14px">
+      Przepuszcza po kolei zdanie wyzwalające każde narzędzie asystenta przez <code>dry_run=1</code> —
+      Gemini i assistant-tools działają naprawdę, ale SMS nigdy nie zostaje wysłany.
+      Dla nawigacji/transitu/najszybszego dojazdu wybrany użytkownik musi mieć ustawiony adres domu i pracy w profilu.
+    </p>
+    <label>Użytkownik testowy</label>
+    ${userOpts.length ? uiSelectHtml('endpoint-test-user', userOpts, { value: _smsEndpointsUserId }) : '<p style="color:var(--muted);font-size:13px">Brak użytkowników.</p>'}
+    <label style="margin-top:12px">Numer Zadarma (odbiorca, symulowany)</label>
+    ${pnOpts.length ? uiSelectHtml('endpoint-test-to', pnOpts, { value: defaultPn }) : `<p style="color:var(--muted);font-size:13px">${noPn}</p>`}
+    <button class="btn btn-primary" style="margin-top:14px" onclick="runEndpointTests()" ${_endpointTestsRunning ? 'disabled' : ''}>
+      ${_endpointTestsRunning ? 'Testuję…' : `▶ Uruchom wszystkie testy (${ENDPOINT_TEST_CASES.length})`}
+    </button>
+    <div id="endpoint-test-results" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">${resultsHtml}</div>
+  `;
+}
+
+function renderEndpointTestResult(r) {
+  const badgeCls = r.status === 'running' ? 'badge-yellow' : r.ok ? 'badge-green' : 'badge-red';
+  const badgeLabel = r.status === 'running' ? 'w toku…' : r.ok ? 'OK' : 'błąd';
+  return `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <strong style="font-size:13px">${escHtml(r.label)}</strong>
+        <span class="badge ${badgeCls}">${badgeLabel}</span>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-top:4px">&gt; ${escHtml(r.msg)}</div>
+      ${r.data ? `<pre style="font-size:11px;margin-top:8px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(r.data)}</pre>` : ''}
+    </div>
+  `;
+}
+
+function _renderEndpointResultsOnly() {
+  const box = document.getElementById('endpoint-test-results');
+  if (box) box.innerHTML = _endpointTestResults.map(renderEndpointTestResult).join('');
+}
+
+async function runEndpointTests() {
+  const userId = getUiSelect('endpoint-test-user') || _smsEndpointsUserId;
+  const user = smsUsers.find(u => u.id === userId);
+  if (!user) { return; }
+
+  const to = getUiSelect('endpoint-test-to') || phoneNumbers[0]?.number || '';
+  const fakePhone = user.phone_number || '48500000001';
+
+  _endpointTestsRunning = true;
+  _endpointTestResults = ENDPOINT_TEST_CASES.map(c => ({ label: c.label, msg: c.msg, status: 'running', ok: null, data: null }));
+  renderSmsContent();
+
+  for (let i = 0; i < ENDPOINT_TEST_CASES.length; i++) {
+    const c = ENDPOINT_TEST_CASES[i];
+    const msgBody = `${user.code}\n${c.msg}`; // bez kodu rozmowy = nowa, izolowana rozmowa dla każdego testu
+    try {
+      const res = await fetch(`${SB_URL}/functions/v1/zadarma-sms-webhook?dry_run=1`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: 'incoming_sms', sms_from: fakePhone, sms_to: to, msg: msgBody }),
+      });
+      const text = await res.text();
+      _endpointTestResults[i] = { label: c.label, msg: c.msg, status: 'done', ok: res.ok, data: `HTTP ${res.status}\n${text}` };
+    } catch (e) {
+      _endpointTestResults[i] = { label: c.label, msg: c.msg, status: 'done', ok: false, data: String(e) };
+    }
+    _renderEndpointResultsOnly();
+  }
+
+  _endpointTestsRunning = false;
+  renderSmsContent();
 }
 
 function setSmsToMode(mode) {
