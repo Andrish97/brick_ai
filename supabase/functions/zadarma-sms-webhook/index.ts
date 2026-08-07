@@ -241,7 +241,11 @@ const TOOLS = [
 
 const DETERMINISTIC_ACTIONS = new Set(["get_directions", "get_transit", "get_fastest_arrival"]);
 
-type GeminiTurn = { functionCall: { name: string; args: Record<string, unknown> } | null; text: string | null };
+type GeminiTurn = {
+  functionCall: { name: string; args: Record<string, unknown> } | null;
+  functionCallPart: Record<string, unknown> | null;
+  text: string | null;
+};
 
 async function generateContent(contents: GeminiContent[], system: string, maxOutputTokens: number, includeTools = true): Promise<GeminiTurn> {
   try {
@@ -264,7 +268,7 @@ async function generateContent(contents: GeminiContent[], system: string, maxOut
     const resText = await res.text();
     if (!res.ok) {
       log("gemini_error", { status: res.status, body: resText.slice(0, 500) });
-      return { functionCall: null, text: null };
+      return { functionCall: null, functionCallPart: null, text: null };
     }
     const data = JSON.parse(resText);
     const candidate = data.candidates?.[0];
@@ -280,11 +284,15 @@ async function generateContent(contents: GeminiContent[], system: string, maxOut
     });
     return {
       functionCall: functionCallPart?.functionCall ? { name: functionCallPart.functionCall.name, args: functionCallPart.functionCall.args ?? {} } : null,
+      // Zwracamy CAŁĄ oryginalną część odpowiedzi (może zawierać thoughtSignature),
+      // żeby odesłać ją do Gemini bez zmian w drugiej turze — API odrzuca odtworzone
+      // od zera { functionCall: {name, args} } błędem "missing a thought_signature".
+      functionCallPart: functionCallPart ?? null,
       text: text || null,
     };
   } catch (e) {
     log("gemini_error", { exception: String(e) });
-    return { functionCall: null, text: null };
+    return { functionCall: null, functionCallPart: null, text: null };
   }
 }
 
@@ -372,7 +380,7 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
 
   const followupContents: GeminiContent[] = [
     ...contents,
-    { role: "model", parts: [{ functionCall: { name, args } }] },
+    { role: "model", parts: [first.functionCallPart ?? { functionCall: { name, args } }] },
     { role: "function", parts: [{ functionResponse: { name, response: toolResult } }] },
   ];
   const followupMax = grantedParts ? TOKENS_FOR_PARTS[grantedParts] : maxOutputTokens;
