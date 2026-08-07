@@ -146,15 +146,17 @@ Wyniki nawigacji i komunikacji miejskiej formatuje wyłącznie endpoint — mode
 
 ### Testowanie bez wysyłania SMS-ów
 
-Doklej `?dry_run=1` do URL-a `zadarma-sms-webhook` — cała logika (Gemini, function calling, wywołania narzędzi) działa normalnie, ale zamiast SMS-a webhook zwraca treść odpowiedzi jako JSON. Zero kosztu SMS (Gemini i Google Maps są nadal wywoływane naprawdę, w ramach darmowych limitów).
+Doklej `?dry_run=1` do URL-a `zadarma-sms-webhook`, żeby przetestować **realną rozmowę realnego użytkownika** — cała logika (Gemini, function calling, wywołania narzędzi) działa normalnie i zapisuje się do bazy jak zwykła rozmowa, ale zamiast SMS-a webhook zwraca treść odpowiedzi jako JSON. Tego trybu używa panel admina → Testy → **🧪 Test odbioru**.
+
+Do smoke-testu wszystkich narzędzi naraz służy osobny tryb — `?endpoint_test=1`. Gemini, assistant-tools i Google Maps są wywoływane naprawdę, ale endpoint używa syntetycznego profilu (dom/praca w Katowicach) zamiast realnego użytkownika i **nie zapisuje nic** do `conversations`/`messages` — czysta symulacja działania systemu, bez śmiecenia prawdziwymi danymi i bez zakładania, że w bazie w ogóle jest jakiś użytkownik.
 
 ```bash
-deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL> <KOD_UZYTKOWNIKA>
+deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL>
 ```
 
-Skrypt przepuszcza po kolei zdania wyzwalające każde narzędzie (nawigację, transit, dłuższą odpowiedź, zamknięcie rozmowy, profil) i drukuje surową odpowiedź JSON każdego z nich. Wymaga prawdziwego kodu użytkownika z bazy; dla nawigacji ten użytkownik musi mieć ustawiony adres domu i pracy w panelu.
+Skrypt przepuszcza po kolei zdania wyzwalające każde narzędzie (nawigację, transit, dłuższą odpowiedź, zamknięcie rozmowy, profil) i drukuje surową odpowiedź JSON każdego z nich.
 
-Ten sam zestaw testów jest też dostępny bez terminala — panel admina → **Testy → 🔌 Test endpointów**. Wybierz użytkownika testowego i kliknij „Uruchom wszystkie testy” — panel woła webhook z `dry_run=1` bezpośrednio z przeglądarki (ma normalny dostęp do Twojego Supabase, więc działa nawet tam, gdzie lokalny `deno`/sieć nie sięgają) i pokazuje wynik każdego scenariusza.
+Ten sam zestaw testów jest też dostępny bez terminala — panel admina → **Testy → 🔌 Test endpointów**. Jeden przycisk, bez wybierania użytkownika — panel woła webhook z `endpoint_test=1` bezpośrednio z przeglądarki (ma normalny dostęp do Twojego Supabase, więc działa nawet tam, gdzie lokalny `deno`/sieć nie sięgają) i pokazuje wynik każdego scenariusza.
 
 ---
 
@@ -300,7 +302,7 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 │   └── config.toml
 ├── scripts/
 │   ├── test-zadarma.ts             # Lokalny test API Zadarma
-│   └── test-endpoints.ts           # Testuje wszystkie narzędzia asystenta przez dry_run — bez SMS-ów
+│   └── test-endpoints.ts           # Testuje wszystkie narzędzia asystenta (endpoint_test=1) — bez SMS-ów i bez danych w bazie
 └── .github/workflows/
     ├── deploy.yml                  # Deploy Edge Functions + migracje
     └── pages.yml                   # Deploy panelu admina

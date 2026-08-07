@@ -389,6 +389,46 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
   return { kind: "text", text: second.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.", grantedParts };
 }
 
+// Sentinel user_id rozpoznawany też przez assistant-tools — musi być identyczny w obu miejscach.
+const TEST_MODE_USER_ID = "00000000-0000-0000-0000-000000000000";
+
+// Panel admina → Testy → Test endpointów. Prawdziwe wywołania Gemini, assistant-tools
+// i Google Maps — ale bez realnego użytkownika i bez zapisu jakiejkolwiek rozmowy/
+// wiadomości do bazy. Zero SMS-ów, zero danych, czysta symulacja działania endpointów.
+async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Promise<Response> {
+  const content = rawMsg.trim();
+  if (!content) return new Response("Empty content", { status: 200, headers: CORS });
+
+  const convId = crypto.randomUUID();
+  const suffix = `\n000000`;
+
+  const aiContents: GeminiContent[] = [{ role: "user", parts: [{ text: content }] }];
+
+  const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
+  let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji formatuje sam endpoint; nie twórz własnego formatu trasy. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków).`;
+
+  log("endpoint_test_start", { convId, content });
+  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[1], { userId: TEST_MODE_USER_ID, convId });
+
+  if (outcome.kind === "closed") {
+    return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+
+  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripUrls(outcome.text));
+  let maxParts: 1 | 3 | 4 | 6 = 1;
+  if (outcome.kind === "route") maxParts = 6;
+  else if (outcome.kind === "text" && outcome.grantedParts) maxParts = outcome.grantedParts;
+  const parts = chunkForSms(cleanReply, maxParts);
+
+  log("endpoint_test_done", { convId, kind: outcome.kind, parts: parts.length });
+
+  return new Response(
+    JSON.stringify({ ok: true, test_mode: true, reply: parts.map((p) => `${p}${suffix}`).join("\n---\n"), parts: parts.length }),
+    { status: 200, headers: { ...CORS, "Content-Type": "application/json" } }
+  );
+}
+
 // --- Handler ---
 
 Deno.serve(async (req: Request) => {
@@ -399,6 +439,7 @@ Deno.serve(async (req: Request) => {
     return new Response(echo ?? "OK", { status: 200, headers: CORS });
   }
   const dryRun = new URL(req.url).searchParams.get("dry_run") === "1";
+  const testMode = new URL(req.url).searchParams.get("endpoint_test") === "1";
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: CORS });
 
   let raw: Record<string, string>;
@@ -435,6 +476,11 @@ Deno.serve(async (req: Request) => {
   const senderPhone = data.sms_from ?? data.caller_id ?? "";
   const recipientDid = data.sms_to ?? data.caller_did ?? data.called_did ?? "";
   const smsBody = data.msg ?? data.text ?? "";
+
+  if (testMode) {
+    return await handleEndpointTest(SB, KEY, smsBody);
+  }
+
   if (!senderPhone || !smsBody) {
     log("error", { reason: "missing_fields", senderPhone: !!senderPhone, smsBody: !!smsBody, raw });
     return new Response("Missing fields", { status: 400, headers: CORS });

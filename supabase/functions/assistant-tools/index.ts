@@ -76,7 +76,21 @@ type UserProfile = {
   profile_work_station: string | null;
 };
 
+// Sentinel user_id używany wyłącznie przez panel admina → Testy → Test endpointów.
+// Pozwala przepuścić realne wywołania Gemini/Google Maps/assistant-tools bez
+// istniejącego użytkownika i bez zapisywania czegokolwiek do conversations/messages.
+const TEST_MODE_USER_ID = "00000000-0000-0000-0000-000000000000";
+const TEST_PROFILE: UserProfile = {
+  profile_name: "Test",
+  profile_home: "Rynek 1, Katowice",
+  profile_work: "Spodek, Katowice",
+  profile_transport: "pieszo",
+  profile_home_station: null,
+  profile_work_station: null,
+};
+
 async function getUser(url: string, key: string, userId: string): Promise<UserProfile | null> {
+  if (userId === TEST_MODE_USER_ID) return TEST_PROFILE;
   const users = await sbGet(
     url,
     key,
@@ -281,9 +295,13 @@ Deno.serve(async (req: Request) => {
   initLog(url, key);
   log("endpoint_call", { action: input.action, args: input.args ?? {} });
 
+  const isTestMode = input.user_id === TEST_MODE_USER_ID;
+
   try {
-    const conversations = await sbGet(url, key, `conversations?id=eq.${encodeURIComponent(input.conversation_id)}&user_id=eq.${encodeURIComponent(input.user_id)}&select=id,status`);
-    if (conversations.length !== 1) return json({ error: "Conversation not found" }, 404);
+    if (!isTestMode) {
+      const conversations = await sbGet(url, key, `conversations?id=eq.${encodeURIComponent(input.conversation_id)}&user_id=eq.${encodeURIComponent(input.user_id)}&select=id,status`);
+      if (conversations.length !== 1) return json({ error: "Conversation not found" }, 404);
+    }
 
     if (input.action === "get_user_profile") {
       const allowed = new Set(["name", "home", "work", "transport", "home_station", "work_station"]);
@@ -306,19 +324,23 @@ Deno.serve(async (req: Request) => {
       if (!validParts(requested) || requested === 1) return json({ error: "parts must be 3 or 4" }, 400);
       const cap = await getMaxReplySmsParts(url, key);
       const granted = Math.min(requested, cap) as 1 | 3 | 4;
-      await sbPatch(url, key, "conversations", `id=eq.${encodeURIComponent(input.conversation_id)}`, {
-        reply_sms_parts: granted,
-        last_activity_at: new Date().toISOString(),
-      });
+      if (!isTestMode) {
+        await sbPatch(url, key, "conversations", `id=eq.${encodeURIComponent(input.conversation_id)}`, {
+          reply_sms_parts: granted,
+          last_activity_at: new Date().toISOString(),
+        });
+      }
       return json({ granted_parts: granted });
     }
 
     if (input.action === "close_conversation") {
-      await sbPatch(url, key, "conversations", `id=eq.${encodeURIComponent(input.conversation_id)}`, {
-        status: "closed",
-        pending_reply: null,
-        last_activity_at: new Date().toISOString(),
-      });
+      if (!isTestMode) {
+        await sbPatch(url, key, "conversations", `id=eq.${encodeURIComponent(input.conversation_id)}`, {
+          status: "closed",
+          pending_reply: null,
+          last_activity_at: new Date().toISOString(),
+        });
+      }
       return json({ closed: true });
     }
 

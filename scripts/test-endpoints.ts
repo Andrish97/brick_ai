@@ -1,59 +1,45 @@
 /**
  * Testuje rozpoznawanie intencji i wszystkie narzędzia asystenta
  * (allow_long_reply, close_conversation, get_user_profile, get_directions,
- * get_transit, get_fastest_arrival) przez `dry_run=1` — webhook robi
- * wszystko normalnie (Gemini, function calling, assistant-tools), ale
- * zamiast wysłać SMS-a zwraca treść odpowiedzi jako JSON. Zero kosztu SMS.
- *
- * Wymaga prawdziwego kodu użytkownika z Twojej bazy (np. tego z README:
- * insert into users (code, phone_number) values ('1234', '...')).
- * Dla get_directions/get_transit/get_fastest_arrival ten użytkownik musi
- * mieć ustawiony adres domu i pracy w panelu admina.
+ * get_transit, get_fastest_arrival) przez tryb testowy webhooka
+ * (`?endpoint_test=1`). Gemini, assistant-tools i Google Maps są wywoływane
+ * naprawdę — to nie jest atrapa — ale endpoint używa syntetycznego profilu
+ * (dom/praca w Katowicach) i nie zakłada, nie wymaga ani nie zapisuje żadnej
+ * prawdziwej rozmowy, wiadomości ani użytkownika. Zero SMS-ów, zero danych
+ * w tabelach conversations/messages.
  *
  * Użycie:
- *   deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL> <KOD_UZYTKOWNIKA> [NUMER_TESTOWY]
+ *   deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL>
  * np.
- *   deno run --allow-net scripts/test-endpoints.ts https://rjnqpenbjyeiygedjvzk.supabase.co 1234
- *
- * NUMER_TESTOWY musi być numerem, którego NIE ma w tabeli users (inaczej
- * webhook potraktuje go jako znany numer i pominie kod użytkownika w
- * pierwszej linii). Domyślnie używany jest oczywisty numer testowy.
+ *   deno run --allow-net scripts/test-endpoints.ts https://rjnqpenbjyeiygedjvzk.supabase.co
  */
 
 const SB_URL = Deno.args[0];
-const USER_CODE = Deno.args[1];
-const TEST_PHONE = Deno.args[2] ?? "48500000001";
 
-if (!SB_URL || !USER_CODE) {
-  console.error("Użycie: deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL> <KOD_UZYTKOWNIKA> [NUMER_TESTOWY]");
+if (!SB_URL) {
+  console.error("Użycie: deno run --allow-net scripts/test-endpoints.ts <SUPABASE_URL>");
   Deno.exit(1);
 }
 
-const WEBHOOK_URL = `${SB_URL.replace(/\/$/, "")}/functions/v1/zadarma-sms-webhook?dry_run=1`;
+const WEBHOOK_URL = `${SB_URL.replace(/\/$/, "")}/functions/v1/zadarma-sms-webhook?endpoint_test=1`;
 
-type Case = { label: string; msg: string; expectTool?: string };
+type Case = { label: string; msg: string };
 
 const cases: Case[] = [
   { label: "zwykłe pytanie (bez narzędzi)", msg: "jaka jest stolica Francji?" },
-  { label: "get_user_profile", msg: "jakie mam ustawione imię w tym systemie?", expectTool: "get_user_profile" },
-  { label: "allow_long_reply", msg: "mozesz napisac dluzej, uzyj 4 smsow i opisz krotko historie Polski", expectTool: "allow_long_reply" },
-  { label: "get_directions (pieszo, dom->praca)", msg: "poprowadz mnie pieszo z domu do pracy", expectTool: "get_directions" },
-  { label: "get_transit (dom->praca)", msg: "jak dojade komunikacja miejska z domu do pracy?", expectTool: "get_transit" },
-  { label: "get_fastest_arrival", msg: "o ktorej najszybciej bede w pracy jesli wyjde teraz z domu?", expectTool: "get_fastest_arrival" },
-  { label: "close_conversation (intencja, nie slowo-klucz)", msg: "dzieki, to na razie wszystko, nie musisz juz odpisywac, konczymy", expectTool: "close_conversation" },
+  { label: "get_user_profile", msg: "jakie mam ustawione imię w tym systemie?" },
+  { label: "allow_long_reply", msg: "mozesz napisac dluzej, uzyj 4 smsow i opisz krotko historie Polski" },
+  { label: "get_directions (pieszo, dom->praca)", msg: "poprowadz mnie pieszo z domu do pracy" },
+  { label: "get_transit (dom->praca)", msg: "jak dojade komunikacja miejska z domu do pracy?" },
+  { label: "get_fastest_arrival", msg: "o ktorej najszybciej bede w pracy jesli wyjde teraz z domu?" },
+  { label: "close_conversation (intencja, nie slowo-klucz)", msg: "dzieki, to na razie wszystko, nie musisz juz odpisywac, konczymy" },
 ];
 
 async function runCase(c: Case): Promise<void> {
-  const body = `${USER_CODE}\n${c.msg}`; // bez kodu rozmowy = nowa, izolowana rozmowa za każdym razem
   const res = await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      event: "sms",
-      sms_from: TEST_PHONE,
-      sms_to: "48459569689",
-      msg: body,
-    }),
+    body: JSON.stringify({ event: "sms", msg: c.msg }),
   });
   const status = res.status;
   let data: unknown;
@@ -65,7 +51,7 @@ async function runCase(c: Case): Promise<void> {
   console.log(JSON.stringify(data, null, 2));
 }
 
-console.log(`Testuję ${cases.length} scenariuszy przez dry_run=1 — żaden SMS nie zostanie wysłany.\n`);
+console.log(`Testuję ${cases.length} scenariuszy przez endpoint_test=1 — zero SMS-ów, zero zapisów do bazy.\n`);
 for (const c of cases) {
   await runCase(c);
 }
