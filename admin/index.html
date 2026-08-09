@@ -1483,7 +1483,7 @@ const ENDPOINT_TEST_CASES = [
 ];
 
 async function renderSmsTools(mode) {
-  if (mode === 'send' || mode === 'test' || mode === 'endpoints') smsToolsMode = mode;
+  if (mode === 'send' || mode === 'test' || mode === 'endpoints' || mode === 'extra') smsToolsMode = mode;
   await loadPhoneNumbers();
 
   const [{ data: users }, { data: convs }] = await Promise.all([
@@ -1520,6 +1520,7 @@ function _convOpts(userId, includeNew) {
 function renderSmsContent() {
   const isSend = smsToolsMode === 'send';
   const isEndpoints = smsToolsMode === 'endpoints';
+  const isExtra = smsToolsMode === 'extra';
   const pnOpts = _pnOpts();
   const defaultPn = phoneNumbers[0]?.number || '';
   const noPn = 'Brak numerów — dodaj w sekcji Numery';
@@ -1528,6 +1529,8 @@ function renderSmsContent() {
 
   if (isEndpoints) {
     formHtml = renderEndpointTestsForm();
+  } else if (isExtra) {
+    formHtml = renderExtraTestsForm();
   } else if (isSend) {
     const isUser = smsToMode === 'user';
     const usersWithPhone = smsUsers.filter(u => u.phone_number);
@@ -1590,8 +1593,9 @@ function renderSmsContent() {
     </div>
     <div class="prompt-mode-bar" style="margin-bottom:20px">
       <button class="prompt-mode-btn ${isSend ? 'active' : ''}" onclick="renderSmsTools('send')">📤 Wyślij SMS</button>
-      <button class="prompt-mode-btn ${!isSend && !isEndpoints ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
+      <button class="prompt-mode-btn ${!isSend && !isEndpoints && !isExtra ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
       <button class="prompt-mode-btn ${isEndpoints ? 'active' : ''}" onclick="renderSmsTools('endpoints')">🔌 Test endpointów</button>
+      <button class="prompt-mode-btn ${isExtra ? 'active' : ''}" onclick="renderSmsTools('extra')">🧩 Dodatkowe testy</button>
     </div>
     <div class="section-card">${formHtml}</div>
   `;
@@ -1650,8 +1654,15 @@ function renderEndpointTestsForm() {
       ${_endpointTestsRunning ? 'Testuję…' : `▶ Uruchom wszystkie testy (${ENDPOINT_TEST_CASES.length})`}
     </button>
     <div id="endpoint-test-results" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">${resultsHtml}</div>
+  `;
+}
 
-    <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+// ── Sub-tab: Dodatkowe testy — diagnostyka infrastruktury zewnętrznej (PKP, Zadarma),
+// osobno od baterii testów asystenta. Bez Gemini, bez bazy — bezpośrednie zapytania. ──
+
+function renderExtraTestsForm() {
+  return `
+    <div>
       <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
         <strong>Tymczasowe</strong> — tylko do zweryfikowania aktywacji <code>PKP_API_KEY</code>, usunąć po sprawdzeniu.
         Bez Gemini, bez bazy — bezpośrednie zapytanie do PKP PLK.
