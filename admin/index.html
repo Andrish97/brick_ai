@@ -839,14 +839,17 @@ async function updateUserPhone(userId, phoneNumberId) {
 async function fetchZadarmaBalance() {
   try {
     const session = await getSession();
-    if (!session) return null;
+    if (!session) return { error: 'Brak sesji — zaloguj się ponownie.' };
     const res = await fetch(`${SB_URL}/functions/v1/zadarma-balance`, {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* not JSON */ }
+    if (!res.ok) return { error: `HTTP ${res.status}: ${data?.message || text.slice(0, 300) || '(brak treści)'}` };
+    return data;
+  } catch (e) {
+    return { error: String(e) };
   }
 }
 
@@ -924,6 +927,7 @@ async function renderDashboard() {
       <div class="card">
         <h3>Stan konta Zadarma <button class="btn btn-ghost btn-sm" style="margin-left:6px;padding:2px 8px;font-size:11px" onclick="loadZadarmaBalance()">↺</button></h3>
         <div id="zadarma-balance-val" class="big-num"><span class="spinner"></span></div>
+        <div id="zadarma-balance-err" style="font-size:11px;color:var(--danger);margin-top:4px;word-break:break-word"></div>
       </div>
     </div>
   `;
@@ -939,13 +943,16 @@ async function saveSmsCount() {
 
 async function loadZadarmaBalance() {
   const el = document.getElementById('zadarma-balance-val');
+  const errEl = document.getElementById('zadarma-balance-err');
   if (!el) return;
   el.innerHTML = '<span class="spinner"></span>';
+  if (errEl) errEl.textContent = '';
   const data = await fetchZadarmaBalance();
   if (data && data.balance !== undefined) {
     el.innerHTML = `${escHtml(String(data.balance))} <span style="font-size:16px;color:var(--muted)">${escHtml(data.currency || '')}</span>`;
   } else {
-    el.textContent = '—';
+    el.innerHTML = '<span style="font-size:16px;color:var(--danger)">błąd</span>';
+    if (errEl) errEl.textContent = (data && data.error) || 'Nieznany błąd — brak odpowiedzi z zadarma-balance.';
   }
 }
 
