@@ -68,10 +68,19 @@ const info = await zadarmaGet("/v1/info/balance/");
 console.log("Status:", info.status);
 log("", info.body);
 
+// SMS można wysyłać tylko z numerów będących na liście zweryfikowanych nadawców (caller_id)
+// konta — ta lista jest osobna od samej listy wynajętych numerów wirtualnych. To najszybszy
+// sposób, żeby sprawdzić, czy dany numer faktycznie jest uprawniony do wysyłki SMS, zanim
+// w ogóle spróbujemy wysłać (i ewentualnie zapłacimy za nieudaną próbę).
+console.log("\n=== Test 2: lista zweryfikowanych nadawców SMS (caller_id) ===");
+const senderIds = await zadarmaGet("/v1/sms/senderid/");
+console.log("Status:", senderIds.status);
+log("", senderIds.body);
+
 // Test wysyłki SMS — podaj numer docelowy jako 3. argument
 const TO = Deno.args[2];
 if (TO) {
-  console.log(`\n=== Test 2: wysyłka SMS na ${TO} ===`);
+  console.log(`\n=== Test 3: wysyłka SMS na ${TO} ===`);
   const sms = await zadarmaPost("/v1/sms/send/", { number: TO, message: "Test SMS z Zadarma AI Agent", caller_id: "48459569689" });
   console.log("Status:", sms.status);
   log("", sms.body);
