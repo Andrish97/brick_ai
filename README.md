@@ -145,6 +145,8 @@ Cała logika komend żyje w prywatnej Edge Function `assistant-tools`, wywoływa
 Wyniki nawigacji, komunikacji miejskiej i danych kolejowych formatuje wyłącznie endpoint — model nigdy nie tworzy własnego formatu trasy ani rozkładu, co gwarantuje spójność i bezpieczeństwo (żadnych zmyślonych ulic, godzin czy opóźnień).
 
 > **Status modułu kolejowego:** fundament (wyszukiwanie stacji, tablica odjazdów, status pociągu, utrudnienia) jest zaimplementowany, ale nieprzetestowany na żywo — sekret `PKP_API_KEY` czekał na aktywację administratora PKP PLK w momencie wdrożenia tego kodu. Dokładny kształt odpowiedzi JSON API nie był możliwy do zweryfikowania z tego środowiska, więc parsowanie próbuje kilku prawdopodobnych nazw pól i loguje pełną surową odpowiedź przy błędzie (`Directions błąd`-podobny wpis `pkp_error` w Logach) — po pierwszym realnym wywołaniu może wymagać drobnej korekty. Planer połączeń z przesiadkami (`plan_train_journey`) nie jest jeszcze zaimplementowany — to osobny, znacznie większy krok (algorytm earliest-arrival na grafie czasowym), celowo odłożony do czasu zweryfikowania fundamentu na żywych danych.
+>
+> Panel admina → Testy → **Dodatkowe testy → 🚆 Test połączenia PKP** to stały health-check połączenia z API PKP PLK (bez Gemini, bez bazy — bezpośrednie wyszukanie stacji „Katowice”). Jeśli zwróci `PendingActivation`, klucz nadal czeka na ręczną aktywację po stronie PKP PLK — napisz do nich na `pdp-api@plk-sa.pl` z prośbą o sprawdzenie statusu wniosku (deklarowany czas weryfikacji to 3-5 dni roboczych; jeśli minął bez potwierdzenia mailem, wspomnij o tym w wiadomości).
 
 ### Logowanie
 

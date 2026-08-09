@@ -476,8 +476,9 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
   return { kind: "text", text: second.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.", grantedParts };
 }
 
-// TYMCZASOWE — wyłącznie do zweryfikowania aktywacji PKP_API_KEY, przed zbudowaniem
-// właściwego modułu kolejowego. Usunąć razem z przyciskiem w panelu po weryfikacji.
+// Stały health-check połączenia z API PKP PLK — bez Gemini, bez bazy. Widoczny w panelu
+// admina → Testy → Dodatkowe testy. Przydatny nie tylko przy pierwszej aktywacji klucza,
+// ale każdorazowo, gdy trzeba szybko sprawdzić, czy PKP_API_KEY nadal działa.
 async function handlePkpTest(): Promise<Response> {
   const apiKey = Deno.env.get("PKP_API_KEY");
   if (!apiKey) {

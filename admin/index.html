@@ -1662,8 +1662,11 @@ function renderExtraTestsForm() {
   return `
     <div>
       <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
-        <strong>Tymczasowe</strong> — tylko do zweryfikowania aktywacji <code>PKP_API_KEY</code>, usunąć po sprawdzeniu.
-        Bez Gemini, bez bazy — bezpośrednie zapytanie do PKP PLK.
+        Sprawdza połączenie z API Otwarte Dane Kolejowe PKP PLK bezpośrednio (bez Gemini, bez bazy) —
+        wyszukanie stacji „Katowice”. Jeśli zobaczysz <code>PendingActivation</code>, klucz nadal czeka
+        na ręczną aktywację po stronie PKP PLK — napisz do nich na
+        <a href="mailto:pdp-api@plk-sa.pl" style="color:var(--accent2)">pdp-api@plk-sa.pl</a> z prośbą
+        o sprawdzenie statusu wniosku.
       </p>
       <button class="btn btn-ghost btn-sm" onclick="runPkpTest()" ${_pkpTestRunning ? 'disabled' : ''}>
         ${_pkpTestRunning ? 'Testuję…' : '🚆 Test połączenia PKP'}
