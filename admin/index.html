@@ -1664,10 +1664,10 @@ function renderEndpointTestsForm() {
 
     <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
       <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
-        <strong>Tymczasowe</strong> — diagnostyka błędu „401 Not authorized” przy wysyłce SMS.
-        SMS można wysyłać tylko z numerów będących na koncie na liście zweryfikowanych nadawców
-        (osobnej od listy wynajętych numerów wirtualnych) — to sprawdza tę listę bezpośrednio
-        przez API Zadarma, tymi samymi sekretami co realna wysyłka. Usunąć po zdiagnozowaniu.
+        <strong>Tymczasowe</strong> — przyczyna błędu „401 Not authorized” już znaleziona i naprawiona
+        (Zadarma zmieniła nazwę parametru wysyłki z <code>caller_id</code> na <code>sender</code>).
+        To dodatkowe potwierdzenie: sprawdza listę dozwolonych nadawców SMS dla numeru
+        <code>48459569689</code> przez API Zadarma. Usunąć po potwierdzeniu, że wysyłka działa.
       </p>
       <button class="btn btn-ghost btn-sm" onclick="runZadarmaTest()" ${_zadarmaTestRunning ? 'disabled' : ''}>
         ${_zadarmaTestRunning ? 'Testuję…' : '📱 Test nadawców SMS (Zadarma)'}

@@ -72,7 +72,9 @@ function buildAuth(path: string, params: Record<string, string>): string {
 
 async function sendSms(to: string, text: string, from: string): Promise<void> {
   const path = "/v1/sms/send/";
-  const params = { number: to, message: text, caller_id: from };
+  // Aktualna dokumentacja Zadarmy nazywa ten parametr "sender", nie "caller_id" —
+  // stare pole przestało być akceptowane i powodowało 401 Not authorized.
+  const params = { number: to, message: text, sender: from };
   const apiKey = Deno.env.get("ZADARMA_API_KEY") ?? "";
   const apiSecret = Deno.env.get("ZADARMA_API_SECRET") ?? "";
   log("sms_debug", { to, from, msgLen: text.length, keyPresent: !!apiKey, secretPresent: !!apiSecret, keyPrefix: apiKey.slice(0, 4) });
@@ -494,16 +496,16 @@ async function handlePkpTest(): Promise<Response> {
   }
 }
 
-// TYMCZASOWE — diagnostyka błędu "401 Not authorized" przy wysyłce SMS. SMS można wysyłać
-// tylko z numerów (caller_id) będących na koncie na liście zweryfikowanych nadawców — to
-// osobna lista od wynajętych numerów wirtualnych. Sprawdza ją bezpośrednio przez API,
-// używając tych samych sekretów co realna wysyłka. Usunąć razem z przyciskiem w panelu
-// po zdiagnozowaniu problemu.
-async function handleZadarmaTest(): Promise<Response> {
+// TYMCZASOWE — diagnostyka błędu "401 Not authorized" przy wysyłce SMS. Przyczyna już
+// znaleziona i naprawiona w sendSms() (Zadarma zmieniła nazwę parametru z "caller_id" na
+// "sender"); to sprawdza listę dozwolonych nadawców dla podanego numeru jako dodatkowe
+// potwierdzenie. Usunąć razem z przyciskiem w panelu po zweryfikowaniu, że wysyłka działa.
+async function handleZadarmaTest(phones: string): Promise<Response> {
   const path = "/v1/sms/senderid/";
   try {
-    const res = await fetch(`${ZADARMA_API_URL}${path}`, {
-      headers: { Authorization: buildAuth(path, {}) },
+    const params = { phones };
+    const res = await fetch(`${ZADARMA_API_URL}${path}?${new URLSearchParams(params).toString()}`, {
+      headers: { Authorization: buildAuth(path, params) },
     });
     const body = await res.text();
     log("zadarma_test", { status: res.status, bodyPreview: body.slice(0, 500) });
@@ -589,7 +591,7 @@ Deno.serve(async (req: Request) => {
     return await handlePkpTest();
   }
   if (zadarmaTest) {
-    return await handleZadarmaTest();
+    return await handleZadarmaTest(raw.phones || "48459569689");
   }
 
   // Zapisz raw payload do webhook_logs

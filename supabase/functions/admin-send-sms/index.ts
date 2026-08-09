@@ -98,7 +98,8 @@ Deno.serve(async (req: Request) => {
   // Send SMS via Zadarma
   try {
     const path = "/v1/sms/send/";
-    const params = { number: phone, message, caller_id };
+    // Aktualna dokumentacja Zadarmy nazywa ten parametr "sender", nie "caller_id".
+    const params = { number: phone, message, sender: caller_id };
     const res = await fetch(`${ZADARMA_API_URL}${path}`, {
       method: "POST",
       headers: {
