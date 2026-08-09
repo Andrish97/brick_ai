@@ -1677,13 +1677,38 @@ function renderExtraTestsForm() {
 function renderEndpointTestResult(r) {
   const badgeCls = r.status === 'running' ? 'badge-yellow' : r.ok ? 'badge-green' : 'badge-red';
   const badgeLabel = r.status === 'running' ? 'w toku…' : r.ok ? 'OK' : 'błąd';
+  const header = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <strong style="font-size:13px">${escHtml(r.label)}</strong>
+      <span class="badge ${badgeCls}">${badgeLabel}</span>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:4px">&gt; ${escHtml(r.msg)}</div>
+  `;
+
+  // Bateria testów asystenta: zamiast surowego JSON-a od razu pokazujemy samą
+  // odpowiedź SMS, żeby na pierwszy rzut oka było widać czy narzędzie zadziałało —
+  // surowy JSON jest dalej dostępny, ale schowany pod <details>.
+  if (r.status !== 'running' && ('reply' in r || 'closed' in r || 'error' in r)) {
+    let body = '';
+    if (r.error) {
+      body = `<div style="font-size:12px;color:var(--danger);margin-top:8px">${escHtml(r.error)}</div>`;
+    } else if (r.closed) {
+      body = `<div style="font-size:12px;color:var(--muted);margin-top:8px;font-style:italic">— rozmowa zamknięta, brak odpowiedzi SMS —</div>`;
+    } else if (r.reply) {
+      body = `<div style="font-size:13px;margin-top:8px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(r.reply)}</div>`;
+    }
+    const meta = `<div style="font-size:11px;color:var(--muted);margin-top:6px">HTTP ${r.httpStatus ?? '?'}${r.parts != null ? ` · ${r.parts} część(i) SMS` : ''}</div>`;
+    const raw = r.raw
+      ? `<details style="margin-top:6px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">surowa odpowiedź JSON</summary><pre style="font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(r.raw)}</pre></details>`
+      : '';
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">${header}${body}${meta}${raw}</div>`;
+  }
+
+  // Format legacy (surowy dump) — używany przez test PKP w „Dodatkowe testy”,
+  // gdzie surowa odpowiedź API jest samym celem testu.
   return `
     <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-        <strong style="font-size:13px">${escHtml(r.label)}</strong>
-        <span class="badge ${badgeCls}">${badgeLabel}</span>
-      </div>
-      <div style="font-size:12px;color:var(--muted);margin-top:4px">&gt; ${escHtml(r.msg)}</div>
+      ${header}
       ${r.data ? `<pre style="font-size:11px;margin-top:8px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(r.data)}</pre>` : ''}
     </div>
   `;
@@ -1696,7 +1721,7 @@ function _renderEndpointResultsOnly() {
 
 async function runEndpointTests() {
   _endpointTestsRunning = true;
-  _endpointTestResults = ENDPOINT_TEST_CASES.map(c => ({ label: c.label, msg: c.msg, status: 'running', ok: null, data: null }));
+  _endpointTestResults = ENDPOINT_TEST_CASES.map(c => ({ label: c.label, msg: c.msg, status: 'running', ok: null }));
   renderSmsContent();
 
   for (let i = 0; i < ENDPOINT_TEST_CASES.length; i++) {
@@ -1708,9 +1733,20 @@ async function runEndpointTests() {
         body: JSON.stringify({ event: 'incoming_sms', msg: c.msg }),
       });
       const text = await res.text();
-      _endpointTestResults[i] = { label: c.label, msg: c.msg, status: 'done', ok: res.ok, data: `HTTP ${res.status}\n${text}` };
+      let json = null;
+      try { json = JSON.parse(text); } catch {}
+      const ok = res.ok && json?.ok !== false;
+      _endpointTestResults[i] = {
+        label: c.label, msg: c.msg, status: 'done', ok,
+        httpStatus: res.status,
+        reply: json?.reply ?? null,
+        closed: !!json?.closed,
+        parts: json?.parts ?? null,
+        error: !ok ? (json?.error || text) : null,
+        raw: text,
+      };
     } catch (e) {
-      _endpointTestResults[i] = { label: c.label, msg: c.msg, status: 'done', ok: false, data: String(e) };
+      _endpointTestResults[i] = { label: c.label, msg: c.msg, status: 'done', ok: false, httpStatus: null, reply: null, closed: false, parts: null, error: String(e), raw: null };
     }
     _renderEndpointResultsOnly();
   }
@@ -1719,7 +1755,6 @@ async function runEndpointTests() {
   renderSmsContent();
 }
 
-// Tymczasowe — usunąć razem z sekcją w renderEndpointTestsForm po weryfikacji PKP_API_KEY.
 async function runPkpTest() {
   _pkpTestRunning = true;
   _pkpTestResult = { label: 'Test połączenia PKP', msg: 'GET /dictionaries/stations?search=Katowice', status: 'running', ok: null, data: null };
