@@ -1464,8 +1464,10 @@ let _endpointTestsRunning = false;
 let _pkpTestResult = null;      // tymczasowe — test aktywacji PKP_API_KEY
 let _pkpTestRunning = false;
 
-// Jedno zdanie na narzędzie — dry_run=1, więc zero wysłanych SMS-ów.
+// Jedno zdanie na narzędzie — endpoint_test=1, więc zero wysłanych SMS-ów i zero zapisów w bazie.
 // Ten sam zestaw co scripts/test-endpoints.ts, żeby wynik był porównywalny.
+// Testy PKP (resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions)
+// celowo tu nie są — mają osobny, stały test w zakładce „Dodatkowe testy”.
 const ENDPOINT_TEST_CASES = [
   { label: 'Zwykłe pytanie (bez narzędzi)', msg: 'jaka jest stolica Francji?' },
   { label: 'get_user_profile', msg: 'jakie mam ustawione imię w tym systemie?' },
@@ -1473,10 +1475,6 @@ const ENDPOINT_TEST_CASES = [
   { label: 'get_directions (pieszo, dom → praca)', msg: 'poprowadz mnie pieszo z domu do pracy' },
   { label: 'get_transit (dom → praca)', msg: 'jak dojade komunikacja miejska z domu do pracy?' },
   { label: 'get_fastest_arrival', msg: 'o ktorej najszybciej bede w pracy jesli wyjde teraz z domu?' },
-  { label: 'resolve_rail_station', msg: 'z jakiej stacji kolejowej moge pojechac z domu?' },
-  { label: 'get_train_station_board', msg: 'kiedy najblizszy pociag z Katowic?' },
-  { label: 'get_train_status', msg: 'czy pociag IC 8312 ma opoznienie?' },
-  { label: 'get_train_disruptions', msg: 'czy sa utrudnienia na kolei miedzy Katowicami a Krakowem?' },
   { label: 'close_conversation (intencja, nie słowo-klucz)', msg: 'dzieki, to na razie wszystko, nie musisz juz odpisywac, konczymy' },
 ];
 

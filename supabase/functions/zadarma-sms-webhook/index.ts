@@ -19,14 +19,34 @@ function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
 }
 
+// Gemini z narzędziem google_search potrafi wstawić w tekst znaczniki cytowań
+// w nawiasach kwadratowych, np. "[1]", "[2, 3]", "[1.1.1, 1.2]" — w SMS-ie są
+// bezużyteczne (nie ma linków źródłowych do pokazania), więc usuwamy je od razu,
+// zanim tekst trafi do smartTrim/chunkForSms. Robimy to przed obcinaniem, żeby
+// obcięcie do limitu znaków nigdy nie ucięło markera w połowie i nie zostawiło
+// śmieciowego "[1.1.1, 1.1." na końcu wiadomości.
+function stripCitations(text: string): string {
+  return text
+    .replace(/\s*\[\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*\]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// Bezpiecznik: gdyby mimo wszystko na końcu tekstu został niedomknięty nawias
+// (np. inny, nieprzewidziany format markera ucięty przez model albo przez
+// wcześniejsze etapy), utnij go — samo "[1.1.1, 1.1." nie jest sensowną treścią.
+function stripTrailingBracketFragment(text: string): string {
+  return text.replace(/\s*\[[^\]]*$/, "").trim();
+}
+
 function smartTrim(text: string, max: number): string {
-  if (text.length <= max) return text;
+  if (text.length <= max) return stripTrailingBracketFragment(text);
   const cut = text.slice(0, max);
   const lastPunct = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"), cut.lastIndexOf("\n"));
-  if (lastPunct > max * 0.6) return cut.slice(0, lastPunct + 1).trim();
+  if (lastPunct > max * 0.6) return stripTrailingBracketFragment(cut.slice(0, lastPunct + 1).trim());
   const lastSpace = cut.lastIndexOf(" ");
-  if (lastSpace > max * 0.6) return cut.slice(0, lastSpace).trim();
-  return cut.trim();
+  if (lastSpace > max * 0.6) return stripTrailingBracketFragment(cut.slice(0, lastSpace).trim());
+  return stripTrailingBracketFragment(cut.trim());
 }
 
 function sanitizeForSms(text: string): string {
@@ -523,7 +543,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Prom
     return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripUrls(outcome.text));
+  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripCitations(stripUrls(outcome.text)));
   let maxParts: 1 | 3 | 4 | 6 = 1;
   if (outcome.kind === "route") maxParts = 6;
   else if (outcome.kind === "text" && outcome.grantedParts) maxParts = outcome.grantedParts;
@@ -752,7 +772,7 @@ Deno.serve(async (req: Request) => {
     log("reply_sms_parts_granted", { convId, convCode: convCodeFinal, granted: replySmsParts });
   }
 
-  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripUrls(outcome.text));
+  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripCitations(stripUrls(outcome.text)));
   const maxParts = outcome.kind === "route" ? 6 : replySmsParts;
   const parts = chunkForSms(cleanReply, maxParts);
 

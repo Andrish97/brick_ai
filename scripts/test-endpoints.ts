@@ -32,12 +32,12 @@ const cases: Case[] = [
   { label: "get_directions (pieszo, dom->praca)", msg: "poprowadz mnie pieszo z domu do pracy" },
   { label: "get_transit (dom->praca)", msg: "jak dojade komunikacja miejska z domu do pracy?" },
   { label: "get_fastest_arrival", msg: "o ktorej najszybciej bede w pracy jesli wyjde teraz z domu?" },
-  { label: "resolve_rail_station", msg: "z jakiej stacji kolejowej moge pojechac z domu?" },
-  { label: "get_train_station_board", msg: "kiedy najblizszy pociag z Katowic?" },
-  { label: "get_train_status", msg: "czy pociag IC 8312 ma opoznienie?" },
-  { label: "get_train_disruptions", msg: "czy sa utrudnienia na kolei miedzy Katowicami a Krakowem?" },
   { label: "close_conversation (intencja, nie slowo-klucz)", msg: "dzieki, to na razie wszystko, nie musisz juz odpisywac, konczymy" },
 ];
+// Testy PKP (resolve_rail_station, get_train_station_board, get_train_status,
+// get_train_disruptions) celowo tu nie są — mają osobny, stały test w panelu
+// admina (zakładka „Dodatkowe testy”), bo dopóki PKP_API_KEY czeka na aktywację,
+// i tak zawsze failują i tylko zaciemniają wynik testu core-narzędzi asystenta.
 
 async function runCase(c: Case): Promise<void> {
   const res = await fetch(WEBHOOK_URL, {
