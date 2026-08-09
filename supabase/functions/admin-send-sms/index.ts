@@ -118,6 +118,21 @@ Deno.serve(async (req: Request) => {
     }
 
     const data = await res.json();
+
+    // Licznik "SMS wysłanych" na dashboardzie liczy tylko realnie wysłane SMS-y —
+    // ta ścieżka (ręczna wysyłka z panelu) omija webhook, więc trzeba doliczyć tu.
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    fetch(`${supabaseUrl}/rest/v1/rpc/increment_sms_count`, {
+      method: "POST",
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    }).catch(() => {});
+
     return new Response(JSON.stringify({ ok: true, zadarma: data }), {
       status: 200,
       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
