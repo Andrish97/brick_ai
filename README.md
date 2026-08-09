@@ -312,7 +312,6 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 │   ├── migrations/                 # Migracje SQL
 │   └── config.toml
 ├── scripts/
-│   ├── test-zadarma.ts             # Lokalny test API Zadarma
 │   └── test-endpoints.ts           # Testuje wszystkie narzędzia asystenta (endpoint_test=1) — bez SMS-ów i bez danych w bazie
 └── .github/workflows/
     ├── deploy.yml                  # Deploy Edge Functions + migracje
