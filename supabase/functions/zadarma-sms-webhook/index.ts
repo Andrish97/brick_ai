@@ -496,26 +496,6 @@ async function handlePkpTest(): Promise<Response> {
   }
 }
 
-// TYMCZASOWE — diagnostyka błędu "401 Not authorized" przy wysyłce SMS. Przyczyna już
-// znaleziona i naprawiona w sendSms() (Zadarma zmieniła nazwę parametru z "caller_id" na
-// "sender"); to sprawdza listę dozwolonych nadawców dla podanego numeru jako dodatkowe
-// potwierdzenie. Usunąć razem z przyciskiem w panelu po zweryfikowaniu, że wysyłka działa.
-async function handleZadarmaTest(phones: string): Promise<Response> {
-  const path = "/v1/sms/senderid/";
-  try {
-    const params = { phones };
-    const res = await fetch(`${ZADARMA_API_URL}${path}?${new URLSearchParams(params).toString()}`, {
-      headers: { Authorization: buildAuth(path, params) },
-    });
-    const body = await res.text();
-    log("zadarma_test", { status: res.status, bodyPreview: body.slice(0, 500) });
-    return new Response(JSON.stringify({ ok: res.ok, status: res.status, body: body.slice(0, 2000) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  } catch (e) {
-    log("zadarma_test", { exception: String(e) });
-    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  }
-}
-
 // Sentinel user_id rozpoznawany też przez assistant-tools — musi być identyczny w obu miejscach.
 const TEST_MODE_USER_ID = "00000000-0000-0000-0000-000000000000";
 
@@ -568,7 +548,6 @@ Deno.serve(async (req: Request) => {
   const dryRun = new URL(req.url).searchParams.get("dry_run") === "1";
   const testMode = new URL(req.url).searchParams.get("endpoint_test") === "1";
   const pkpTest = new URL(req.url).searchParams.get("pkp_test") === "1";
-  const zadarmaTest = new URL(req.url).searchParams.get("zadarma_test") === "1";
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: CORS });
 
   let raw: Record<string, string>;
@@ -589,9 +568,6 @@ Deno.serve(async (req: Request) => {
 
   if (pkpTest) {
     return await handlePkpTest();
-  }
-  if (zadarmaTest) {
-    return await handleZadarmaTest(raw.phones || "48459569689");
   }
 
   // Zapisz raw payload do webhook_logs
