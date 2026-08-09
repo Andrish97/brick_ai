@@ -1463,6 +1463,8 @@ let _endpointTestResults = [];  // [{label, msg, status, ok, data}]
 let _endpointTestsRunning = false;
 let _pkpTestResult = null;      // tymczasowe — test aktywacji PKP_API_KEY
 let _pkpTestRunning = false;
+let _zadarmaTestResult = null;  // tymczasowe — test listy zweryfikowanych nadawców SMS
+let _zadarmaTestRunning = false;
 
 // Jedno zdanie na narzędzie — dry_run=1, więc zero wysłanych SMS-ów.
 // Ten sam zestaw co scripts/test-endpoints.ts, żeby wynik był porównywalny.
@@ -1659,6 +1661,19 @@ function renderEndpointTestsForm() {
       </button>
       <div id="pkp-test-result" style="margin-top:10px">${_pkpTestResult ? renderEndpointTestResult(_pkpTestResult) : ''}</div>
     </div>
+
+    <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+      <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
+        <strong>Tymczasowe</strong> — diagnostyka błędu „401 Not authorized” przy wysyłce SMS.
+        SMS można wysyłać tylko z numerów będących na koncie na liście zweryfikowanych nadawców
+        (osobnej od listy wynajętych numerów wirtualnych) — to sprawdza tę listę bezpośrednio
+        przez API Zadarma, tymi samymi sekretami co realna wysyłka. Usunąć po zdiagnozowaniu.
+      </p>
+      <button class="btn btn-ghost btn-sm" onclick="runZadarmaTest()" ${_zadarmaTestRunning ? 'disabled' : ''}>
+        ${_zadarmaTestRunning ? 'Testuję…' : '📱 Test nadawców SMS (Zadarma)'}
+      </button>
+      <div id="zadarma-test-result" style="margin-top:10px">${_zadarmaTestResult ? renderEndpointTestResult(_zadarmaTestResult) : ''}</div>
+    </div>
   `;
 }
 
@@ -1726,6 +1741,28 @@ async function runPkpTest() {
   }
 
   _pkpTestRunning = false;
+  renderSmsContent();
+}
+
+// Tymczasowe — usunąć razem z sekcją w renderEndpointTestsForm po zdiagnozowaniu 401 SMS.
+async function runZadarmaTest() {
+  _zadarmaTestRunning = true;
+  _zadarmaTestResult = { label: 'Test nadawców SMS (Zadarma)', msg: 'GET /v1/sms/senderid/', status: 'running', ok: null, data: null };
+  renderSmsContent();
+
+  try {
+    const res = await fetch(`${SB_URL}/functions/v1/zadarma-sms-webhook?zadarma_test=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const text = await res.text();
+    _zadarmaTestResult = { label: 'Test nadawców SMS (Zadarma)', msg: 'GET /v1/sms/senderid/', status: 'done', ok: res.ok, data: `HTTP ${res.status}\n${text}` };
+  } catch (e) {
+    _zadarmaTestResult = { label: 'Test nadawców SMS (Zadarma)', msg: 'GET /v1/sms/senderid/', status: 'done', ok: false, data: String(e) };
+  }
+
+  _zadarmaTestRunning = false;
   renderSmsContent();
 }
 
