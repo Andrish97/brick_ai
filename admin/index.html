@@ -404,6 +404,9 @@
       <div class="nav-item" onclick="showPage('logs')" id="nav-logs">
         <span class="nav-icon">📋</span> Logi
       </div>
+      <div class="nav-item" onclick="showPage('saldo')" id="nav-saldo">
+        <span class="nav-icon">💰</span> Saldo
+      </div>
       <div class="nav-item" onclick="showPage('prompt')" id="nav-prompt">
         <span class="nav-icon">🧠</span> Prompt
       </div>
@@ -527,6 +530,7 @@ function showPage(page) {
     'send-sms':      renderSmsTools,
     'sms-tools':     renderSmsTools,
     logs:            renderLogs,
+    saldo:           renderBalancePage,
     prompt:          renderPrompt,
     settings:        renderSettings,
   };
@@ -853,6 +857,84 @@ async function fetchZadarmaBalance() {
   }
 }
 
+// ══════════════════════════════════════════════════════
+//  MONITORING SALDA — dopasowanie odroczone (nie "przed/po" na sztywno)
+// ══════════════════════════════════════════════════════
+//
+// Jedyna aktywność na koncie Zadarma to Brick AI, więc każda zmiana salda ma
+// dokładnie jedno z dwóch źródeł: albo wysyłkę SMS-a z sms_sends, albo coś
+// zewnętrznego (doładowanie/opłata za numer). Nie próbujemy przypisać kosztu
+// w momencie wysyłki (Zadarma może zaksięgować obciążenie z opóźnieniem) —
+// zamiast tego każda wysyłka czeka jako "pending", aż w strumieniu obserwacji
+// salda (balance_observations) pojawi się pasujący spadek, i dopiero wtedy
+// dostaje przypisany koszt. Nic nigdy nie ginie i nic nigdy nie jest fałszywie
+// wyzerowane — najwyżej dłużej czeka na dopasowanie.
+function fmtMoney(n) {
+  return (Math.round(n * 100) / 100).toFixed(2);
+}
+
+function computeBalanceTimeline(observations, sends) {
+  const obs = [...observations].sort((a, b) => new Date(a.observed_at) - new Date(b.observed_at));
+  const sendsSorted = [...sends].sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at));
+
+  let sendIdx = 0;
+  let pending = []; // wysyłki czekające na dopasowanie do spadku salda
+  let lastBalance = null;
+  const events = []; // { at, kind: 'sms'|'topup'|'anomaly', ... }
+
+  for (const o of obs) {
+    while (sendIdx < sendsSorted.length && new Date(sendsSorted[sendIdx].sent_at) <= new Date(o.observed_at)) {
+      pending.push(sendsSorted[sendIdx]);
+      sendIdx++;
+    }
+    const pendingParts = pending.reduce((s, p) => s + p.parts_sent, 0);
+
+    if (lastBalance !== null) {
+      const diff = o.balance - lastBalance; // dodatnie = wzrost (doładowanie), ujemne = spadek (wydatek)
+      if (Math.abs(diff) >= 0.01) {
+        if (diff < 0 && pendingParts > 0) {
+          const costPerPart = -diff / pendingParts;
+          for (const s of pending) {
+            events.push({
+              at: s.sent_at, kind: 'sms', parts: s.parts_sent, source: s.source,
+              cost: costPerPart * s.parts_sent, shared: pending.length > 1,
+            });
+          }
+          pending = [];
+        } else if (diff > 0) {
+          events.push({ at: o.observed_at, kind: 'topup', amount: diff });
+        } else {
+          events.push({ at: o.observed_at, kind: 'anomaly', amount: diff });
+        }
+      }
+      // diff ~ 0 mimo oczekujących wysyłek → księgowanie jeszcze nie doszło,
+      // wysyłki zostają w "pending" do najbliższej kolejnej obserwacji.
+    }
+    lastBalance = o.balance;
+  }
+
+  // Oznacz nietypowo drogie dopasowania (prawdopodobnie zbiegły się z opłatą
+  // cykliczną w tym samym oknie) — tylko etykieta do UI, nie zmienia liczb.
+  const clean = events.filter(e => e.kind === 'sms' && !e.shared);
+  const perPartCosts = clean.map(e => e.cost / e.parts).sort((a, b) => a - b);
+  const median = perPartCosts.length ? perPartCosts[Math.floor(perPartCosts.length / 2)] : null;
+  for (const e of events) {
+    if (e.kind === 'sms' && median && (e.cost / e.parts) > median * 3) e.flagged = true;
+  }
+
+  events.sort((a, b) => new Date(a.at) - new Date(b.at));
+  const stillPending = pending.map(s => ({ at: s.sent_at, parts: s.parts_sent, source: s.source }));
+  return { events, pending: stillPending, lastBalance, lastObservedAt: obs.length ? obs[obs.length - 1].observed_at : null };
+}
+
+async function fetchBalanceTimeline() {
+  const [{ data: obsRows }, { data: sendRows }] = await Promise.all([
+    sb.from('balance_observations').select('observed_at,balance,currency').order('observed_at', { ascending: false }).limit(500),
+    sb.from('sms_sends').select('sent_at,parts_sent,source').order('sent_at', { ascending: false }).limit(500),
+  ]);
+  return computeBalanceTimeline((obsRows || []).reverse(), (sendRows || []).reverse());
+}
+
 async function renderDashboard() {
   const [
     { count: uCount },
@@ -861,6 +943,7 @@ async function renderDashboard() {
     { data: settingsRows },
     { data: recentLogs },
     { data: recentConvs },
+    timeline,
   ] = await Promise.all([
     sb.from('users').select('id', { count: 'exact', head: true }).eq('active', true),
     sb.from('conversations').select('id', { count: 'exact', head: true }).eq('status', 'active'),
@@ -872,12 +955,20 @@ async function renderDashboard() {
       .eq('status', 'active')
       .order('last_activity_at', { ascending: false })
       .limit(8),
+    fetchBalanceTimeline(),
   ]);
 
   const settings = Object.fromEntries((settingsRows || []).map(r => [r.key, r.value]));
-  const smsCount = parseInt(settings['sms_count'] || '0', 10);
-  const smsPrice = parseFloat(settings['sms_price'] || '0.18');
-  const cost = (smsCount * smsPrice).toFixed(2);
+  // sms_count = zamrożony punkt odniesienia sprzed uruchomienia monitoringu (dla
+  // świeżej instalacji to po prostu 0) — reszta liczona dokładnie z sms_sends.
+  const legacyOffset = parseInt(settings['sms_count'] || '0', 10);
+  const smsEvents = timeline.events.filter(e => e.kind === 'sms');
+  const pricedParts = smsEvents.reduce((s, e) => s + e.parts, 0);
+  const pendingParts = timeline.pending.reduce((s, p) => s + p.parts, 0);
+  const smsCount = legacyOffset + pricedParts + pendingParts;
+  const totalCost = smsEvents.reduce((s, e) => s + e.cost, 0);
+  const avgCostPerPart = pricedParts ? totalCost / pricedParts : null;
+  const anomalyCount = timeline.events.filter(e => e.kind === 'anomaly' || e.kind === 'topup').length;
 
   const logRows = (recentLogs || []).map(l => {
     const style = LOG_TYPE_STYLE[l.type] || { label: l.type, cls: 'badge-yellow' };
@@ -919,10 +1010,17 @@ async function renderDashboard() {
       <div class="card">
         <h3>SMS wysłanych</h3>
         <div class="big-num">${smsCount}</div>
+        ${pendingParts ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">${pendingParts} czeka na potwierdzenie kosztu</div>` : ''}
       </div>
       <div class="card">
-        <h3>Koszt (SMS × ${smsPrice.toFixed(2)} PLN)</h3>
-        <div class="big-num">${cost} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
+        <h3>Koszt SMS-ów (rzeczywisty)</h3>
+        <div class="big-num">${fmtMoney(totalCost)} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">od uruchomienia monitoringu salda</div>
+      </div>
+      <div class="card">
+        <h3>Śr. cena / SMS</h3>
+        <div class="big-num">${avgCostPerPart !== null ? fmtMoney(avgCostPerPart) : '—'} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
+        ${anomalyCount ? `<div style="font-size:11px;color:var(--warning);margin-top:4px">${anomalyCount} zdarzeń poza SMS-ami — <a href="#" onclick="showPage('saldo');return false" style="color:inherit;text-decoration:underline">zobacz Saldo</a></div>` : ''}
       </div>
       <div class="card">
         <h3>Stan konta Zadarma <button class="btn btn-ghost btn-sm" style="margin-left:6px;padding:2px 8px;font-size:11px" onclick="loadZadarmaBalance()">↺</button></h3>
@@ -935,10 +1033,159 @@ async function renderDashboard() {
   loadZadarmaBalance();
 }
 
-async function saveSmsCount() {
-  const val = document.getElementById('sms-count-input').value;
-  await sb.from('settings').upsert({ key: 'sms_count', value: String(parseInt(val, 10) || 0), updated_at: new Date().toISOString() });
-  renderDashboard();
+// ══════════════════════════════════════════════════════
+//  PAGE: SALDO
+// ══════════════════════════════════════════════════════
+function balanceEventBadge(kind) {
+  if (kind === 'topup') return { cls: 'badge-green', label: 'Doładowanie' };
+  if (kind === 'anomaly') return { cls: 'badge-red', label: 'Nietypowy spadek' };
+  return { cls: 'badge-yellow', label: 'Oczekuje' };
+}
+
+function renderBalanceChart(observations, events) {
+  const width = 720, height = 220, padL = 46, padR = 16, padT = 16, padB = 28;
+  const points = observations.map(o => ({ at: new Date(o.observed_at).getTime(), balance: o.balance }));
+  if (points.length < 2) {
+    return `<div style="color:var(--muted);font-size:13px;padding:24px 0;text-align:center">Za mało danych do wykresu — potrzeba co najmniej 2 obserwacji salda.</div>`;
+  }
+
+  const minAt = points[0].at, maxAt = points[points.length - 1].at;
+  const balances = points.map(p => p.balance);
+  const minBal = Math.min(...balances), maxBal = Math.max(...balances);
+  const balPad = Math.max((maxBal - minBal) * 0.12, 0.5);
+  const yMin = minBal - balPad, yMax = maxBal + balPad;
+
+  const x = (at) => padL + (maxAt === minAt ? 0 : (at - minAt) / (maxAt - minAt)) * (width - padL - padR);
+  const y = (bal) => padT + (1 - (bal - yMin) / (yMax - yMin)) * (height - padT - padB);
+
+  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.at).toFixed(1)},${y(p.balance).toFixed(1)}`).join(' ');
+
+  // Gridlines + etykiety osi Y (zaokrąglone do rozsądnych wartości)
+  const yTicks = 4;
+  const gridLines = [];
+  for (let i = 0; i <= yTicks; i++) {
+    const val = yMin + (yMax - yMin) * (i / yTicks);
+    const yy = y(val);
+    gridLines.push(`<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${width - padR}" y2="${yy.toFixed(1)}" stroke="var(--border)" stroke-width="1" />`);
+    gridLines.push(`<text x="${padL - 8}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--muted)">${val.toFixed(1)}</text>`);
+  }
+  const xLabelStart = new Date(minAt).toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit' });
+  const xLabelEnd = new Date(maxAt).toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit' });
+
+  const eventByTime = {};
+  for (const e of events) {
+    if (e.kind === 'topup' || e.kind === 'anomaly') eventByTime[new Date(e.at).getTime()] = e;
+  }
+
+  const dots = points.map((p) => {
+    const nearestEvent = Object.keys(eventByTime).find(t => Math.abs(t - p.at) < 60 * 60 * 1000);
+    const ev = nearestEvent ? eventByTime[nearestEvent] : null;
+    const color = ev ? (ev.kind === 'topup' ? 'var(--success)' : 'var(--danger)') : 'var(--accent2)';
+    const r = ev ? 6 : 4;
+    const label = ev
+      ? `${ev.kind === 'topup' ? 'Doładowanie' : 'Nietypowy spadek'}: ${fmtMoney(Math.abs(ev.amount))} PLN — ${fmtDate(p.at ? new Date(p.at).toISOString() : ev.at)}`
+      : `Saldo: ${fmtMoney(p.balance)} PLN — ${fmtDate(new Date(p.at).toISOString())}`;
+    return `
+      <circle cx="${x(p.at).toFixed(1)}" cy="${y(p.balance).toFixed(1)}" r="${r + 2}" fill="var(--bg)" />
+      <circle cx="${x(p.at).toFixed(1)}" cy="${y(p.balance).toFixed(1)}" r="${r}" fill="${color}">
+        <title>${escHtml(label)}</title>
+      </circle>
+    `;
+  }).join('');
+
+  return `
+    <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;max-width:${width}px" role="img" aria-label="Wykres salda w czasie">
+      ${gridLines.join('')}
+      <path d="${linePath}" fill="none" stroke="var(--accent2)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+      ${dots}
+      <text x="${padL}" y="${height - 6}" font-size="10" fill="var(--muted)">${xLabelStart}</text>
+      <text x="${width - padR}" y="${height - 6}" text-anchor="end" font-size="10" fill="var(--muted)">${xLabelEnd}</text>
+    </svg>
+    <div style="display:flex;gap:16px;margin-top:8px;font-size:11px;color:var(--muted)">
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent2);margin-right:4px"></span>Saldo</span>
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:4px"></span>Doładowanie</span>
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:4px"></span>Nietypowy spadek</span>
+    </div>
+  `;
+}
+
+async function renderBalancePage() {
+  document.getElementById('content').innerHTML = '<p style="color:var(--muted);padding:20px">Ładowanie...</p>';
+
+  const [{ data: obsRows }, timeline] = await Promise.all([
+    sb.from('balance_observations').select('observed_at,balance,currency').order('observed_at', { ascending: true }).limit(500),
+    fetchBalanceTimeline(),
+  ]);
+
+  const smsEvents = timeline.events.filter(e => e.kind === 'sms');
+  const totalCost = smsEvents.reduce((s, e) => s + e.cost, 0);
+  const pricedParts = smsEvents.reduce((s, e) => s + e.parts, 0);
+  const avgCostPerPart = pricedParts ? totalCost / pricedParts : null;
+
+  const historyRows = [
+    ...timeline.events.filter(e => e.kind !== 'sms').map(e => ({ ...e, sortAt: e.at })),
+    ...smsEvents.map(e => ({ ...e, sortAt: e.at })),
+    ...timeline.pending.map(p => ({ kind: 'pending', ...p, sortAt: p.at })),
+  ].sort((a, b) => new Date(b.sortAt) - new Date(a.sortAt));
+
+  const historyHtml = historyRows.length ? historyRows.map(r => {
+    if (r.kind === 'sms') {
+      return `
+        <div class="dash-row">
+          <span class="badge badge-yellow">SMS</span>
+          <span style="flex:1;color:var(--text)">${r.parts} część(i) · ${escHtml(r.source)} — ${fmtMoney(r.cost)} PLN${r.shared ? ' <span style="color:var(--muted)">(dzielone z inną wysyłką w tym oknie)</span>' : ''}${r.flagged ? ' <span style="color:var(--warning)">⚠ nietypowo wysoki koszt</span>' : ''}</span>
+          <span class="dash-time">${fmtDate(r.at)}</span>
+        </div>`;
+    }
+    if (r.kind === 'pending') {
+      return `
+        <div class="dash-row">
+          <span class="badge badge-yellow">Oczekuje</span>
+          <span style="flex:1;color:var(--text)">${r.parts} część(i) · ${escHtml(r.source)} — koszt jeszcze niepotwierdzony</span>
+          <span class="dash-time">${fmtDate(r.at)}</span>
+        </div>`;
+    }
+    const badge = balanceEventBadge(r.kind);
+    return `
+      <div class="dash-row">
+        <span class="badge ${badge.cls}">${badge.label}</span>
+        <span style="flex:1;color:var(--text)">${fmtMoney(Math.abs(r.amount))} PLN</span>
+        <span class="dash-time">${fmtDate(r.at)}</span>
+      </div>`;
+  }).join('') : '<div style="color:var(--muted);font-size:13px;padding:8px 0">Brak jeszcze żadnych obserwacji.</div>';
+
+  document.getElementById('content').innerHTML = `
+    <div class="page-header">
+      <h1>Saldo</h1>
+      <p>Monitoring salda Zadarma — koszt SMS-ów liczony z realnych obserwacji, nie z założonej ceny.</p>
+    </div>
+    <div class="stat-grid">
+      <div class="card">
+        <h3>Koszt SMS-ów (rzeczywisty)</h3>
+        <div class="big-num">${fmtMoney(totalCost)} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
+      </div>
+      <div class="card">
+        <h3>Śr. cena / SMS</h3>
+        <div class="big-num">${avgCostPerPart !== null ? fmtMoney(avgCostPerPart) : '—'} <span style="font-size:16px;color:var(--muted)">PLN</span></div>
+      </div>
+      <div class="card">
+        <h3>Oczekuje na potwierdzenie</h3>
+        <div class="big-num">${timeline.pending.reduce((s, p) => s + p.parts, 0)}</div>
+      </div>
+      <div class="card">
+        <h3>Zdarzenia poza SMS-ami</h3>
+        <div class="big-num">${timeline.events.filter(e => e.kind === 'anomaly' || e.kind === 'topup').length}</div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Saldo w czasie</h3>
+      ${renderBalanceChart(obsRows || [], timeline.events)}
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Historia</h3>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">${historyHtml}</div>
+    </div>
+  `;
 }
 
 async function loadZadarmaBalance() {
@@ -2132,14 +2379,17 @@ async function saveCustomPrompt() {
 //  PAGE: USTAWIENIA
 // ══════════════════════════════════════════════════════
 const SETTING_LABELS = {
-  sms_count:              'SMS wysłanych',
-  sms_price:              'Cena za SMS (PLN)',
   system_prompt_default:  'Prompt systemowy (własny)',
   max_reply_sms_parts:    'Limit SMS-ów odpowiedzi rozszerzonej (1, 3 lub 4)',
 };
-// Keys hidden from Settings UI (managed elsewhere)
+// Keys hidden from Settings UI (managed elsewhere).
+// sms_count: zamrożony punkt odniesienia sprzed monitoringu salda — edycja ręczna
+// wprowadzałaby z powrotem dokładnie ten rozjazd, który monitoring ma eliminować.
+// sms_price: nieużywane — koszt liczony teraz z rzeczywistych obserwacji (patrz Saldo).
 const SETTING_HIDDEN = new Set([
   'zadarma_caller_id',
+  'sms_count',
+  'sms_price',
 ]);
 
 async function renderSettings() {

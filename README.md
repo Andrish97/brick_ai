@@ -219,7 +219,8 @@ supabase secrets set \
   GEMINI_API_KEY='...' \
   SUPABASE_ANON_KEY='...' \
   SETUP_SECRET='...' \
-  ASSISTANT_TOOLS_SECRET='...'
+  ASSISTANT_TOOLS_SECRET='...' \
+  INTERNAL_SECRET='...'
 ```
 
 > Sekrety ustawione w jednym miejscu działają dla wszystkich Edge Functions w projekcie.
@@ -232,6 +233,7 @@ supabase secrets set \
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
 | `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
 | `ASSISTANT_TOOLS_SECRET` | Dowolny losowy string — autoryzuje wywołania webhooka do `assistant-tools`. Jeśli pominięty, funkcja spada na `SUPABASE_SERVICE_ROLE_KEY`. |
+| `INTERNAL_SECRET` | Dowolny losowy string (może być inny niż `SETUP_SECRET`, ale nie musi) — autoryzuje `zadarma-balance-snapshot`, wywoływaną przez cron w bazie, nie przez sesję admina. Ta sama wartość musi też trafić do Supabase Vault — patrz sekcja **Monitoring salda** niżej. |
 | `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Library → włącz **Directions API** (to legacy API, osobne od nowszego Routes API — trzeba je włączyć jawnie, samo posiadanie klucza z Routes API nie wystarczy, inaczej dostaniesz `REQUEST_DENIED`) → Credentials → Create API Key — wymagany do nawigacji i komunikacji miejskiej |
 | `PKP_API_KEY` | (opcjonalny) [pdp-api.plk-sa.pl](https://pdp-api.plk-sa.pl/) → wniosek o klucz API Otwarte Dane Kolejowe PKP PLK. Klucz jest widoczny od razu, ale **nieaktywny** do czasu ręcznej weryfikacji administratora (deklarowane 3-5 dni roboczych) — sprawdź aktywację zapytaniem do `/dictionaries/stations`, błąd `PendingActivation` oznacza brak aktywacji. Wymagany do danych kolejowych. |
 
@@ -293,6 +295,26 @@ Lub przez Supabase → SQL Editor:
 insert into users (code, phone_number) values ('1234', '48573311779');
 ```
 
+### 9. Monitoring salda (jeden krok ręczny w Vault)
+
+Panel admina → **Saldo** pokazuje rzeczywisty koszt SMS-ów liczony z obserwacji salda Zadarma, nie z założonej ceny. Mechanizm:
+
+- **`sms_sends`** — log każdej potwierdzonej, udanej wysyłki (bez kosztu).
+- **`balance_observations`** — surowe odczyty salda: tuż przed wysyłką, tuż po wysyłce (z opóźnieniem ~3s, żeby dać Zadarmie czas na zaksięgowanie), i codziennie z crona.
+- **Dopasowanie odroczone** (liczone w panelu, nie zapisywane): jedyna aktywność na koncie to Brick AI, więc każdy spadek salda bez oczekujących wysyłek w tle to prawdziwa anomalia (doładowanie/opłata), a spadek z oczekującymi wysyłkami to ich koszt. Jeśli księgowanie się opóźni, wysyłka po prostu czeka jako „pending" do najbliższej kolejnej obserwacji — nigdy nie pokazuje fałszywego zera ani nie generuje fałszywego alarmu.
+
+**Codzienny snapshot salda żyje w samej bazie** (`pg_cron` + `pg_net`, migracja `20240117000000_balance_monitoring.sql`), nie w GitHub Actions — wywołuje funkcję `zadarma-balance-snapshot` o 6:00 UTC.
+
+To wywołanie HTTP z cron joba musi nieść sekret autoryzacyjny (`INTERNAL_SECRET`) w nagłówku — a sekretu nie da się bezpiecznie wpisać wprost do pliku migracji (migracje trafiają do gita). Dlatego **jeden, jednorazowy krok ręczny** po deployu, w Supabase → SQL Editor:
+
+```sql
+select vault.create_secret('<ta sama wartość co sekret funkcji INTERNAL_SECRET>', 'internal_secret');
+```
+
+Dopóki ten krok nie zostanie wykonany, zadanie cron będzie się uruchamiać, ale wywołanie funkcji zwróci 401 (widoczne w logach Supabase Edge Functions) — nic więcej się nie zepsuje, po prostu snapshoty się nie zapiszą do czasu dodania sekretu.
+
+> **`sms_count` w Ustawieniach** to zamrożony punkt odniesienia sprzed uruchomienia tego mechanizmu (dla świeżej instalacji = 0) — panel dolicza do niego dokładną liczbę z `sms_sends`. Nie da się go już edytować z panelu (dawniej można było ręcznie poprawić) — to celowe, bo ręczna edycja wprowadzałaby z powrotem dokładnie ten rozjazd z rzeczywistością, który ten mechanizm ma eliminować.
+
 ---
 
 ## Struktura projektu
@@ -308,7 +330,8 @@ insert into users (code, phone_number) values ('1234', '48573311779');
 │   │   ├── assistant-tools/        # Prywatne narzędzia wywoływane przez webhook (nigdy publicznie)
 │   │   ├── admin-send-sms/         # Wysyła SMS z panelu admina
 │   │   ├── setup-zadarma-webhook/  # Konfiguruje webhook Zadarma przy każdym deployu
-│   │   └── zadarma-balance/        # Odczytuje saldo konta Zadarma dla panelu admina
+│   │   ├── zadarma-balance/        # Odczytuje saldo konta Zadarma dla panelu admina
+│   │   └── zadarma-balance-snapshot/ # Codzienny snapshot salda (wywoływany przez pg_cron, nie panel)
 │   ├── migrations/                 # Migracje SQL
 │   └── config.toml
 ├── scripts/

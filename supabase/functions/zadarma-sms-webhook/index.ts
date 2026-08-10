@@ -1,5 +1,9 @@
 import { createHmac, createHash } from "node:crypto";
 
+// Globalny w środowisku Supabase Edge Functions (Deno Deploy) — pozwala kontynuować
+// pracę w tle po zwróceniu odpowiedzi HTTP. Brak w standardowych typach Deno.
+declare const EdgeRuntime: { waitUntil: (promise: Promise<unknown>) => void } | undefined;
+
 const ZADARMA_API_URL = "https://api.zadarma.com";
 
 const CORS = {
@@ -90,6 +94,11 @@ function buildAuth(path: string, params: Record<string, string>): string {
   return `${Deno.env.get("ZADARMA_API_KEY")}:${btoa(hex)}`;
 }
 
+// Sukces wysyłki liczymy jako podstawę do zapisu w sms_sends (a więc i do licznika
+// kosztów), więc samo `res.ok` to za mało — Zadarma potrafi zwrócić HTTP 200 z
+// treścią sygnalizującą błąd. Sprawdzamy oba: status HTTP i pole "status" w treści
+// odpowiedzi (jeśli jest obecne i jawnie mówi "error", traktujemy jako porażkę
+// mimo HTTP 200).
 async function sendSms(to: string, text: string, from: string): Promise<void> {
   const path = "/v1/sms/send/";
   // Aktualna dokumentacja Zadarmy nazywa ten parametr "sender", nie "caller_id" —
@@ -103,7 +112,29 @@ async function sendSms(to: string, text: string, from: string): Promise<void> {
     headers: { Authorization: buildAuth(path, params), "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(params).toString(),
   });
-  if (!res.ok) throw new Error(`SMS send failed: ${res.status} ${await res.text()}`);
+  const bodyText = await res.text();
+  if (!res.ok) throw new Error(`SMS send failed: ${res.status} ${bodyText}`);
+  try {
+    const body = JSON.parse(bodyText);
+    if (body?.status === "error") throw new Error(`SMS send failed: HTTP 200 ale status=error: ${bodyText}`);
+  } catch (e) {
+    if (e instanceof SyntaxError) return; // treść nie jest JSON-em — ufamy samemu HTTP 200
+    throw e;
+  }
+}
+
+// Saldo tuż przed i tuż po wysyłce daje podstawę do dokładnego dopasowania kosztu —
+// best-effort: błąd odczytu salda nie może zablokować wysyłki SMS-a.
+async function getZadarmaBalance(): Promise<number | null> {
+  try {
+    const path = "/v1/info/balance/";
+    const res = await fetch(`${ZADARMA_API_URL}${path}`, { headers: { Authorization: buildAuth(path, {}) } });
+    const body = await res.json();
+    if (body?.balance === undefined) return null;
+    return parseFloat(body.balance);
+  } catch {
+    return null;
+  }
 }
 
 // --- Supabase helpers ---
@@ -790,16 +821,47 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, dry_run: true, reply: parts.map((p) => `${p}${suffix}`).join("\n---\n"), parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  try {
-    for (const part of parts) {
-      await sendSms(senderPhone, `${part}${suffix}`, recipientDid);
-      sbPost(SB, KEY, "rpc/increment_sms_count", {}).catch(() => {});
-    }
-    log("sms_sent", { to: senderPhone, from: recipientDid, parts: parts.length });
-  } catch (e) {
-    log("sms_error", { to: senderPhone, from: recipientDid, error: String(e) });
-    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
+  // Saldo tuż przed pierwszą częścią — punkt odniesienia dla dopasowania kosztu
+  // (liczonego odroczenie w panelu, nie tutaj — patrz balance_observations/sms_sends).
+  const balanceBeforeSend = await getZadarmaBalance();
+  if (balanceBeforeSend !== null) {
+    sbPost(SB, KEY, "balance_observations", { balance: balanceBeforeSend, trigger: "pre_send" }).catch(() => {});
   }
 
+  // Każda część liczona osobno: jeśli część 3 z 6 zawiedzie, części 1-2 mimo to
+  // realnie kosztowały i mają trafić do sms_sends — nie odrzucamy całej partii.
+  let successfulParts = 0;
+  let sendError: unknown = null;
+  for (const part of parts) {
+    try {
+      await sendSms(senderPhone, `${part}${suffix}`, recipientDid);
+      successfulParts++;
+    } catch (e) {
+      sendError = e;
+      break;
+    }
+  }
+
+  if (successfulParts > 0) {
+    sbPost(SB, KEY, "sms_sends", { parts_sent: successfulParts, source: "webhook" }).catch(() => {});
+    // Krótkie opóźnienie w tle (po odpowiedzi webhooka), żeby dać Zadarmie czas na
+    // zaksięgowanie obciążenia zanim sprawdzimy saldo "po" — bez tego pomiar
+    // wykonany natychmiast mógłby złapać saldo sprzed zaksięgowania i zaniżyć koszt.
+    const afterCheck = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const balanceAfter = await getZadarmaBalance();
+      if (balanceAfter !== null) {
+        await sbPost(SB, KEY, "balance_observations", { balance: balanceAfter, trigger: "post_send" });
+      }
+    })();
+    if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(afterCheck);
+  }
+
+  if (sendError) {
+    log("sms_error", { to: senderPhone, from: recipientDid, error: String(sendError), successfulParts });
+    return new Response(JSON.stringify({ ok: false, error: String(sendError), successfulParts }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
+  }
+
+  log("sms_sent", { to: senderPhone, from: recipientDid, parts: parts.length });
   return new Response(JSON.stringify({ ok: true, parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
 });
