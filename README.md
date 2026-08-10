@@ -189,7 +189,7 @@ Ten sam zestaw testów jest też dostępny bez terminala — panel admina → **
 | `SUPABASE_ACCESS_TOKEN` | [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens) → Generate new token |
 | `SUPABASE_PROJECT_REF` | 20-znakowy ref z URL projektu (np. `abcdefghijklmnopqrst`) |
 | `SUPABASE_DB_URL` | Connection string z poolera, np. `postgresql://postgres.REF:[HASŁO]@aws-0-eu-west-1.pooler.supabase.com:5432/postgres` |
-| `SETUP_SECRET` | Dowolny losowy string (np. 32 znaki) — ten sam musi być też w sekretach Edge Functions |
+| `INTERNAL_SECRET` | Dowolny losowy string (np. 32 znaki) — ten sam musi być też w sekretach Edge Functions (i w Supabase Vault, patrz sekcja **Monitoring salda** niżej) |
 
 3. **Settings → Pages → Source: GitHub Actions** — włącza automatyczny deploy panelu admina
 
@@ -218,9 +218,8 @@ supabase secrets set \
   ZADARMA_API_SECRET='...' \
   GEMINI_API_KEY='...' \
   SUPABASE_ANON_KEY='...' \
-  SETUP_SECRET='...' \
-  ASSISTANT_TOOLS_SECRET='...' \
-  INTERNAL_SECRET='...'
+  INTERNAL_SECRET='...' \
+  ASSISTANT_TOOLS_SECRET='...'
 ```
 
 > Sekrety ustawione w jednym miejscu działają dla wszystkich Edge Functions w projekcie.
@@ -231,9 +230,8 @@ supabase secrets set \
 | `ZADARMA_API_SECRET` | j.w. → pole **Secret** |
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
 | `SUPABASE_ANON_KEY` | Supabase → Project Settings → API → `anon` `public` |
-| `SETUP_SECRET` | Ten sam losowy string co w GitHub Secrets — autoryzuje automatyczną konfigurację webhooka Zadarma |
+| `INTERNAL_SECRET` | Ten sam losowy string co w GitHub Secrets — wspólny sekret dla wszystkich wewnętrznych, niepublicznych funkcji (`setup-zadarma-webhook`, `zadarma-balance-snapshot`). Ta sama wartość musi też trafić do Supabase Vault — patrz sekcja **Monitoring salda** niżej. |
 | `ASSISTANT_TOOLS_SECRET` | Dowolny losowy string — autoryzuje wywołania webhooka do `assistant-tools`. Jeśli pominięty, funkcja spada na `SUPABASE_SERVICE_ROLE_KEY`. |
-| `INTERNAL_SECRET` | Dowolny losowy string (może być inny niż `SETUP_SECRET`, ale nie musi) — autoryzuje `zadarma-balance-snapshot`, wywoływaną przez cron w bazie, nie przez sesję admina. Ta sama wartość musi też trafić do Supabase Vault — patrz sekcja **Monitoring salda** niżej. |
 | `GOOGLE_MAPS_API_KEY` | (opcjonalny) [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Library → włącz **Directions API** (to legacy API, osobne od nowszego Routes API — trzeba je włączyć jawnie, samo posiadanie klucza z Routes API nie wystarczy, inaczej dostaniesz `REQUEST_DENIED`) → Credentials → Create API Key — wymagany do nawigacji i komunikacji miejskiej |
 | `PKP_API_KEY` | (opcjonalny) [pdp-api.plk-sa.pl](https://pdp-api.plk-sa.pl/) → wniosek o klucz API Otwarte Dane Kolejowe PKP PLK. Klucz jest widoczny od razu, ale **nieaktywny** do czasu ręcznej weryfikacji administratora (deklarowane 3-5 dni roboczych) — sprawdź aktywację zapytaniem do `/dictionaries/stations`, błąd `PendingActivation` oznacza brak aktywacji. Wymagany do danych kolejowych. |
 
@@ -281,7 +279,7 @@ Działa przez API Zadarma (sekcja [Informacja o połączeniach](https://zadarma.
 - `POST /v1/pbx/webhooks/url/` — ustawia URL webhooka
 - `POST /v1/pbx/webhooks/hooks/` — włącza powiadomienia SMS
 
-Wymagane sekrety (patrz kroki 2 i 4): `ZADARMA_API_KEY`, `ZADARMA_API_SECRET`, `SETUP_SECRET`.
+Wymagane sekrety (patrz kroki 2 i 4): `ZADARMA_API_KEY`, `ZADARMA_API_SECRET`, `INTERNAL_SECRET`.
 
 > Webhook musi odpowiadać na GET z `?zd_echo=...` zwracając tę samą wartość — Edge Function już to obsługuje.
 

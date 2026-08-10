@@ -16,9 +16,9 @@ function buildAuth(path: string, params: Record<string, string>): string {
 }
 
 // Wywoływana wyłącznie przez cron w Supabase (pg_cron + pg_net) — nie ma tu sesji
-// admina, więc zamiast weryfikacji JWT jest własny sekret INTERNAL_SECRET (ta sama
-// wartość co reszta wewnętrznych funkcji, ale nazwany zgodnie z rzeczywistym celem —
-// w odróżnieniu od SETUP_SECRET, który jest dla setup-zadarma-webhook).
+// admina, więc zamiast weryfikacji JWT jest wspólny sekret INTERNAL_SECRET — ten
+// sam, który autoryzuje każdą wewnętrzną, niepubliczną funkcję w tym projekcie
+// (patrz też setup-zadarma-webhook).
 Deno.serve(async (req: Request) => {
   const secret = Deno.env.get("INTERNAL_SECRET");
   if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {

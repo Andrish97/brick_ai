@@ -29,7 +29,7 @@ async function zadarmaReq(method: string, path: string, params: Record<string, s
 }
 
 Deno.serve(async (req: Request) => {
-  const secret = Deno.env.get("SETUP_SECRET");
+  const secret = Deno.env.get("INTERNAL_SECRET");
   if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
     return new Response("Unauthorized", { status: 401 });
   }

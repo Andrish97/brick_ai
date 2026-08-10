@@ -56,11 +56,11 @@ jobs:
       - name: Setup Zadarma webhook
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-          SETUP_SECRET: ${{ secrets.SETUP_SECRET }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
         run: |
           curl -sf -X POST \
             "https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/setup-zadarma-webhook" \
-            -H "Authorization: Bearer ${SETUP_SECRET}"
+            -H "Authorization: Bearer ${INTERNAL_SECRET}"
 
       - name: Run DB migrations
         env:
