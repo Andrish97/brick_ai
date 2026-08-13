@@ -123,13 +123,19 @@ async function sendSms(to: string, text: string, from: string): Promise<void> {
   }
 }
 
-// Saldo tuż przed i tuż po wysyłce daje podstawę do dokładnego dopasowania kosztu —
-// best-effort: błąd odczytu salda nie może zablokować wysyłki SMS-a.
+// Best-effort: błąd odczytu salda nie może zablokować wysyłki SMS-a. Logujemy
+// niepowodzenie (zamiast cicho połykać), żeby było widać w Logach, czy to ta
+// sama przyczyna co ewentualny błąd samej wysyłki.
 async function getZadarmaBalance(): Promise<number | null> {
   try {
     const path = "/v1/info/balance/";
     const res = await fetch(`${ZADARMA_API_URL}${path}`, { headers: { Authorization: buildAuth(path, {}) } });
-    const body = await res.json();
+    const bodyText = await res.text();
+    if (!res.ok) {
+      log("balance_check_failed", { status: res.status, body: bodyText });
+      return null;
+    }
+    const body = JSON.parse(bodyText);
     if (body?.balance === undefined) return null;
     return parseFloat(body.balance);
   } catch {
@@ -821,13 +827,11 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, dry_run: true, reply: parts.map((p) => `${p}${suffix}`).join("\n---\n"), parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  // Saldo tuż przed pierwszą częścią — punkt odniesienia dla dopasowania kosztu
-  // (liczonego odroczenie w panelu, nie tutaj — patrz balance_observations/sms_sends).
-  const balanceBeforeSend = await getZadarmaBalance();
-  if (balanceBeforeSend !== null) {
-    sbPost(SB, KEY, "balance_observations", { balance: balanceBeforeSend, trigger: "pre_send" }).catch(() => {});
-  }
-
+  // Uwaga: celowo NIE sprawdzamy salda synchronicznie tuż przed wysyłką — to by
+  // dokładało dodatkowe wywołanie Zadarmy dokładnie na krytycznej ścieżce wysyłki
+  // SMS-a (ryzyko: rate limiting/throttling ze strony Zadarmy przy dwóch wywołaniach
+  // API z rzędu). Model dopasowania odroczonego tego nie potrzebuje — wystarczy mu
+  // punkt "po" (niżej) plus okresowe snapshoty z crona jako punkty odniesienia.
   // Każda część liczona osobno: jeśli część 3 z 6 zawiedzie, części 1-2 mimo to
   // realnie kosztowały i mają trafić do sms_sends — nie odrzucamy całej partii.
   let successfulParts = 0;

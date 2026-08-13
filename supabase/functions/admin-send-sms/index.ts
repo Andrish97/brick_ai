@@ -122,12 +122,10 @@ Deno.serve(async (req: Request) => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  // Saldo tuż przed wysyłką — punkt odniesienia dla dopasowania kosztu (liczonego
-  // odroczenie w panelu na podstawie balance_observations/sms_sends).
-  const balanceBefore = await getZadarmaBalance();
-  if (balanceBefore !== null) {
-    sbPost(supabaseUrl, serviceRoleKey, "balance_observations", { balance: balanceBefore, trigger: "pre_send" }).catch(() => {});
-  }
+  // Uwaga: celowo nie sprawdzamy salda tuż przed wysyłką (dodatkowe wywołanie
+  // Zadarmy na krytycznej ścieżce) — patrz komentarz w zadarma-sms-webhook.
+  // Model dopasowania odroczonego wystarczy mu punkt "po" (niżej) plus codzienne
+  // snapshoty z crona.
 
   // Send SMS via Zadarma
   try {
