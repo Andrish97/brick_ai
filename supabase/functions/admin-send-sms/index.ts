@@ -12,11 +12,18 @@ function md5Hex(input: string): string {
   return createHash("md5").update(input).digest("hex");
 }
 
-function buildAuth(path: string, params: Record<string, string>): string {
-  const paramStr = Object.keys(params)
-    .sort()
+// Zadarma podpisuje żądanie stringiem z parametrami posortowanymi alfabetycznie —
+// jeśli faktyczne ciało żądania wyśle je w innej kolejności, podpis przestaje się
+// zgadzać z tym, co serwer widzi w ciele → 401 mimo poprawnego klucza/sekretu.
+// sortedParamString() używane identycznie do podpisu i do treści żądania.
+function sortedParamString(params: Record<string, string>): string {
+  return Object.keys(params).sort()
     .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k]).replace(/%20/g, "+")}`)
     .join("&");
+}
+
+function buildAuth(path: string, params: Record<string, string>): string {
+  const paramStr = sortedParamString(params);
   const hex = createHmac("sha1", Deno.env.get("ZADARMA_API_SECRET")!)
     .update(path + paramStr + md5Hex(paramStr))
     .digest("hex");
@@ -138,7 +145,7 @@ Deno.serve(async (req: Request) => {
         Authorization: buildAuth(path, params),
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: new URLSearchParams(params).toString(),
+      body: sortedParamString(params),
     });
 
     const bodyText = await res.text();

@@ -6,11 +6,20 @@ function md5Hex(input: string): string {
   return createHash("md5").update(input).digest("hex");
 }
 
-function buildAuth(path: string, params: Record<string, string>): string {
-  const paramStr = Object.keys(params)
-    .sort()
+// Zadarma podpisuje żądanie stringiem z parametrami posortowanymi alfabetycznie —
+// jeśli faktyczne ciało/query string wyśle je w innej kolejności, podpis przestaje
+// się zgadzać z tym, co serwer widzi → 401 mimo poprawnego klucza/sekretu. Dziś
+// każde wywołanie ma tu maks. 1 parametr (kolejność bez znaczenia), ale
+// sortedParamString() używane identycznie do podpisu i do treści żądania zabezpiecza
+// przed tym samym błędem, gdyby ktoś kiedyś dodał drugi parametr.
+function sortedParamString(params: Record<string, string>): string {
+  return Object.keys(params).sort()
     .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k]).replace(/%20/g, "+")}`)
     .join("&");
+}
+
+function buildAuth(path: string, params: Record<string, string>): string {
+  const paramStr = sortedParamString(params);
   const hex = createHmac("sha1", Deno.env.get("ZADARMA_API_SECRET")!)
     .update(path + paramStr + md5Hex(paramStr))
     .digest("hex");
@@ -19,11 +28,11 @@ function buildAuth(path: string, params: Record<string, string>): string {
 
 async function zadarmaReq(method: string, path: string, params: Record<string, string>): Promise<{ status: number; body: unknown }> {
   const isGet = method === "GET";
-  const qs = isGet && Object.keys(params).length ? "?" + new URLSearchParams(params).toString() : "";
+  const qs = isGet && Object.keys(params).length ? "?" + sortedParamString(params) : "";
   const res = await fetch(`${ZADARMA_API_URL}${path}${qs}`, {
     method,
     headers: { Authorization: buildAuth(path, params), ...(isGet ? {} : { "Content-Type": "application/x-www-form-urlencoded" }) },
-    ...(isGet ? {} : { body: new URLSearchParams(params).toString() }),
+    ...(isGet ? {} : { body: sortedParamString(params) }),
   });
   return { status: res.status, body: await res.json() };
 }

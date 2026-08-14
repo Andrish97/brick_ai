@@ -85,9 +85,20 @@ function md5Hex(input: string): string {
   return createHash("md5").update(input).digest("hex");
 }
 
+// Zadarma podpisuje żądanie stringiem z parametrami posortowanymi alfabetycznie —
+// jeśli faktyczne ciało żądania wyśle je w innej kolejności (np. kolejność pól
+// obiektu JS), podpis przestaje się zgadzać z tym, co serwer widzi w ciele, i
+// dostajemy 401 mimo poprawnego klucza/sekretu. Dlatego sortedParamString() jest
+// jedynym miejscem budującym tę kolejność — używane identycznie i do podpisu,
+// i do treści żądania (patrz sendSms), żeby nigdy się nie rozjechały.
+function sortedParamString(params: Record<string, string>): string {
+  return Object.keys(params).sort()
+    .map((k) => `${k}=${new URLSearchParams({ v: params[k] }).toString().slice(2)}`)
+    .join("&");
+}
+
 function buildAuth(path: string, params: Record<string, string>): string {
-  const sorted = Object.keys(params).sort();
-  const paramStr = sorted.map((k) => `${k}=${new URLSearchParams({ v: params[k] }).toString().slice(2)}`).join("&");
+  const paramStr = sortedParamString(params);
   const hex = createHmac("sha1", Deno.env.get("ZADARMA_API_SECRET")!)
     .update(path + paramStr + md5Hex(paramStr))
     .digest("hex");
@@ -110,7 +121,7 @@ async function sendSms(to: string, text: string, from: string): Promise<void> {
   const res = await fetch(`${ZADARMA_API_URL}${path}`, {
     method: "POST",
     headers: { Authorization: buildAuth(path, params), "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(params).toString(),
+    body: sortedParamString(params),
   });
   const bodyText = await res.text();
   if (!res.ok) throw new Error(`SMS send failed: ${res.status} ${bodyText}`);
