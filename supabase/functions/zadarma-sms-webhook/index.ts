@@ -838,11 +838,15 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, dry_run: true, reply: parts.map((p) => `${p}${suffix}`).join("\n---\n"), parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  // Uwaga: celowo NIE sprawdzamy salda synchronicznie tuż przed wysyłką — to by
-  // dokładało dodatkowe wywołanie Zadarmy dokładnie na krytycznej ścieżce wysyłki
-  // SMS-a (ryzyko: rate limiting/throttling ze strony Zadarmy przy dwóch wywołaniach
-  // API z rzędu). Model dopasowania odroczonego tego nie potrzebuje — wystarczy mu
-  // punkt "po" (niżej) plus okresowe snapshoty z crona jako punkty odniesienia.
+  // Saldo tuż przed pierwszą częścią — gęstszy strumień obserwacji zmniejsza ryzyko,
+  // że doładowanie/opłata trafi w to samo okno co ta wysyłka i zostanie błędnie
+  // zinterpretowane (patrz computeBalanceTimeline w panelu). Koszt liczony odroczenie,
+  // nie tutaj — to tylko dodatkowy punkt odniesienia dla tamtego dopasowania.
+  const balanceBeforeSend = await getZadarmaBalance();
+  if (balanceBeforeSend !== null) {
+    sbPost(SB, KEY, "balance_observations", { balance: balanceBeforeSend, trigger: "pre_send" }).catch(() => {});
+  }
+
   // Każda część liczona osobno: jeśli część 3 z 6 zawiedzie, części 1-2 mimo to
   // realnie kosztowały i mają trafić do sms_sends — nie odrzucamy całej partii.
   let successfulParts = 0;
