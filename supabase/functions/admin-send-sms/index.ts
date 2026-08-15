@@ -41,6 +41,24 @@ function buildAuth(path: string, params: Record<string, string>): string {
   return `${Deno.env.get("ZADARMA_API_KEY")}:${btoa(hex)}`;
 }
 
+// Ta funkcja wysyła dokładnie to, co administrator wpisał — bez automatycznego
+// dzielenia jak w zadarma-sms-webhook — więc jeśli treść przekroczy limit jednej
+// fizycznej części SMS-a, Zadarma sama podzieli ją na więcej części i naliczy za
+// każdą. Musimy to policzyć tak samo, żeby parts_sent w sms_sends zgadzało się
+// z tym, ile Zadarma faktycznie wyśle/policzy — inaczej koszt/część w panelu Saldo
+// wychodzi zawyżony (dokładnie to się stało: wiadomość z emoji/strzałkami wymusiła
+// UCS-2, poszła jako 2 realne części, a my zalogowalibyśmy tylko 1).
+function requiresUcs2(text: string): boolean {
+  return /[^\x00-\x7F]/.test(text);
+}
+function countSmsSegments(message: string): number {
+  const isUcs2 = requiresUcs2(message);
+  const singleLimit = isUcs2 ? 70 : 160;
+  const concatLimit = isUcs2 ? 67 : 153;
+  if (message.length <= singleLimit) return 1;
+  return Math.ceil(message.length / concatLimit);
+}
+
 async function getZadarmaBalance(): Promise<number | null> {
   try {
     const path = "/v1/info/balance/";
@@ -179,7 +197,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    sbPost(supabaseUrl, serviceRoleKey, "sms_sends", { parts_sent: 1, source: "admin" }).catch(() => {});
+    sbPost(supabaseUrl, serviceRoleKey, "sms_sends", { parts_sent: countSmsSegments(message), source: "admin" }).catch(() => {});
     const afterCheck = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 3000));
       const balanceAfter = await getZadarmaBalance();
