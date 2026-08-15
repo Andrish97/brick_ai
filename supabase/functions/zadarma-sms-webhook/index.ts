@@ -16,8 +16,14 @@ const SUFFIX_LEN = 7; // "\n" + 6-cyfrowy kod rozmowy
 const SMS_PART_CHARS = 160 - SUFFIX_LEN; // 153 — treść jednej części SMS bez suffixu
 const CLOSE_KEYWORDS = ["koniec", "stop", "zamknij", "end"]; // szybka ścieżka bez wywoływania modelu
 
-// Liczba tokenów wyjściowych Gemini w zależności od przyznanego limitu SMS-ów odpowiedzi
-const TOKENS_FOR_PARTS: Record<number, number> = { 1: 100, 3: 300, 4: 400 };
+// Liczba tokenów wyjściowych Gemini w zależności od przyznanego limitu SMS-ów odpowiedzi.
+// Celowo Z DUŻYM ZAPASEM ponad realny budżet znaków (np. 250 tokenów na 153-znakowy
+// SMS) — z logów produkcyjnych wiadomo, że ciasny limit (dawniej 100) potrafił uciąć
+// generowanie w połowie zdania (finishReason: MAX_TOKENS), zanim smartTrim/chunkForSms
+// w ogóle dostały szansę grzecznie przyciąć tekst na granicy zdania/słowa. Model i tak
+// nigdy nie wyśle więcej niż limit znaków — to i tak egzekwuje chunkForSms — ale dzięki
+// zapasowi kończy myśl, zamiast urywać się w środku wyrazu.
+const TOKENS_FOR_PARTS: Record<number, number> = { 1: 250, 3: 650, 4: 850 };
 
 function stripUrls(text: string): string {
   return text.replace(/https?:\/\/\S+/g, "").replace(/www\.\S+/g, "").replace(/\s{2,}/g, " ").trim();
