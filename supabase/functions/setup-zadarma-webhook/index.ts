@@ -6,15 +6,22 @@ function md5Hex(input: string): string {
   return createHash("md5").update(input).digest("hex");
 }
 
-// Zadarma podpisuje żądanie stringiem z parametrami posortowanymi alfabetycznie —
-// jeśli faktyczne ciało/query string wyśle je w innej kolejności, podpis przestaje
-// się zgadzać z tym, co serwer widzi → 401 mimo poprawnego klucza/sekretu. Dziś
-// każde wywołanie ma tu maks. 1 parametr (kolejność bez znaczenia), ale
-// sortedParamString() używane identycznie do podpisu i do treści żądania zabezpiecza
-// przed tym samym błędem, gdyby ktoś kiedyś dodał drugi parametr.
+// Zadarma (backend PHP) podpisuje żądanie stringiem zbudowanym jak PHP-owe
+// urlencode()/http_build_query z PHP_QUERY_RFC1738 — koduje procentowo wszystko
+// poza literami/cyframi/"-_.", spacja to "+". encodeURIComponent zostawia !~*'()
+// niekodowane, więc phpUrlEncode() to koryguje. Kolejność parametrów w podpisie
+// i w treści żądania musi być identyczna — dziś każde wywołanie ma tu maks. 1
+// parametr (kolejność bez znaczenia), ale sortedParamString() zabezpiecza przed
+// tym samym błędem, gdyby ktoś kiedyś dodał drugi parametr.
+function phpUrlEncode(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/%20/g, "+")
+    .replace(/[!~*'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
 function sortedParamString(params: Record<string, string>): string {
   return Object.keys(params).sort()
-    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k]).replace(/%20/g, "+")}`)
+    .map((k) => `${k}=${phpUrlEncode(params[k])}`)
     .join("&");
 }
 

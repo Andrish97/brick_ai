@@ -85,15 +85,26 @@ function md5Hex(input: string): string {
   return createHash("md5").update(input).digest("hex");
 }
 
-// Zadarma podpisuje żądanie stringiem z parametrami posortowanymi alfabetycznie —
-// jeśli faktyczne ciało żądania wyśle je w innej kolejności (np. kolejność pól
-// obiektu JS), podpis przestaje się zgadzać z tym, co serwer widzi w ciele, i
-// dostajemy 401 mimo poprawnego klucza/sekretu. Dlatego sortedParamString() jest
-// jedynym miejscem budującym tę kolejność — używane identycznie i do podpisu,
-// i do treści żądania (patrz sendSms), żeby nigdy się nie rozjechały.
+// Zadarma (backend PHP) podpisuje żądanie stringiem zbudowanym jak PHP-owe
+// urlencode()/http_build_query z PHP_QUERY_RFC1738: procentowo kodowane jest
+// WSZYSTKO poza literami, cyframi i "-_.", a spacja to "+". To NIE jest to samo,
+// co JS-owy encodeURIComponent ani URLSearchParams — oba zostawiają część znaków
+// (!~*'()) niekodowanych, RFC1738 koduje je wszystkie. Jeśli treść SMS-a zawiera
+// wykrzyknik/apostrof, źle zakodowany parametr psuje podpis → 401 mimo poprawnego
+// klucza/sekretu. phpUrlEncode() naprawia to dokładnie do zachowania PHP.
+function phpUrlEncode(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/%20/g, "+")
+    .replace(/[!~*'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+// Kolejność parametrów w podpisie i w treści żądania musi być identyczna (Zadarma
+// podpisuje posortowane alfabetycznie parametry) — dlatego sortedParamString() jest
+// jedynym miejscem budującym ten string, używane identycznie do podpisu i do treści
+// żądania (patrz sendSms), żeby nigdy się nie rozjechały.
 function sortedParamString(params: Record<string, string>): string {
   return Object.keys(params).sort()
-    .map((k) => `${k}=${new URLSearchParams({ v: params[k] }).toString().slice(2)}`)
+    .map((k) => `${k}=${phpUrlEncode(params[k])}`)
     .join("&");
 }
 
