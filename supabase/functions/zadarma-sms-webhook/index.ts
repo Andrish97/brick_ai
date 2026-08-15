@@ -37,17 +37,22 @@ function stripCitations(text: string): string {
 }
 
 // Bezpiecznik: system prompt każe modelowi nie używać markdownu, ale gdyby mimo
-// to coś przeciekło (np. **pogrubienie**), zdejmujemy same znaczniki i zostawiamy
-// tekst wewnątrz — w SMS-ie gwiazdki/podkreślenia to tylko szum, nie formatowanie.
+// to coś przeciekło, zdejmujemy znaczniki i zostawiamy samą treść — w SMS-ie
+// żaden markdown się nie renderuje, więc to tylko szum, nigdy formatowanie.
 function stripMarkdown(text: string): string {
   return text
-    .replace(/\*\*(.+?)\*\*/g, "$1")
-    .replace(/__(.+?)__/g, "$1")
-    .replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "$1")
-    .replace(/(?<!_)_([^_\n]+?)_(?!_)/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/^[-*]\s+/gm, "");
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")       // [tekst](url) → tekst
+    .replace(/\*\*(.+?)\*\*/g, "$1")                    // **pogrubienie**
+    .replace(/__(.+?)__/g, "$1")                        // __pogrubienie__
+    .replace(/~~(.+?)~~/g, "$1")                        // ~~przekreślenie~~
+    .replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "$1")     // *kursywa*
+    .replace(/(?<!_)_([^_\n]+?)_(?!_)/g, "$1")           // _kursywa_
+    .replace(/`([^`]+)`/g, "$1")                        // `kod`
+    .replace(/^#{1,6}\s+/gm, "")                        // # nagłówki
+    .replace(/^>\s?/gm, "")                              // > cytat
+    .replace(/^\s*[-*]\s+/gm, "")                       // - lub * lista
+    .replace(/^\s*\d+\.\s+/gm, "")                      // 1. lista numerowana
+    .replace(/^\s*[-*_]{3,}\s*$/gm, "");                // --- linia pozioma
 }
 
 // Bezpiecznik: gdyby mimo wszystko na końcu tekstu został niedomknięty nawias
@@ -607,7 +612,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Prom
 
   const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
   let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków). To zwykły SMS, nie czat: nigdy nie używaj formatowania markdown (żadnych **, _, #, list z myślnikiem na początku linii) — sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '.`;
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '.`;
 
   log("endpoint_test_start", { convId, content });
   const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[1], { userId: TEST_MODE_USER_ID, convId });
@@ -829,7 +834,7 @@ Deno.serve(async (req: Request) => {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
     systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy nie używaj formatowania markdown (żadnych **, _, #, list z myślnikiem na początku linii) — sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '.`;
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '.`;
 
   const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
 
