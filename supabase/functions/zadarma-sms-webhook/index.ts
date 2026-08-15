@@ -13,7 +13,26 @@ const CORS = {
 };
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
 const SUFFIX_LEN = 7; // "\n" + 6-cyfrowy kod rozmowy
-const SMS_PART_CHARS = 160 - SUFFIX_LEN; // 153 — treść jednej części SMS bez suffixu
+
+// Fizyczna część SMS-a mieści RÓŻNĄ liczbę znaków zależnie od kodowania: GSM-7
+// (tylko podstawowy alfabet łaciński, bez polskich znaków) mieści 160/153 (poje-
+// dyncza/łączona), UCS-2 (gdy w treści jest choć jeden znak spoza GSM-7 — a każdy
+// polski znak diakrytyczny jest właśnie taki) mieści tylko 70/67. Telefon operatora
+// przełącza się na UCS-2 automatycznie i dzieli wiadomość sam — jeśli nasz kod tnie
+// tekst zakładając 153 znaki, a treść wymaga UCS-2, Zadarma i tak podzieli to na
+// więcej fizycznych części niż nasz kod policzył (i policzy nam koszt za nie),
+// niezgodnie z tym, co widać w panelu jako "liczba części". Realny SMS asystenta
+// (polski, prawie zawsze z diakrytykami) więc niemal zawsze mieści się w budżecie UCS-2.
+const SMS_PART_CHARS_GSM7 = 160 - SUFFIX_LEN; // 153
+const SMS_PART_CHARS_UCS2 = 70 - SUFFIX_LEN;  // 63
+const SMS_PART_CHARS = SMS_PART_CHARS_UCS2; // domyślny, "bezpieczny" budżet do instrukcji w prompt
+function requiresUcs2(text: string): boolean {
+  return /[^\x00-\x7F]/.test(text);
+}
+function smsPartCharsFor(text: string): number {
+  return requiresUcs2(text) ? SMS_PART_CHARS_UCS2 : SMS_PART_CHARS_GSM7;
+}
+
 const CLOSE_KEYWORDS = ["koniec", "stop", "zamknij", "end"]; // szybka ścieżka bez wywoływania modelu
 
 // Liczba tokenów wyjściowych Gemini w zależności od przyznanego limitu SMS-ów odpowiedzi.
@@ -114,15 +133,17 @@ function restrictToSafeSmsCharset(text: string): string {
   return text.replace(/[^\x20-\x7E\n\u00A1-\u00FF\u0100-\u017F]/g, "");
 }
 
-// Dzieli tekst na maks. `maxParts` części po `SMS_PART_CHARS` znaków. Jeśli tekst
-// jest dłuższy, obcina go najpierw na granicy zdania/słowa (smartTrim), więc nigdy
-// nie wysyłamy więcej niż `maxParts` SMS-ów za jedną odpowiedź.
+// Dzieli tekst na maks. `maxParts` części, po `smsPartCharsFor(text)` znaków każda —
+// 153 dla czystego GSM-7, 63 gdy tekst wymaga UCS-2 (patrz komentarz przy stałych
+// wyżej). Jeśli tekst jest dłuższy niż budżet, obcina go najpierw na granicy
+// zdania/słowa (smartTrim), więc nigdy nie wysyłamy więcej niż `maxParts` SMS-ów.
 function chunkForSms(text: string, maxParts: number): string[] {
-  const budget = SMS_PART_CHARS * maxParts;
+  const partChars = smsPartCharsFor(text);
+  const budget = partChars * maxParts;
   const fitted = text.length > budget ? smartTrim(text, budget - 3) + "..." : text;
   const parts: string[] = [];
-  for (let i = 0; i < fitted.length; i += SMS_PART_CHARS) {
-    parts.push(fitted.slice(i, i + SMS_PART_CHARS));
+  for (let i = 0; i < fitted.length; i += partChars) {
+    parts.push(fitted.slice(i, i + partChars));
   }
   return parts.length ? parts : [""];
 }
@@ -630,7 +651,7 @@ async function buildCleanReply(outcome: Exclude<AssistantOutcome, { kind: "close
   if (outcome.kind === "route") return restrictToSafeSmsCharset(outcome.text);
 
   let cleanReply = clean(outcome.text);
-  const budget = SMS_PART_CHARS * maxParts;
+  const budget = smsPartCharsFor(cleanReply) * maxParts;
 
   if (cleanReply.length > budget) {
     const shortened = await shortenToFit(cleanReply, budget);
