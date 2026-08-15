@@ -16,16 +16,16 @@ const SUFFIX_LEN = 7; // "\n" + 6-cyfrowy kod rozmowy
 
 // Fizyczna część SMS-a mieści RÓŻNĄ liczbę znaków zależnie od kodowania: GSM-7
 // (tylko podstawowy alfabet łaciński, bez polskich znaków) mieści 160/153 (poje-
-// dyncza/łączona), UCS-2 (gdy w treści jest choć jeden znak spoza GSM-7 — a każdy
-// polski znak diakrytyczny jest właśnie taki) mieści tylko 70/67. Telefon operatora
-// przełącza się na UCS-2 automatycznie i dzieli wiadomość sam — jeśli nasz kod tnie
-// tekst zakładając 153 znaki, a treść wymaga UCS-2, Zadarma i tak podzieli to na
-// więcej fizycznych części niż nasz kod policzył (i policzy nam koszt za nie),
-// niezgodnie z tym, co widać w panelu jako "liczba części". Realny SMS asystenta
-// (polski, prawie zawsze z diakrytykami) więc niemal zawsze mieści się w budżecie UCS-2.
+// dyncza/łączona), UCS-2 (gdy w treści jest choć jeden znak spoza GSM-7) mieści
+// tylko 70/67. Polskie znaki diakrytyczne są usuwane z każdej odpowiedzi
+// (stripPolishDiacritics, decyzja produktowa: koszt ważniejszy niż ogonki), więc
+// realna odpowiedź niemal zawsze mieści się w tańszym GSM-7 — domyślny budżet
+// poniżej odzwierciedla tę normę. smsPartCharsFor() i tak liczy to dynamicznie
+// z już oczyszczonego tekstu (na wypadek symboli spoza GSM-7, np. °×÷©), więc
+// nigdy nie zgadujemy — to tylko liczba podawana modelowi w instrukcji w prompt.
 const SMS_PART_CHARS_GSM7 = 160 - SUFFIX_LEN; // 153
 const SMS_PART_CHARS_UCS2 = 70 - SUFFIX_LEN;  // 63
-const SMS_PART_CHARS = SMS_PART_CHARS_UCS2; // domyślny, "bezpieczny" budżet do instrukcji w prompt
+const SMS_PART_CHARS = SMS_PART_CHARS_GSM7; // domyślny budżet do instrukcji w prompt
 function requiresUcs2(text: string): boolean {
   return /[^\x00-\x7F]/.test(text);
 }
@@ -108,6 +108,34 @@ function sanitizeForSms(text: string): string {
     .replace(/[\u200B-\u200D\uFEFF]/g, '')               // znaki zerowej szerokości
     .replace(/\r\n|\r/g, '\n')                            // CRLF/CR → LF
     .trim();
+}
+
+// Polskie znaki diakrytyczne leżą poza alfabetem GSM-7, więc wymuszają UCS-2
+// (patrz smsPartCharsFor) — jedna fizyczna część SMS-a mieści wtedy ~70 znaków
+// zamiast 160/153. Usuwamy je zawsze (decyzja produktowa: koszt ważniejszy niż
+// ortografia — polski tekst bez ogonków pozostaje w pełni czytelny, tak jak w
+// erze telefonów bez pełnego wsparcia Unicode), żeby odpowiedź niemal zawsze
+// mieściła się w tańszym GSM-7 i korzystała z 153, nie 63 znaków na część —
+// również przy wielu częściach (allow_long_reply), bo smsPartCharsFor liczy to
+// dynamicznie z już oczyszczonego tekstu.
+// Jawne kody \uXXXX zamiast wklejonych liter — patrz uzasadnienie przy
+// restrictToSafeSmsCharset (literalny znak jest podatny na ciche podmiany).
+const POLISH_DIACRITICS_MAP: Record<string, string> = {
+  "\u0104": "A", "\u0105": "a", // Ą ą
+  "\u0106": "C", "\u0107": "c", // Ć ć
+  "\u0118": "E", "\u0119": "e", // Ę ę
+  "\u0141": "L", "\u0142": "l", // Ł ł
+  "\u0143": "N", "\u0144": "n", // Ń ń
+  "\u00D3": "O", "\u00F3": "o", // Ó ó
+  "\u015A": "S", "\u015B": "s", // Ś ś
+  "\u0179": "Z", "\u017A": "z", // Ź ź
+  "\u017B": "Z", "\u017C": "z", // Ż ż
+};
+function stripPolishDiacritics(text: string): string {
+  return text.replace(
+    /[\u0104\u0105\u0106\u0107\u0118\u0119\u0141\u0142\u0143\u0144\u00D3\u00F3\u015A\u015B\u0179\u017A\u017B\u017C]/g,
+    (c) => POLISH_DIACRITICS_MAP[c] ?? c
+  );
 }
 
 // Biała lista CAŁYCH ZAKRESÓW Unicode zamiast pojedynczych znaków: telefon
@@ -646,9 +674,9 @@ async function shortenToFit(text: string, budget: number): Promise<string | null
 // (wywoływane przez wołającego, po tej funkcji) zostaje jako ostateczny bezpiecznik.
 async function buildCleanReply(outcome: Exclude<AssistantOutcome, { kind: "closed" }>, maxParts: number, convId: string): Promise<string> {
   const clean = (raw: string) =>
-    restrictToSafeSmsCharset(sanitizeForSms(stripMarkdown(stripCitations(stripUrls(raw)))));
+    stripPolishDiacritics(restrictToSafeSmsCharset(sanitizeForSms(stripMarkdown(stripCitations(stripUrls(raw))))));
 
-  if (outcome.kind === "route") return restrictToSafeSmsCharset(outcome.text);
+  if (outcome.kind === "route") return stripPolishDiacritics(restrictToSafeSmsCharset(outcome.text));
 
   let cleanReply = clean(outcome.text);
   const budget = smsPartCharsFor(cleanReply) * maxParts;
