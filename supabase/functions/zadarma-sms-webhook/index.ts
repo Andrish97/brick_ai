@@ -85,6 +85,29 @@ function sanitizeForSms(text: string): string {
     .trim();
 }
 
+// Biała lista CAŁYCH ZAKRESÓW Unicode zamiast pojedynczych znaków: telefon
+// użytkownika nie ma w foncie SMS-ów glifów dla strzałek/gwiazdek-symboli/
+// ptaszków/emoji (potwierdzone testem) — pokazują się jako puste kwadraciki.
+// Zamiast wymieniać zakazane znaki jeden po drugim (zawsze będzie jakiś nowy,
+// nieprzetestowany emoji — czysta gra w kotka i myszkę), dopuszczamy trzy
+// dobrze znane bloki Unicode obejmujące cały alfabet łaciński: Basic Latin
+// (ASCII), Latin-1 Supplement i Latin Extended-A. Razem pokrywają KOMPLETNIE
+// wszystkie polskie znaki diakrytyczne (jako reguła, nie lista) oraz typową
+// łacińską typografię (° © × ÷ ± itp.), a strukturalnie wykluczają bloki
+// Strzałki/Symbole/Dingbaty/Emoji, bo leżą poza tym zakresem — bez potrzeby
+// testowania i dopisywania kolejnych pojedynczych wyjątków.
+//
+// Celowo \uXXXX, nie wklejone znaki — literalny znak w kodzie źródłowym jest
+// podatny na ciche podmiany przy kopiowaniu/kodowaniu (np. "ą" U+0105 na
+// wyglądające podobnie "á" U+00E1, co realnie się zdarzyło przy pierwszej
+// wersji tej funkcji); jawny kod Unicode to zwykłe ASCII, nie da się go
+// przypadkiem podmienić. Zakres zaczyna się od U+00A1 (nie U+0080), żeby
+// pominąć niedrukowalne znaki sterujące C1 (U+0080-U+009F) oraz surowy NBSP
+// (U+00A0, i tak już zamieniany na spację w sanitizeForSms).
+function restrictToSafeSmsCharset(text: string): string {
+  return text.replace(/[^\x20-\x7E\n\u00A1-\u00FF\u0100-\u017F]/g, "");
+}
+
 // Dzieli tekst na maks. `maxParts` części po `SMS_PART_CHARS` znaków. Jeśli tekst
 // jest dłuższy, obcina go najpierw na granicy zdania/słowa (smartTrim), więc nigdy
 // nie wysyłamy więcej niż `maxParts` SMS-ów za jedną odpowiedź.
@@ -612,7 +635,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Prom
 
   const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
   let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '.`;
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
   log("endpoint_test_start", { convId, content });
   const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[1], { userId: TEST_MODE_USER_ID, convId });
@@ -621,7 +644,9 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Prom
     return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripMarkdown(stripCitations(stripUrls(outcome.text))));
+  const cleanReply = restrictToSafeSmsCharset(
+    outcome.kind === "route" ? outcome.text : sanitizeForSms(stripMarkdown(stripCitations(stripUrls(outcome.text))))
+  );
   let maxParts: 1 | 3 | 4 | 6 = 1;
   if (outcome.kind === "route") maxParts = 6;
   else if (outcome.kind === "text" && outcome.grantedParts) maxParts = outcome.grantedParts;
@@ -834,7 +859,7 @@ Deno.serve(async (req: Request) => {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
     systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '.`;
+  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
   const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
 
@@ -850,7 +875,9 @@ Deno.serve(async (req: Request) => {
     log("reply_sms_parts_granted", { convId, convCode: convCodeFinal, granted: replySmsParts });
   }
 
-  const cleanReply = outcome.kind === "route" ? outcome.text : sanitizeForSms(stripMarkdown(stripCitations(stripUrls(outcome.text))));
+  const cleanReply = restrictToSafeSmsCharset(
+    outcome.kind === "route" ? outcome.text : sanitizeForSms(stripMarkdown(stripCitations(stripUrls(outcome.text))))
+  );
   const maxParts = outcome.kind === "route" ? 6 : replySmsParts;
   const parts = chunkForSms(cleanReply, maxParts);
 
