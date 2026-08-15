@@ -603,6 +603,47 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
   return { kind: "text", text: second.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.", grantedParts };
 }
 
+// Jedno dodatkowe, lekkie wywołanie Gemini (bez narzędzi, mały kontekst) — prosi model,
+// żeby SAM streścił własną, za długą odpowiedź do limitu znaków, zamiast pozwolić
+// chunkForSms mechanicznie ją uciąć. Wywoływane tylko wtedy, gdy pierwsza odpowiedź
+// faktycznie przekroczyła budżet — nie dokłada kosztu/opóźnienia do normalnych, krótkich
+// odpowiedzi. Jeśli i skrócona wersja nie zmieści się (model zawodzi rzadko, ale się zdarza),
+// chunkForSms zostaje jako ostateczny bezpiecznik — nigdy nie wyślemy więcej niż limit.
+async function shortenToFit(text: string, budget: number): Promise<string | null> {
+  const prompt = `Poniższy tekst jest za długi na SMS. Streść go do maksymalnie ${budget} znaków, zachowując wyłącznie najważniejszą myśl — nie próbuj zmieścić wszystkiego, wybierz jedną najważniejszą rzecz i ją streść. Nie dodawaj nowych informacji. Nie używaj markdownu (bez **, _, #, list, linków). Cudzysłowy pisz normalnie jako " lub '. Odpowiedz WYŁĄCZNIE streszczonym tekstem, bez komentarza.\n\nTekst do streszczenia:\n${text}`;
+  const result = await generateContent(
+    [{ role: "user", parts: [{ text: prompt }] }],
+    "Jesteś narzędziem do streszczania tekstu do limitu znaków SMS-a.",
+    Math.max(150, Math.ceil(budget / 1.3)),
+    false
+  );
+  return result.text;
+}
+
+// Czyści odpowiedź modelu i — jeśli mimo instrukcji w prompcie przekracza budżet znaków —
+// prosi model o samodzielne streszczenie zamiast mechanicznego przycięcia. chunkForSms
+// (wywoływane przez wołającego, po tej funkcji) zostaje jako ostateczny bezpiecznik.
+async function buildCleanReply(outcome: Exclude<AssistantOutcome, { kind: "closed" }>, maxParts: number, convId: string): Promise<string> {
+  const clean = (raw: string) =>
+    restrictToSafeSmsCharset(sanitizeForSms(stripMarkdown(stripCitations(stripUrls(raw)))));
+
+  if (outcome.kind === "route") return restrictToSafeSmsCharset(outcome.text);
+
+  let cleanReply = clean(outcome.text);
+  const budget = SMS_PART_CHARS * maxParts;
+
+  if (cleanReply.length > budget) {
+    const shortened = await shortenToFit(cleanReply, budget);
+    if (shortened) {
+      const reCleaned = clean(shortened);
+      log("reply_shortened", { convId, originalLen: cleanReply.length, shortenedLen: reCleaned.length, budget });
+      cleanReply = reCleaned;
+    }
+  }
+
+  return cleanReply;
+}
+
 // Stały health-check połączenia z API PKP PLK — bez Gemini, bez bazy. Widoczny w panelu
 // admina → Testy → Dodatkowe testy. Przydatny nie tylko przy pierwszej aktywacji klucza,
 // ale każdorazowo, gdy trzeba szybko sprawdzić, czy PKP_API_KEY nadal działa.
@@ -650,12 +691,10 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Prom
     return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  const cleanReply = restrictToSafeSmsCharset(
-    outcome.kind === "route" ? outcome.text : sanitizeForSms(stripMarkdown(stripCitations(stripUrls(outcome.text))))
-  );
   let maxParts: 1 | 3 | 4 | 6 = 1;
   if (outcome.kind === "route") maxParts = 6;
   else if (outcome.kind === "text" && outcome.grantedParts) maxParts = outcome.grantedParts;
+  const cleanReply = await buildCleanReply(outcome, maxParts, convId);
   const parts = chunkForSms(cleanReply, maxParts);
 
   log("endpoint_test_done", { convId, kind: outcome.kind, parts: parts.length });
@@ -881,10 +920,8 @@ Deno.serve(async (req: Request) => {
     log("reply_sms_parts_granted", { convId, convCode: convCodeFinal, granted: replySmsParts });
   }
 
-  const cleanReply = restrictToSafeSmsCharset(
-    outcome.kind === "route" ? outcome.text : sanitizeForSms(stripMarkdown(stripCitations(stripUrls(outcome.text))))
-  );
   const maxParts = outcome.kind === "route" ? 6 : replySmsParts;
+  const cleanReply = await buildCleanReply(outcome, maxParts, convId);
   const parts = chunkForSms(cleanReply, maxParts);
 
   await sbPost(SB, KEY, "messages", { conversation_id: convId, direction: "in", content: effectiveContent });
