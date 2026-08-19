@@ -35,6 +35,18 @@ function smsPartCharsFor(text: string): number {
 
 const CLOSE_KEYWORDS = ["koniec", "stop", "zamknij", "end"]; // szybka ścieżka bez wywoływania modelu
 
+// System prompt nigdzie nie mówił modelowi, jaka jest aktualna data/godzina — bez tego
+// "jutro"/"za 20 minut" nie da się poprawnie przeliczyć na konkretną datę/godzinę
+// przekazywaną do narzędzi kolejowych (plan_train_journey, get_train_status).
+function warsawNowLabel(): string {
+  const parts = new Intl.DateTimeFormat("pl-PL", {
+    timeZone: "Europe/Warsaw", weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")} (${get("weekday")}), godzina ${get("hour")}:${get("minute")}`;
+}
+
 // Liczba tokenów wyjściowych Gemini w zależności od przyznanego limitu SMS-ów odpowiedzi.
 // Celowo Z DUŻYM ZAPASEM ponad realny budżet znaków (np. 250 tokenów na 153-znakowy
 // SMS) — z logów produkcyjnych wiadomo, że ciasny limit (dawniej 100) potrafił uciąć
@@ -431,7 +443,7 @@ const TOOLS = [
         parameters: {
           type: "OBJECT",
           properties: {
-            station: { type: "STRING", description: "Jednoznaczna nazwa stacji kolejowej — nie 'dom'/'praca'." },
+            station: { type: "STRING", description: "Nazwa stacji kolejowej, albo 'dom'/'praca' (stacja zostanie wyprowadzona z adresu w profilu)." },
             date: { type: "STRING", description: "Data w formacie YYYY-MM-DD. Domyślnie dziś, jeśli pominięta." },
           },
           required: ["station"],
@@ -439,14 +451,29 @@ const TOOLS = [
       },
       {
         name: "get_train_status",
-        description: "Sprawdza rzeczywiste wykonanie i opóźnienie konkretnego pociągu PKP PLK po jego numerze.",
+        description:
+          "Sprawdza rzeczywiste opóźnienie/status konkretnego pociągu PKP PLK. Identyfikuje pociąg po stacji odjazdu i przybliżonej godzinie (opcjonalnie kierunku) — NIGDY nie pytaj użytkownika o numer pociągu, ludzie go nie znają. Numer w wyniku to tylko informacja zwrotna.",
         parameters: {
           type: "OBJECT",
           properties: {
-            train_id: { type: "STRING", description: "Numer/identyfikator pociągu, np. 'IC 8312'." },
-            date: { type: "STRING", description: "Data kursowania YYYY-MM-DD. Domyślnie dziś." },
+            station: { type: "STRING", description: "Stacja odjazdu, albo 'dom'/'praca'. Domyślnie 'dom', jeśli użytkownik nie podał." },
+            time: { type: "STRING", description: "Przybliżona godzina odjazdu, format HH:MM. Domyślnie bieżąca godzina, jeśli pominięta." },
+            destination: { type: "STRING", description: "Opcjonalny kierunek/stacja docelowa — pomaga wybrać właściwy pociąg, jeśli kilka odjeżdża o podobnej porze." },
           },
-          required: ["train_id"],
+        },
+      },
+      {
+        name: "plan_train_journey",
+        description:
+          "Planuje połączenie kolejowe PKP PLK między dwoma punktami, z bezpośrednim połączeniem lub jedną przesiadką znalezioną automatycznie. Endpoint sam formatuje wynik — nie twórz własnego opisu trasy.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            from: { type: "STRING", description: "Stacja/miejscowość startowa, albo 'dom'/'praca'." },
+            to: { type: "STRING", description: "Stacja/miejscowość docelowa, albo 'dom'/'praca'." },
+            date: { type: "STRING", description: "Data podróży YYYY-MM-DD. Domyślnie dziś." },
+          },
+          required: ["from", "to"],
         },
       },
       {
@@ -465,7 +492,7 @@ const TOOLS = [
 
 const DETERMINISTIC_ACTIONS = new Set([
   "get_directions", "get_transit", "get_fastest_arrival",
-  "get_train_station_board", "get_train_status", "get_train_disruptions",
+  "get_train_station_board", "get_train_status", "plan_train_journey", "get_train_disruptions",
 ]);
 
 type GeminiTurn = {
@@ -566,7 +593,13 @@ function pkpErrorMessage(toolResult: Record<string, unknown>): string {
     const candidates = Array.isArray(toolResult.candidates) ? (toolResult.candidates as string[]).join(", ") : "";
     return `Kilka stacji pasuje do "${toolResult.query ?? ""}": ${candidates}. Doprecyzuj, o którą chodzi.`;
   }
+  if (error === "no_preferred_station") {
+    const hint = String(toolResult.hint ?? "");
+    if (hint === "dom" || hint === "praca") return `Nie mam ustawionego adresu ${hint === "dom" ? "domu" : "pracy"} w Twoim profilu — podaj nazwę stacji wprost.`;
+    return "Nie udało się ustalić stacji z profilu — podaj jej nazwę wprost.";
+  }
   if (error === "no_schedule_data" || error === "no_train_data") return "Brak danych rozkładowych dla tego zapytania.";
+  if (error === "no_connection_found") return "Nie znalazłem połączenia (bezpośredniego ani z jedną przesiadką) dla tej trasy.";
   return "Nie udało się pobrać danych kolejowych. Spróbuj ponownie.";
 }
 
@@ -579,8 +612,23 @@ function formatTrainStatus(toolResult: Record<string, unknown>): string {
   if (toolResult.error) return pkpErrorMessage(toolResult);
   const delay = toolResult.delay_minutes;
   const status = toolResult.status;
-  const delayText = typeof delay === "number" ? (delay > 0 ? `opóźnienie ${delay} min` : "planowo") : "brak danych o opóźnieniu";
-  return `Pociąg ${toolResult.train_id}: ${delayText}${status ? ` (${status})` : ""}.`;
+  const plannedTime = typeof toolResult.planned_time === "string" ? toolResult.planned_time.slice(0, 5) : "?";
+  const delayText = typeof delay === "number" ? (delay > 0 ? `opóźnienie ${delay} min` : "planowo") : "brak danych real-time";
+  return `${toolResult.train} (${plannedTime}, ${toolResult.station}): ${delayText}${status ? ` (${status})` : ""}.`;
+}
+
+function formatTrainJourney(toolResult: Record<string, unknown>): string {
+  if (toolResult.error) return pkpErrorMessage(toolResult);
+  const legs = Array.isArray(toolResult.legs) ? toolResult.legs as Record<string, unknown>[] : [];
+  if (!legs.length) return "Nie udało się zbudować trasy.";
+  if (legs.length === 1) {
+    const l = legs[0];
+    return `${l.from} -> ${l.to}: odjazd ${l.departure}, przyjazd ${l.arrival} (${l.train}).`;
+  }
+  return legs.map((l, i) => i === 0
+    ? `${l.from} -> ${l.to}: odjazd ${l.departure}, przyjazd ${l.arrival} (${l.train})`
+    : `Przesiadka w ${l.from}\n${l.from} -> ${l.to}: odjazd ${l.departure}, przyjazd ${l.arrival} (${l.train})`
+  ).join("\n");
 }
 
 function formatTrainDisruptions(toolResult: Record<string, unknown>): string {
@@ -626,6 +674,7 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
     if (name === "get_fastest_arrival") return { kind: "text", text: formatFastestArrival(toolResult) };
     if (name === "get_train_station_board") return { kind: "text", text: formatTrainStationBoard(toolResult) };
     if (name === "get_train_status") return { kind: "text", text: formatTrainStatus(toolResult) };
+    if (name === "plan_train_journey") return { kind: "text", text: formatTrainJourney(toolResult) };
     if (name === "get_train_disruptions") return { kind: "text", text: formatTrainDisruptions(toolResult) };
 
     // get_directions / get_transit: pełen, sformatowany tekst trasy, wysyłany bez zmian.
@@ -696,32 +745,22 @@ async function buildCleanReply(outcome: Exclude<AssistantOutcome, { kind: "close
 // Stały health-check połączenia z API PKP PLK — bez Gemini, bez bazy. Widoczny w panelu
 // admina → Testy → Dodatkowe testy. Przydatny nie tylko przy pierwszej aktywacji klucza,
 // ale każdorazowo, gdy trzeba szybko sprawdzić, czy PKP_API_KEY nadal działa.
-// TYMCZASOWO rozszerzone o kilka dodatkowych zapytań (schemat pól + realne przykłady
-// /schedules i /operations dla Katowic) — jednorazowa weryfikacja nazw pól w
-// odpowiedziach API po aktywacji klucza. Zwęzić z powrotem do samego stations-search
-// po zakończeniu weryfikacji (patrz commit historia / poproś Claude o przywrócenie).
 async function handlePkpTest(): Promise<Response> {
   const apiKey = Deno.env.get("PKP_API_KEY");
   if (!apiKey) {
     return new Response(JSON.stringify({ ok: false, error: "PKP_API_KEY not set" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
-  const hubs = ["Warszawa Centralna", "Kraków Główny", "Wrocław Główny", "Poznań Główny", "Gdańsk Główny", "Łódź Fabryczna", "Częstochowa", "Lublin Główny", "Szczecin Główny", "Bydgoszcz Główna", "Rzeszów Główny"];
-  const calls: Array<{ label: string; url: string }> = hubs.map((h) => ({
-    label: `hub_${h}`,
-    url: `https://pdp-api.plk-sa.pl/api/v1/dictionaries/stations?search=${encodeURIComponent(h)}`,
-  }));
-  const results: Record<string, unknown> = {};
-  for (const c of calls) {
-    try {
-      const res = await fetch(c.url, { headers: { "X-API-Key": apiKey } });
-      const body = await res.text();
-      results[c.label] = { status: res.status, body: body.slice(0, 3000) };
-    } catch (e) {
-      results[c.label] = { error: String(e) };
-    }
+  try {
+    const res = await fetch("https://pdp-api.plk-sa.pl/api/v1/dictionaries/stations?search=Katowice", {
+      headers: { "X-API-Key": apiKey },
+    });
+    const body = await res.text();
+    log("pkp_test", { status: res.status, bodyPreview: body.slice(0, 500) });
+    return new Response(JSON.stringify({ ok: res.ok, status: res.status, body: body.slice(0, 2000) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  } catch (e) {
+    log("pkp_test", { exception: String(e) });
+    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
-  log("pkp_test", { results });
-  return new Response(JSON.stringify({ ok: true, results }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
 }
 
 // Sentinel user_id rozpoznawany też przez assistant-tools — musi być identyczny w obu miejscach.
@@ -741,7 +780,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Prom
 
   const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
   let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
   log("endpoint_test_start", { convId, content });
   const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[1], { userId: TEST_MODE_USER_ID, convId });
@@ -963,7 +1002,7 @@ Deno.serve(async (req: Request) => {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
     systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
-  systemPrompt += `\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
   const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
 

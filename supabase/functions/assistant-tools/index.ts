@@ -14,6 +14,7 @@ type ToolAction =
   | "resolve_rail_station"
   | "get_train_station_board"
   | "get_train_status"
+  | "plan_train_journey"
   | "get_train_disruptions";
 
 type ToolRequest = {
@@ -350,21 +351,123 @@ async function pkpSearchStations(query: string): Promise<PkpResult<PkpStation[]>
   return { ok: true, data: stations };
 }
 
+// /operations zwraca też słownik stacji ID->nazwa na poziomie odpowiedzi (potwierdzone
+// /fields/operations: "st"/"stations"). Używane do nazwania stacji przesiadkowej
+// odkrytej dynamicznie z pełnej trasy pociągu (tam mamy tylko jej ID).
+async function lookupStationName(stationId: string): Promise<string | null> {
+  const result = await pkpFetch("/operations", { stations: stationId });
+  if (!result.ok) return null;
+  const dict = (result.data && typeof result.data === "object" ? (result.data as Record<string, unknown>).stations : null) as Record<string, unknown> | null;
+  const name = dict && typeof dict === "object" ? dict[stationId] : null;
+  return typeof name === "string" ? name : null;
+}
+
+// Numer/nazwa pociągu bywa w "name" (nie zawsze — część pociągów go nie ma), inaczej
+// budowany z commercialCategorySymbol + nationalNumber. Wspólne dla wszystkich miejsc
+// pokazujących pociąg użytkownikowi.
+function trainLabel(route: Record<string, unknown>): string {
+  const name = typeof route.name === "string" && route.name.trim() ? route.name.trim() : null;
+  return name ?? ([route.commercialCategorySymbol, route.nationalNumber].filter(Boolean).join(" ") || "?");
+}
+
 // `row` to jeden element "routes[]" z /schedules?stations=X — API zwraca w
 // route.stations[] TYLKO postój na filtrowanej stacji (nie całą trasę), więc nie ma
 // tu pola z kierunkiem/celem podróży — potwierdzone realną odpowiedzią (pkp_test).
-// Numer pociągu bywa w "name" (nie zawsze — część pociągów go nie ma), inaczej
-// budowany z commercialCategorySymbol + nationalNumber.
 function formatScheduleRow(row: Record<string, unknown>): string {
   const stopsRaw = row.stations;
   const stop = (Array.isArray(stopsRaw) ? stopsRaw[0] : null) as Record<string, unknown> | null ?? {};
   const rawTime = stop.departureTime ?? stop.arrivalTime;
   const time = typeof rawTime === "string" ? rawTime.slice(0, 5) : "?:??";
-  const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : null;
-  const train = name ?? ([row.commercialCategorySymbol, row.nationalNumber].filter(Boolean).join(" ") || "?");
   const carrier = row.carrierCode ?? null;
   const track = stop.departureTrack ?? stop.arrivalTrack ?? stop.departurePlatform ?? stop.arrivalPlatform;
-  return `${time} ${carrier ? `${carrier} ` : ""}${train}${track != null ? ` tor ${track}` : ""}`;
+  return `${time} ${carrier ? `${carrier} ` : ""}${trainLabel(row)}${track != null ? ` tor ${track}` : ""}`;
+}
+
+// --- Rozwiązywanie stacji (dom/praca z profilu, albo dowolny tekst) ---
+
+// Adres polski to zwykle "ulica numer, miasto" — ostatni fragment po przecinku to
+// najlepsze przybliżenie nazwy miejscowości do wyszukania stacji. Brak przecinka:
+// używamy całego adresu jako zapytania.
+function deriveStationQueryFromAddress(address: string): string {
+  const parts = address.split(",").map((p) => p.trim()).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : address.trim();
+}
+
+// profile_home_station/profile_work_station to opcjonalna, ręczna precyzacja (np. gdy
+// ktoś mieszka bliżej konkretnej podmiejskiej stacji niż głównej stacji miasta) — gdy
+// nie ustawione, stacja jest wyprowadzana automatycznie z adresu domu/pracy, żeby nie
+// wymagać osobnego, ręcznie wypełnianego pola.
+function resolveStationPoint(value: string, user: UserProfile): { query: string | null; missing: string | null } {
+  const t = value.trim().toLowerCase();
+  if (t === "dom" || t === "home") {
+    if (user.profile_home_station) return { query: user.profile_home_station, missing: null };
+    if (user.profile_home) return { query: deriveStationQueryFromAddress(user.profile_home), missing: null };
+    return { query: null, missing: "dom" };
+  }
+  if (t === "praca" || t === "pracy" || t === "work") {
+    if (user.profile_work_station) return { query: user.profile_work_station, missing: null };
+    if (user.profile_work) return { query: deriveStationQueryFromAddress(user.profile_work), missing: null };
+    return { query: null, missing: "praca" };
+  }
+  return { query: value.trim(), missing: null };
+}
+
+type StationLookup = { ok: true; station: PkpStation } | { ok: false; body: Record<string, unknown> };
+
+// Wspólny wzorzec: szukaj stacji po tekście, oddaj błąd jeśli 0 albo >1 dopasowań —
+// używane przez resolve_rail_station, get_train_station_board, get_train_status
+// i plan_train_journey, żeby zachowanie przy niejednoznacznej nazwie było identyczne
+// wszędzie (dopytaj, nigdy nie zgaduj).
+async function resolveSingleStation(query: string): Promise<StationLookup> {
+  const search = await pkpSearchStations(query);
+  if (!search.ok) return { ok: false, body: { error: search.error } };
+  if (search.data.length === 0) return { ok: false, body: { error: "station_not_found", query } };
+  if (search.data.length > 1) {
+    return { ok: false, body: { error: "ambiguous_station", query, candidates: search.data.slice(0, 5).map((s) => s.name) } };
+  }
+  return { ok: true, station: search.data[0] };
+}
+
+// --- Data/czas (strefa Europe/Warsaw — PKP działa w czasie polskim, nie UTC) ---
+
+function warsawNow(): Date {
+  // Deno działa w UTC; przesunięcie na czas polski robimy przez sformatowanie
+  // i ponowne sparsowanie w strefie Europe/Warsaw zamiast liczyć offset ręcznie
+  // (poprawnie obsługuje też zmianę czasu letni/zimowy).
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  return new Date(`${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`);
+}
+
+function todayDateStr(): string {
+  const d = warsawNow();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// "8:14", "08:14", "8.14" -> minuty od północy; null jeśli nie da się rozpoznać.
+function parseTimeToMinutes(value: string): number | null {
+  const m = value.trim().match(/^(\d{1,2})[:.](\d{2})$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10), min = parseInt(m[2], 10);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+function timeStrToMinutes(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const m = value.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
+// Znajduje w route.stations[] wpis dla konkretnej stacji (id porównywane jako string,
+// bo API zwraca stationId jako liczbę, a nasze PkpStation.id trzyma je jako string).
+function stationStopIn(route: Record<string, unknown>, stationId: string): Record<string, unknown> | null {
+  const stops = Array.isArray(route.stations) ? route.stations as Record<string, unknown>[] : [];
+  return stops.find((s) => String(s.stationId ?? "") === stationId) ?? null;
 }
 
 Deno.serve(async (req: Request) => {
@@ -543,49 +646,53 @@ Deno.serve(async (req: Request) => {
       const user = await getUser(url, key, input.user_id);
       if (!user) return json({ error: "User not found" }, 404);
 
-      const t = pointArg.toLowerCase();
-      let query: string | null = null;
-      let addressFallback: string | null = null;
-      if (t === "dom" || t === "home") { query = user.profile_home_station; addressFallback = user.profile_home; }
-      else if (t === "praca" || t === "pracy" || t === "work") { query = user.profile_work_station; addressFallback = user.profile_work; }
-      else { query = pointArg; }
+      const resolved = resolveStationPoint(pointArg, user);
+      if (!resolved.query) return json({ error: "no_preferred_station", hint: resolved.missing }, 200);
 
-      if (!query) {
-        return json({ error: "no_preferred_station", hint: addressFallback ? "ask_user" : "missing_address" }, 200);
-      }
-
-      const search = await pkpSearchStations(query);
-      if (!search.ok) return json({ error: search.error }, 200);
-      if (search.data.length === 0) return json({ error: "station_not_found", query }, 200);
-      if (search.data.length > 1) {
-        return json({ error: "ambiguous_station", query, candidates: search.data.slice(0, 5).map((s) => s.name) }, 200);
-      }
-      return json({ station: search.data[0] });
+      const lookup = await resolveSingleStation(resolved.query);
+      if (!lookup.ok) return json(lookup.body, 200);
+      return json({ station: lookup.station });
     }
 
     if (input.action === "get_train_station_board") {
-      const stationArg = typeof input.args?.station === "string" ? input.args.station : "";
+      const stationArg = typeof input.args?.station === "string" ? input.args.station.trim() : "";
       if (!stationArg) return json({ error: "station is required" }, 400);
       const dateArg = typeof input.args?.date === "string" ? input.args.date : "";
+      const user = await getUser(url, key, input.user_id);
+      if (!user) return json({ error: "User not found" }, 404);
 
-      const search = await pkpSearchStations(stationArg);
-      if (!search.ok) return json({ error: search.error }, 200);
-      if (search.data.length === 0) return json({ error: "station_not_found", query: stationArg }, 200);
-      if (search.data.length > 1) {
-        return json({ error: "ambiguous_station", query: stationArg, candidates: search.data.slice(0, 5).map((s) => s.name) }, 200);
-      }
-      const station = search.data[0];
+      const resolvedPoint = resolveStationPoint(stationArg, user);
+      if (!resolvedPoint.query) return json({ error: "no_preferred_station", hint: resolvedPoint.missing }, 200);
+      const lookup = await resolveSingleStation(resolvedPoint.query);
+      if (!lookup.ok) return json(lookup.body, 200);
+      const station = lookup.station;
 
       // Potwierdzone dokumentacją API: parametr to "stations" (lista ID po przecinku),
       // nie "stationId"; zakres dat to "dateFrom"/"dateTo", nie "date" — bez dateTo
       // dateTo domyślnie też byłoby "dzisiaj" niezależnie od dateFrom, więc podana data
       // musi trafić do obu, inaczej przy dacie w przyszłości dateFrom > dateTo da 0 wyników.
       const params: Record<string, string> = { stations: station.id };
-      if (dateArg) { params.dateFrom = dateArg; params.dateTo = dateArg; }
+      const targetDate = dateArg || todayDateStr();
+      params.dateFrom = targetDate; params.dateTo = targetDate;
       const result = await pkpFetch("/schedules", params);
       if (!result.ok) return json({ error: result.error }, 200);
 
-      const list = asList(result.data);
+      let list = asList(result.data);
+      // Bez podanej daty pokazujemy tylko to, co jeszcze przed nami dzisiaj —
+      // tablica odjazdów, które już minęły, jest bezużyteczna.
+      if (!dateArg) {
+        const nowMin = warsawNow().getHours() * 60 + warsawNow().getMinutes();
+        list = list.filter((r) => {
+          const stop = stationStopIn(r, station.id);
+          const t = timeStrToMinutes(stop?.departureTime ?? stop?.arrivalTime);
+          return t === null || t >= nowMin;
+        });
+      }
+      list.sort((a, b) => {
+        const ta = timeStrToMinutes(stationStopIn(a, station.id)?.departureTime ?? stationStopIn(a, station.id)?.arrivalTime) ?? 9999;
+        const tb = timeStrToMinutes(stationStopIn(b, station.id)?.departureTime ?? stationStopIn(b, station.id)?.arrivalTime) ?? 9999;
+        return ta - tb;
+      });
       if (!list.length) {
         log("pkp_error", { reason: "no_schedule_entries", stationId: station.id, rawPreview: JSON.stringify(result.data).slice(0, 400) });
         return json({ error: "no_schedule_data" }, 200);
@@ -593,27 +700,94 @@ Deno.serve(async (req: Request) => {
       return json({ station: station.name, board: list.slice(0, 8).map(formatScheduleRow).join("\n") });
     }
 
+    // Identyfikacja pociągu po stacji + przybliżonej godzinie (opcjonalnie kierunek),
+    // NIE po numerze pociągu — nikt nie zna numeru swojego pociągu z głowy. "Numer"
+    // pojawia się w wyniku jako informacja, nigdy jako wymagane wejście.
+    // Krok 1: znajdź w /schedules pociąg najbliższy podanej godzinie z danej stacji.
+    // Krok 2: dopasuj go w /operations po scheduleId+orderId, żeby dostać realny status.
     if (input.action === "get_train_status") {
-      const trainIdArg = typeof input.args?.train_id === "string" ? input.args.train_id : "";
-      if (!trainIdArg) return json({ error: "train_id is required" }, 400);
-      const dateArg = typeof input.args?.date === "string" ? input.args.date : "";
+      const user = await getUser(url, key, input.user_id);
+      if (!user) return json({ error: "User not found" }, 404);
 
-      const params: Record<string, string> = { trainId: trainIdArg, withPlanned: "true" };
-      if (dateArg) params.date = dateArg;
-      const result = await pkpFetch("/operations", params);
+      const stationArg = typeof input.args?.station === "string" && input.args.station.trim() ? input.args.station.trim() : "dom";
+      const resolvedPoint = resolveStationPoint(stationArg, user);
+      if (!resolvedPoint.query) return json({ error: "no_preferred_station", hint: resolvedPoint.missing }, 200);
+      const lookup = await resolveSingleStation(resolvedPoint.query);
+      if (!lookup.ok) return json(lookup.body, 200);
+      const station = lookup.station;
+
+      let destStation: PkpStation | null = null;
+      const destArg = typeof input.args?.destination === "string" ? input.args.destination.trim() : "";
+      if (destArg) {
+        const destResolved = resolveStationPoint(destArg, user);
+        if (destResolved.query) {
+          const destLookup = await resolveSingleStation(destResolved.query);
+          if (destLookup.ok) destStation = destLookup.station;
+          // Niejednoznaczny/nieznaleziony kierunek nie blokuje sprawdzenia — kierunek
+          // to tylko pomoc w wyborze, stacja odjazdu + godzina wystarczą same w sobie.
+        }
+      }
+
+      const targetMinutes = typeof input.args?.time === "string" && parseTimeToMinutes(input.args.time) !== null
+        ? parseTimeToMinutes(input.args.time)!
+        : warsawNow().getHours() * 60 + warsawNow().getMinutes();
+
+      const date = todayDateStr();
+      const stationsParam = destStation ? `${station.id},${destStation.id}` : station.id;
+      const result = await pkpFetch("/schedules", { stations: stationsParam, dateFrom: date, dateTo: date });
       if (!result.ok) return json({ error: result.error }, 200);
 
-      const list = asList(result.data);
-      const entry = list[0] ?? (typeof result.data === "object" && result.data !== null ? result.data as Record<string, unknown> : null);
-      if (!entry) {
-        log("pkp_error", { reason: "no_operation_entry", trainId: trainIdArg, rawPreview: JSON.stringify(result.data).slice(0, 400) });
+      let candidates = asList(result.data);
+      if (destStation) {
+        // Jeśli podano kierunek, ogranicz do pociągów faktycznie jadących w tę stronę
+        // (obie stacje w trasie, w poprawnej kolejności) — reszta i tak nas nie dotyczy.
+        const filtered = candidates.filter((r) => {
+          const a = stationStopIn(r, station.id), b = stationStopIn(r, destStation!.id);
+          if (!a || !b) return false;
+          const oa = Number(a.orderNumber ?? a.ord ?? -1), ob = Number(b.orderNumber ?? b.ord ?? -2);
+          return oa < ob;
+        });
+        if (filtered.length) candidates = filtered; // brak dopasowań w tę stronę -> zostań przy pełnej liście, lepsze niż nic
+      }
+
+      let best: Record<string, unknown> | null = null;
+      let bestDiff = Infinity;
+      for (const r of candidates) {
+        const stop = stationStopIn(r, station.id);
+        const mins = timeStrToMinutes(stop?.departureTime ?? stop?.arrivalTime);
+        if (mins === null) continue;
+        const diff = Math.abs(mins - targetMinutes);
+        if (diff < bestDiff) { bestDiff = diff; best = r; }
+      }
+      if (!best) {
+        log("pkp_error", { reason: "no_schedule_match_for_status", stationId: station.id, targetMinutes, rawPreview: JSON.stringify(result.data).slice(0, 400) });
         return json({ error: "no_train_data" }, 200);
       }
+
+      const scheduleId = best.scheduleId, orderId = best.orderId;
+      const opsResult = await pkpFetch("/operations", { stations: station.id, withPlanned: "true" });
+      if (!opsResult.ok) return json({ error: opsResult.error }, 200);
+
+      const trains = asList(opsResult.data);
+      const match = trains.find((t) => String(t.scheduleId ?? "") === String(scheduleId ?? "") && String(t.orderId ?? "") === String(orderId ?? ""));
+      const opStop = match ? stationStopIn(match, station.id) : null;
+      if (!match || !opStop) {
+        log("pkp_error", { reason: "no_operation_match", scheduleId, orderId, stationId: station.id, rawPreview: JSON.stringify(opsResult.data).slice(0, 400) });
+        // Znaleźliśmy pociąg w rozkładzie, ale brak danych real-time — lepiej pokazać
+        // sam rozkład niż nic.
+        return json({
+          train: trainLabel(best), station: station.name,
+          planned_time: (stationStopIn(best, station.id)?.departureTime ?? stationStopIn(best, station.id)?.arrivalTime ?? null) as string | null,
+          delay_minutes: null, status: null,
+        });
+      }
+      const delay = opStop.departureDelayMinutes ?? opStop.arrivalDelayMinutes ?? null;
       return json({
-        train_id: trainIdArg,
-        delay_minutes: entry.delayMinutes ?? entry.delay ?? entry.delayMin ?? null,
-        status: entry.status ?? entry.trainStatus ?? null,
-        planned_time: entry.plannedTime ?? entry.scheduledTime ?? null,
+        train: trainLabel(best),
+        station: station.name,
+        planned_time: (opStop.plannedDeparture ?? opStop.plannedArrival ?? null) as string | null,
+        delay_minutes: typeof delay === "number" ? delay : null,
+        status: match.trainStatus ?? null,
       });
     }
 
@@ -627,6 +801,164 @@ Deno.serve(async (req: Request) => {
       const list = asList(result.data);
       const summaries = list.slice(0, 5).map((d) => String(d.description ?? d.message ?? d.title ?? "utrudnienie"));
       return json({ disruptions: summaries });
+    }
+
+    // Planer połączeń kolejowych z przesiadkami — najpierw bezpośrednie, jeśli brak:
+    // 1 przesiadka, znaleziona DYNAMICZNIE z realnego rozkładu (nie ze sztywnej listy
+    // stacji) — bierzemy pociągi odjeżdżające ze stacji startowej, pobieramy ich pełną
+    // trasę (/schedules/route/{scheduleId}/{orderId}), i sprawdzamy, czy z któregoś
+    // przystanku da się dojechać dalej do celu. Ograniczone do garści najbliższych
+    // odjazdów, żeby zmieścić się w limicie zapytań API (klucz Basic: 100/h).
+    if (input.action === "plan_train_journey") {
+      const user = await getUser(url, key, input.user_id);
+      if (!user) return json({ error: "User not found" }, 404);
+
+      const fromArg = typeof input.args?.from === "string" ? input.args.from.trim() : "";
+      const toArg = typeof input.args?.to === "string" ? input.args.to.trim() : "";
+      if (!fromArg || !toArg) return json({ error: "from and to are required" }, 400);
+
+      const fromResolved = resolveStationPoint(fromArg, user);
+      if (!fromResolved.query) return json({ error: "no_preferred_station", hint: fromResolved.missing }, 200);
+      const toResolved = resolveStationPoint(toArg, user);
+      if (!toResolved.query) return json({ error: "no_preferred_station", hint: toResolved.missing }, 200);
+
+      const [fromLookup, toLookup] = await Promise.all([resolveSingleStation(fromResolved.query), resolveSingleStation(toResolved.query)]);
+      if (!fromLookup.ok) return json(fromLookup.body, 200);
+      if (!toLookup.ok) return json(toLookup.body, 200);
+      const from = fromLookup.station, to = toLookup.station;
+
+      const date = typeof input.args?.date === "string" && input.args.date ? input.args.date : todayDateStr();
+      const isToday = date === todayDateStr();
+      const nowMin = warsawNow().getHours() * 60 + warsawNow().getMinutes();
+
+      const directResult = await pkpFetch("/schedules", { stations: `${from.id},${to.id}`, dateFrom: date, dateTo: date });
+      if (!directResult.ok) return json({ error: directResult.error }, 200);
+      const allRoutes = asList(directResult.data);
+
+      const direct = allRoutes
+        .map((r) => {
+          const a = stationStopIn(r, from.id), b = stationStopIn(r, to.id);
+          if (!a || !b) return null;
+          const oa = Number(a.orderNumber ?? -1), ob = Number(b.orderNumber ?? -2);
+          if (!(oa < ob)) return null;
+          const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
+          const arrMin = timeStrToMinutes(b.arrivalTime ?? b.departureTime);
+          if (depMin === null || arrMin === null) return null;
+          if (isToday && depMin < nowMin) return null;
+          return { route: r, depMin, arrMin, depTime: (a.departureTime ?? a.arrivalTime) as string, arrTime: (b.arrivalTime ?? b.departureTime) as string };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null)
+        .sort((x, y) => x.depMin - y.depMin);
+
+      if (direct.length) {
+        const best = direct[0];
+        return json({
+          direct: true,
+          legs: [{ from: from.name, to: to.name, departure: best.depTime.slice(0, 5), arrival: best.arrTime.slice(0, 5), train: trainLabel(best.route) }],
+        });
+      }
+
+      // Brak bezpośredniego — kandydaci na przesiadkę: pociągi odjeżdżające z "from"
+      // (te same dane, które już mamy z zapytania wyżej — routes dotykające from, ale
+      // nie to), ograniczone do kilku najbliższych odjazdów.
+      const fromLegCandidates = allRoutes
+        .map((r) => {
+          const a = stationStopIn(r, from.id);
+          if (!a) return null;
+          const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
+          if (depMin === null) return null;
+          if (isToday && depMin < nowMin) return null;
+          return { route: r, depMin, depTime: (a.departureTime ?? a.arrivalTime) as string };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null)
+        .sort((x, y) => x.depMin - y.depMin)
+        .slice(0, 6);
+
+      if (!fromLegCandidates.length) {
+        return json({ error: "no_connection_found" }, 200);
+      }
+
+      // Pełna trasa każdego kandydata, żeby poznać WSZYSTKIE jego przystanki (filtrowane
+      // /schedules pokazuje tylko stację, o którą pytaliśmy) — to jedyne miejsce, gdzie
+      // dopuszczamy nieprzetestowaną na żywo ścieżkę API; parsowanie defensywne + log.
+      // arriveAtTransferTime: surowy string HH:MM:SS z pełnej trasy — filtrowane
+      // /schedules (użyte gdzie indziej w tej funkcji) NIGDY nie ma wpisu dla stacji
+      // przesiadkowej (bo o nią nie pytaliśmy), więc to jedyne miejsce, gdzie ten
+      // czas jest w ogóle dostępny — musi zostać przeniesiony aż do finalnej odpowiedzi.
+      const transferCandidates: Array<{ stationId: string; arriveAtTransfer: number; arriveAtTransferTime: string; leg1: typeof fromLegCandidates[0] }> = [];
+      for (const cand of fromLegCandidates) {
+        const scheduleId = cand.route.scheduleId, orderId = cand.route.orderId;
+        if (scheduleId == null || orderId == null) continue;
+        const full = await pkpFetch(`/schedules/route/${scheduleId}/${orderId}`, {});
+        if (!full.ok) { log("pkp_error", { reason: "route_detail_failed", scheduleId, orderId, error: full.error }); continue; }
+        const fullRoute = (full.data && typeof full.data === "object" ? full.data as Record<string, unknown> : null);
+        const stops = fullRoute ? (Array.isArray(fullRoute.stations) ? fullRoute.stations as Record<string, unknown>[]
+          : Array.isArray(fullRoute.route) ? fullRoute.route as Record<string, unknown>[] : []) : [];
+        if (!stops.length) { log("pkp_error", { reason: "route_detail_unparsed", scheduleId, orderId, rawPreview: JSON.stringify(full.data).slice(0, 400) }); continue; }
+        for (const s of stops) {
+          const sid = String(s.stationId ?? "");
+          if (!sid || sid === from.id || sid === to.id) continue;
+          const rawTime = s.arrivalTime ?? s.departureTime;
+          const arrMin = timeStrToMinutes(rawTime);
+          if (arrMin === null) continue;
+          transferCandidates.push({ stationId: sid, arriveAtTransfer: arrMin, arriveAtTransferTime: String(rawTime), leg1: cand });
+        }
+      }
+
+      if (!transferCandidates.length) {
+        return json({ error: "no_connection_found" }, 200);
+      }
+
+      const candidateIds = [...new Set(transferCandidates.map((c) => c.stationId))];
+      const onwardResult = await pkpFetch("/schedules", { stations: `${candidateIds.join(",")},${to.id}`, dateFrom: date, dateTo: date });
+      if (!onwardResult.ok) return json({ error: "no_connection_found" }, 200);
+      const onwardRoutes = asList(onwardResult.data);
+
+      const MIN_TRANSFER_BUFFER_MIN = 7;
+      type Combo = { tc: typeof transferCandidates[0]; leg2Route: Record<string, unknown>; leg2DepMin: number; arrMin: number };
+      const combos: Combo[] = [];
+      for (const tc of transferCandidates) {
+        for (const r of onwardRoutes) {
+          const a = stationStopIn(r, tc.stationId), b = stationStopIn(r, to.id);
+          if (!a || !b) continue;
+          const oa = Number(a.orderNumber ?? -1), ob = Number(b.orderNumber ?? -2);
+          if (!(oa < ob)) continue;
+          const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
+          const arrMin = timeStrToMinutes(b.arrivalTime ?? b.departureTime);
+          if (depMin === null || arrMin === null) continue;
+          if (depMin < tc.arriveAtTransfer + MIN_TRANSFER_BUFFER_MIN) continue;
+          combos.push({ tc, leg2Route: r, leg2DepMin: depMin, arrMin });
+        }
+      }
+
+      if (!combos.length) return json({ error: "no_connection_found" }, 200);
+      combos.sort((x, y) => x.arrMin - y.arrMin || x.tc.leg1.depMin - y.tc.leg1.depMin);
+      const chosen = combos[0];
+      const leg1Stop = stationStopIn(chosen.tc.leg1.route, from.id);
+      const leg2DepStop = stationStopIn(chosen.leg2Route, chosen.tc.stationId);
+      const leg2ArrStop = stationStopIn(chosen.leg2Route, to.id);
+      // Pełna trasa dała tylko ID stacji przesiadkowej, nie nazwę — /operations zwraca
+      // słownik ID->nazwa ("stations" w odpowiedzi, potwierdzone /fields/operations),
+      // więc doszukujemy nazwy tym samym, tanim zapytaniem, zamiast zgadywać.
+      const transferName = (await lookupStationName(chosen.tc.stationId)) ?? `stacja ${chosen.tc.stationId}`;
+
+      return json({
+        direct: false,
+        legs: [
+          {
+            from: from.name, to: transferName,
+            departure: String(leg1Stop?.departureTime ?? leg1Stop?.arrivalTime ?? "").slice(0, 5),
+            arrival: chosen.tc.arriveAtTransferTime.slice(0, 5),
+            train: trainLabel(chosen.tc.leg1.route),
+          },
+          {
+            from: transferName, to: to.name,
+            departure: String(leg2DepStop?.departureTime ?? "").slice(0, 5),
+            arrival: String(leg2ArrStop?.arrivalTime ?? leg2ArrStop?.departureTime ?? "").slice(0, 5),
+            train: trainLabel(chosen.leg2Route),
+          },
+        ],
+      });
     }
 
     return json({ error: "Unknown action" }, 400);
