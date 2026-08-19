@@ -705,15 +705,11 @@ async function handlePkpTest(): Promise<Response> {
   if (!apiKey) {
     return new Response(JSON.stringify({ ok: false, error: "PKP_API_KEY not set" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
-  const calls: Array<{ label: string; url: string }> = [
-    { label: "stations_search", url: "https://pdp-api.plk-sa.pl/api/v1/dictionaries/stations?search=Katowice" },
-    { label: "fields_schedules", url: "https://pdp-api.plk-sa.pl/api/v1/fields/schedules" },
-    { label: "fields_operations", url: "https://pdp-api.plk-sa.pl/api/v1/fields/operations" },
-    { label: "fields_disruptions", url: "https://pdp-api.plk-sa.pl/api/v1/fields/disruptions" },
-    { label: "schedules_sample", url: "https://pdp-api.plk-sa.pl/api/v1/schedules?stations=73312" },
-    { label: "operations_sample", url: "https://pdp-api.plk-sa.pl/api/v1/operations?stations=73312&withPlanned=true" },
-    { label: "disruptions_sample", url: "https://pdp-api.plk-sa.pl/api/v1/disruptions" },
-  ];
+  const hubs = ["Warszawa Centralna", "Kraków Główny", "Wrocław Główny", "Poznań Główny", "Gdańsk Główny", "Łódź Fabryczna", "Częstochowa", "Lublin Główny", "Szczecin Główny", "Bydgoszcz Główna", "Rzeszów Główny"];
+  const calls: Array<{ label: string; url: string }> = hubs.map((h) => ({
+    label: `hub_${h}`,
+    url: `https://pdp-api.plk-sa.pl/api/v1/dictionaries/stations?search=${encodeURIComponent(h)}`,
+  }));
   const results: Record<string, unknown> = {};
   for (const c of calls) {
     try {
