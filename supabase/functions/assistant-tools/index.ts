@@ -564,8 +564,12 @@ Deno.serve(async (req: Request) => {
       }
       const station = search.data[0];
 
-      const params: Record<string, string> = { stationId: station.id };
-      if (dateArg) params.date = dateArg;
+      // Potwierdzone dokumentacją API: parametr to "stations" (lista ID po przecinku),
+      // nie "stationId"; zakres dat to "dateFrom"/"dateTo", nie "date" — bez dateTo
+      // dateTo domyślnie też byłoby "dzisiaj" niezależnie od dateFrom, więc podana data
+      // musi trafić do obu, inaczej przy dacie w przyszłości dateFrom > dateTo da 0 wyników.
+      const params: Record<string, string> = { stations: station.id };
+      if (dateArg) { params.dateFrom = dateArg; params.dateTo = dateArg; }
       const result = await pkpFetch("/schedules", params);
       if (!result.ok) return json({ error: result.error }, 200);
 
