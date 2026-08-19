@@ -696,22 +696,36 @@ async function buildCleanReply(outcome: Exclude<AssistantOutcome, { kind: "close
 // Stały health-check połączenia z API PKP PLK — bez Gemini, bez bazy. Widoczny w panelu
 // admina → Testy → Dodatkowe testy. Przydatny nie tylko przy pierwszej aktywacji klucza,
 // ale każdorazowo, gdy trzeba szybko sprawdzić, czy PKP_API_KEY nadal działa.
+// TYMCZASOWO rozszerzone o kilka dodatkowych zapytań (schemat pól + realne przykłady
+// /schedules i /operations dla Katowic) — jednorazowa weryfikacja nazw pól w
+// odpowiedziach API po aktywacji klucza. Zwęzić z powrotem do samego stations-search
+// po zakończeniu weryfikacji (patrz commit historia / poproś Claude o przywrócenie).
 async function handlePkpTest(): Promise<Response> {
   const apiKey = Deno.env.get("PKP_API_KEY");
   if (!apiKey) {
     return new Response(JSON.stringify({ ok: false, error: "PKP_API_KEY not set" }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
-  try {
-    const res = await fetch("https://pdp-api.plk-sa.pl/api/v1/dictionaries/stations?search=Katowice", {
-      headers: { "X-API-Key": apiKey },
-    });
-    const body = await res.text();
-    log("pkp_test", { status: res.status, bodyPreview: body.slice(0, 500) });
-    return new Response(JSON.stringify({ ok: res.ok, status: res.status, body: body.slice(0, 2000) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
-  } catch (e) {
-    log("pkp_test", { exception: String(e) });
-    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+  const calls: Array<{ label: string; url: string }> = [
+    { label: "stations_search", url: "https://pdp-api.plk-sa.pl/api/v1/dictionaries/stations?search=Katowice" },
+    { label: "fields_schedules", url: "https://pdp-api.plk-sa.pl/api/v1/fields/schedules" },
+    { label: "fields_operations", url: "https://pdp-api.plk-sa.pl/api/v1/fields/operations" },
+    { label: "fields_disruptions", url: "https://pdp-api.plk-sa.pl/api/v1/fields/disruptions" },
+    { label: "schedules_sample", url: "https://pdp-api.plk-sa.pl/api/v1/schedules?stations=73312" },
+    { label: "operations_sample", url: "https://pdp-api.plk-sa.pl/api/v1/operations?stations=73312&withPlanned=true" },
+    { label: "disruptions_sample", url: "https://pdp-api.plk-sa.pl/api/v1/disruptions" },
+  ];
+  const results: Record<string, unknown> = {};
+  for (const c of calls) {
+    try {
+      const res = await fetch(c.url, { headers: { "X-API-Key": apiKey } });
+      const body = await res.text();
+      results[c.label] = { status: res.status, body: body.slice(0, 3000) };
+    } catch (e) {
+      results[c.label] = { error: String(e) };
+    }
   }
+  log("pkp_test", { results });
+  return new Response(JSON.stringify({ ok: true, results }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
 }
 
 // Sentinel user_id rozpoznawany też przez assistant-tools — musi być identyczny w obu miejscach.
