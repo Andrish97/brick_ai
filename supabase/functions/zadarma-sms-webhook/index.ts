@@ -766,39 +766,49 @@ async function handlePkpTest(): Promise<Response> {
 // Sentinel user_id rozpoznawany też przez assistant-tools — musi być identyczny w obu miejscach.
 const TEST_MODE_USER_ID = "00000000-0000-0000-0000-000000000000";
 
-// Panel admina → Testy → Test endpointów. Prawdziwe wywołania Gemini, assistant-tools
+type TestTurn = { role: "user" | "model"; text: string };
+
+// Panel admina → Testy → Testowe rozmowy. Prawdziwe wywołania Gemini, assistant-tools
 // i Google Maps — ale bez realnego użytkownika i bez zapisu jakiejkolwiek rozmowy/
 // wiadomości do bazy. Zero SMS-ów, zero danych, czysta symulacja działania endpointów.
-async function handleEndpointTest(SB: string, KEY: string, rawMsg: string): Promise<Response> {
+// Wieloturowe: `history` (poprzednie tury tej samej rozmowy testowej) i `grantedParts`
+// (limit odpowiedzi wynegocjowany przez allow_long_reply w poprzedniej turze) trzyma
+// wyłącznie klient (panel, w pamięci przeglądarki) i przekazuje przy każdym wywołaniu —
+// serwer pozostaje bezstanowy, więc "rozmowa" istnieje tylko po stronie testującego,
+// nigdy w conversations/messages, i można mieć ich równolegle dowolnie wiele.
+async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, history: TestTurn[], grantedParts: 1 | 3 | 4): Promise<Response> {
   const content = rawMsg.trim();
   if (!content) return new Response("Empty content", { status: 200, headers: CORS });
 
   const convId = crypto.randomUUID();
-  const suffix = `\n000000`;
 
-  const aiContents: GeminiContent[] = [{ role: "user", parts: [{ text: content }] }];
+  const aiContents: GeminiContent[] = [
+    ...history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })),
+    { role: "user", parts: [{ text: content }] },
+  ];
 
   const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
   let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
-  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to 1 SMS (${SMS_PART_CHARS} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${grantedParts} SMS (${SMS_PART_CHARS * grantedParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
-  log("endpoint_test_start", { convId, content });
-  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[1], { userId: TEST_MODE_USER_ID, convId });
+  log("endpoint_test_start", { convId, content, historyLen: history.length, grantedParts });
+  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId });
 
   if (outcome.kind === "closed") {
-    return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true, granted_parts: grantedParts }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  let maxParts: 1 | 3 | 4 | 6 = 1;
+  let maxParts: 1 | 3 | 4 | 6 = grantedParts;
   if (outcome.kind === "route") maxParts = 6;
   else if (outcome.kind === "text" && outcome.grantedParts) maxParts = outcome.grantedParts;
   const cleanReply = await buildCleanReply(outcome, maxParts, convId);
   const parts = chunkForSms(cleanReply, maxParts);
+  const nextGrantedParts = (outcome.kind === "text" && outcome.grantedParts) ? outcome.grantedParts : grantedParts;
 
   log("endpoint_test_done", { convId, kind: outcome.kind, parts: parts.length });
 
   return new Response(
-    JSON.stringify({ ok: true, test_mode: true, reply: parts.map((p) => `${p}${suffix}`).join("\n---\n"), parts: parts.length }),
+    JSON.stringify({ ok: true, test_mode: true, reply: cleanReply, parts: parts.length, granted_parts: nextGrantedParts }),
     { status: 200, headers: { ...CORS, "Content-Type": "application/json" } }
   );
 }
@@ -818,11 +828,18 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: CORS });
 
   let raw: Record<string, string>;
+  // Tryb testowy (endpoint_test=1) przesyła też `history`/`grantedParts` — pola, które
+  // nie mają sensu w typie używanym dla realnego SMS-a (Record<string,string>), więc
+  // trzymamy nieprzetworzony JSON osobno, tylko na potrzeby tej ścieżki.
+  let rawJson: Record<string, unknown> = {};
   try {
     const ct = req.headers.get("content-type") ?? "";
-    raw = ct.includes("application/json")
-      ? await req.json()
-      : Object.fromEntries(new URLSearchParams(await req.text()));
+    if (ct.includes("application/json")) {
+      rawJson = await req.json();
+      raw = rawJson as Record<string, string>;
+    } else {
+      raw = Object.fromEntries(new URLSearchParams(await req.text()));
+    }
   } catch {
     return new Response("Bad request", { status: 400, headers: CORS });
   }
@@ -857,7 +874,13 @@ Deno.serve(async (req: Request) => {
   const smsBody = data.msg ?? data.text ?? "";
 
   if (testMode) {
-    return await handleEndpointTest(SB, KEY, smsBody);
+    const historyIn = Array.isArray(rawJson.history)
+      ? (rawJson.history as unknown[]).filter(
+          (h): h is TestTurn => !!h && typeof h === "object" && ((h as TestTurn).role === "user" || (h as TestTurn).role === "model") && typeof (h as TestTurn).text === "string",
+        )
+      : [];
+    const grantedPartsIn = ([1, 3, 4].includes(rawJson.grantedParts as number) ? rawJson.grantedParts : 1) as 1 | 3 | 4;
+    return await handleEndpointTest(SB, KEY, smsBody, historyIn, grantedPartsIn);
   }
 
   if (!senderPhone || !smsBody) {

@@ -1710,8 +1710,12 @@ let _endpointTestResults = [];  // [{label, msg, status, ok, data}]
 let _endpointTestsRunning = false;
 let _pkpTestResult = null;      // tymczasowe — test aktywacji PKP_API_KEY
 let _pkpTestRunning = false;
-let _freeEndpointResult = null; // dowolne zapytanie testowe (endpoint_test=1), nie tylko stała bateria
-let _freeEndpointRunning = false;
+// Testowe rozmowy wieloturowe (endpoint_test=1) — ten sam "mózg" co prawdziwe SMS-y
+// (system prompt, narzędzia, limit długości), ale historia trzymana wyłącznie tutaj,
+// w pamięci przeglądarki: zero SMS-ów, zero zapisów w conversations/messages. Można
+// mieć kilka równoległych wątków naraz — stąd tablica, nie pojedynczy obiekt.
+let _testConvos = [];        // [{id, label, turns: [{role:'user'|'model', text}], grantedParts, running, error}]
+let _activeTestConvoId = null;
 
 // Jedno zdanie na narzędzie — endpoint_test=1, więc zero wysłanych SMS-ów i zero zapisów w bazie.
 // Ten sam zestaw co scripts/test-endpoints.ts, żeby wynik był porównywalny.
@@ -1888,19 +1892,7 @@ function renderEndpointTestsForm() {
     : '<p style="color:var(--muted);font-size:13px;margin-top:14px">Brak wyników — uruchom testy.</p>';
 
   return `
-    <div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:16px">
-      <label style="font-size:13px;font-weight:600">Własne zapytanie (bez SMS-a)</label>
-      <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">
-        Wpisz dowolne zdanie tak, jakbyś napisał je do asystenta — poleci przez ten sam syntetyczny
-        tryb (<code>?endpoint_test=1</code>, syntetyczny profil, zero SMS-ów, zero zapisów w bazie).
-        Do zabawy z nowymi narzędziami kolejowymi bez ryzyka realnej wysyłki.
-      </p>
-      <textarea id="free-endpoint-msg" placeholder="np. chcę jutro jechać do Tarnowskich Gór po 8, pokaż co i kiedy tam jedzie" style="width:100%;min-height:60px"></textarea>
-      <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="runFreeEndpointTest()" ${_freeEndpointRunning ? 'disabled' : ''}>
-        ${_freeEndpointRunning ? 'Testuję…' : '▶ Wyślij zapytanie testowe'}
-      </button>
-      <div id="free-endpoint-result" style="margin-top:10px">${_freeEndpointResult ? renderEndpointTestResult(_freeEndpointResult) : ''}</div>
-    </div>
+    ${renderTestConvosBox()}
     <p style="color:var(--muted);font-size:13px;margin-bottom:14px">
       Przepuszcza po kolei zdanie wyzwalające każde narzędzie asystenta przez tryb testowy webhooka
       (<code>?endpoint_test=1</code>). Gemini, assistant-tools i Google Maps są wywoływane naprawdę —
@@ -1915,38 +1907,121 @@ function renderEndpointTestsForm() {
   `;
 }
 
-async function runFreeEndpointTest() {
-  const msg = (document.getElementById('free-endpoint-msg')?.value || '').trim();
+function renderTestConvosBox() {
+  const active = _testConvos.find(c => c.id === _activeTestConvoId) || null;
+  const tabsHtml = _testConvos.map(c => `
+    <button class="btn ${c.id === _activeTestConvoId ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="selectTestConvo('${c.id}')">${escHtml(c.label)}</button>
+  `).join('');
+
+  return `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <label style="font-size:13px;font-weight:600">Testowe rozmowy (bez SMS-a)</label>
+        <button class="btn btn-ghost btn-sm" onclick="newTestConvo()">+ Nowa rozmowa</button>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin:4px 0 10px">
+        Ten sam "mózg" co prawdziwe SMS-y — system prompt, wszystkie narzędzia, limit długości
+        odpowiedzi i możliwość poproszenia o dłuższą (allow_long_reply) — ale historia rozmowy jest
+        trzymana tylko tutaj, w przeglądarce (<code>?endpoint_test=1</code>, syntetyczny profil,
+        zero SMS-ów, zero zapisów w conversations/messages). Możesz mieć kilka wątków naraz.
+      </p>
+      ${tabsHtml ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${tabsHtml}</div>` : ''}
+      ${active ? renderTestConvoThread(active) : '<p style="color:var(--muted);font-size:13px">Brak aktywnej rozmowy — kliknij "+ Nowa rozmowa".</p>'}
+    </div>
+  `;
+}
+
+function renderTestConvoThread(c) {
+  const bubbles = c.turns.map(t => `
+    <div style="align-self:${t.role === 'user' ? 'flex-end' : 'flex-start'};max-width:85%">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:2px;text-align:${t.role === 'user' ? 'right' : 'left'}">${t.role === 'user' ? 'Ty' : 'AI'}</div>
+      <div style="font-size:13px;white-space:pre-wrap;word-break:break-word;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:${t.role === 'user' ? 'var(--accent2)' : 'var(--card)'};color:${t.role === 'user' ? '#fff' : 'inherit'}">${escHtml(t.text)}</div>
+    </div>
+  `).join('') || '<div style="font-size:12px;color:var(--muted);text-align:center;padding:8px">Napisz coś niżej, żeby zacząć.</div>';
+  const runningHtml = c.running ? '<div style="font-size:12px;color:var(--muted);font-style:italic">AI pisze…</div>' : '';
+  const errorHtml = c.error ? `<div style="font-size:12px;color:var(--danger)">${escHtml(c.error)}</div>` : '';
+
+  return `
+    <div id="test-convo-thread-${c.id}">
+      <div style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto;padding:8px;background:var(--bg);border-radius:6px">
+        ${bubbles}${runningHtml}${errorHtml}
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <input id="test-convo-input" type="text" placeholder="Napisz wiadomość, tak jakbyś pisał SMS…" style="flex:1" ${c.running ? 'disabled' : ''} onkeydown="if(event.key==='Enter'){event.preventDefault();sendTestConvoMessage();}">
+        <button class="btn btn-primary btn-sm" onclick="sendTestConvoMessage()" ${c.running ? 'disabled' : ''}>Wyślij</button>
+        <button class="btn btn-ghost btn-sm" onclick="deleteTestConvo('${c.id}')">Usuń</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">
+        Limit odpowiedzi: ${c.grantedParts} SMS (${c.grantedParts * 153} zn.)${c.lastParts != null ? ` · ostatnia odpowiedź: ${c.lastParts} część(i)` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function newTestConvo() {
+  const id = `t${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  _testConvos.push({ id, label: 'Nowa rozmowa', turns: [], grantedParts: 1, running: false, error: null, lastParts: null });
+  _activeTestConvoId = id;
+  renderSmsContent();
+  setTimeout(() => document.getElementById('test-convo-input')?.focus(), 0);
+}
+
+function selectTestConvo(id) {
+  _activeTestConvoId = id;
+  renderSmsContent();
+}
+
+function deleteTestConvo(id) {
+  _testConvos = _testConvos.filter(c => c.id !== id);
+  if (_activeTestConvoId === id) _activeTestConvoId = _testConvos[0]?.id ?? null;
+  renderSmsContent();
+}
+
+async function sendTestConvoMessage() {
+  const input = document.getElementById('test-convo-input');
+  const msg = (input?.value || '').trim();
   if (!msg) return;
-  _freeEndpointRunning = true;
-  _freeEndpointResult = { label: 'Własne zapytanie', msg, status: 'running', ok: null };
+
+  let convo = _testConvos.find(c => c.id === _activeTestConvoId);
+  if (!convo) { newTestConvo(); convo = _testConvos.find(c => c.id === _activeTestConvoId); }
+  if (convo.running) return;
+
+  const historyForRequest = convo.turns.map(t => ({ role: t.role, text: t.text }));
+  const grantedPartsForRequest = convo.grantedParts;
+
+  if (input) input.value = '';
+  convo.turns.push({ role: 'user', text: msg });
+  if (convo.turns.length === 1) convo.label = msg.length > 28 ? msg.slice(0, 28) + '…' : msg;
+  convo.running = true;
+  convo.error = null;
   renderSmsContent();
 
   try {
     const res = await fetch(`${SB_URL}/functions/v1/zadarma-sms-webhook?endpoint_test=1`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: 'incoming_sms', msg }),
+      body: JSON.stringify({ event: 'incoming_sms', msg, history: historyForRequest, grantedParts: grantedPartsForRequest }),
     });
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch {}
     const ok = res.ok && json?.ok !== false;
-    _freeEndpointResult = {
-      label: 'Własne zapytanie', msg, status: 'done', ok,
-      httpStatus: res.status,
-      reply: json?.reply ?? null,
-      closed: !!json?.closed,
-      parts: json?.parts ?? null,
-      error: !ok ? (json?.error || text) : null,
-      raw: text,
-    };
+    if (!ok) {
+      convo.error = json?.error || text || `HTTP ${res.status}`;
+    } else if (json?.closed) {
+      convo.turns.push({ role: 'model', text: '— rozmowa zamknięta przez asystenta —' });
+    } else if (json?.reply) {
+      convo.turns.push({ role: 'model', text: json.reply });
+      convo.lastParts = json.parts ?? null;
+    }
+    if (typeof json?.granted_parts === 'number') convo.grantedParts = json.granted_parts;
   } catch (e) {
-    _freeEndpointResult = { label: 'Własne zapytanie', msg, status: 'done', ok: false, httpStatus: null, reply: null, closed: false, parts: null, error: String(e), raw: null };
+    convo.error = String(e);
   }
 
-  _freeEndpointRunning = false;
+  convo.running = false;
   renderSmsContent();
+  setTimeout(() => document.getElementById('test-convo-input')?.focus(), 0);
 }
 
 // ── Sub-tab: Dodatkowe testy — diagnostyka infrastruktury zewnętrznej (PKP, Zadarma),
