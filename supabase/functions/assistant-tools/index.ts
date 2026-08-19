@@ -321,10 +321,14 @@ async function pkpFetch(path: string, params: Record<string, string> = {}): Prom
   }
 }
 
+// Klucze potwierdzone realną odpowiedzią API (patrz pkp_test z aktywnym kluczem):
+// /dictionaries/stations -> "stations", /schedules -> "routes", /operations -> "trains",
+// /disruptions -> "disruptions". Reszta (items/data/value) zostaje jako ogólny fallback.
 function asList(data: unknown): Record<string, unknown>[] {
   if (Array.isArray(data)) return data as Record<string, unknown>[];
   const obj = data as Record<string, unknown> | null;
-  const candidate = obj?.items ?? obj?.data ?? obj?.stations ?? obj?.schedules ?? obj?.value;
+  const candidate = obj?.stations ?? obj?.routes ?? obj?.trains ?? obj?.disruptions
+    ?? obj?.items ?? obj?.data ?? obj?.schedules ?? obj?.value;
   return Array.isArray(candidate) ? candidate as Record<string, unknown>[] : [];
 }
 
@@ -346,13 +350,21 @@ async function pkpSearchStations(query: string): Promise<PkpResult<PkpStation[]>
   return { ok: true, data: stations };
 }
 
+// `row` to jeden element "routes[]" z /schedules?stations=X — API zwraca w
+// route.stations[] TYLKO postój na filtrowanej stacji (nie całą trasę), więc nie ma
+// tu pola z kierunkiem/celem podróży — potwierdzone realną odpowiedzią (pkp_test).
+// Numer pociągu bywa w "name" (nie zawsze — część pociągów go nie ma), inaczej
+// budowany z commercialCategorySymbol + nationalNumber.
 function formatScheduleRow(row: Record<string, unknown>): string {
-  const time = String(row.plannedTime ?? row.departureTime ?? row.time ?? row.scheduledTime ?? "?:??").slice(0, 5);
-  const train = String(row.trainNumber ?? row.trainId ?? row.number ?? row.trainFullName ?? "?");
-  const carrier = row.carrierCode ?? row.carrier ?? null;
-  const dest = String(row.destination ?? row.direction ?? row.to ?? row.endStation ?? "?");
-  const track = row.platform ?? row.track ?? row.trackNumber;
-  return `${time} ${carrier ? `${carrier} ` : ""}${train} -> ${dest}${track != null ? ` tor ${track}` : ""}`;
+  const stopsRaw = row.stations;
+  const stop = (Array.isArray(stopsRaw) ? stopsRaw[0] : null) as Record<string, unknown> | null ?? {};
+  const rawTime = stop.departureTime ?? stop.arrivalTime;
+  const time = typeof rawTime === "string" ? rawTime.slice(0, 5) : "?:??";
+  const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : null;
+  const train = name ?? ([row.commercialCategorySymbol, row.nationalNumber].filter(Boolean).join(" ") || "?");
+  const carrier = row.carrierCode ?? null;
+  const track = stop.departureTrack ?? stop.arrivalTrack ?? stop.departurePlatform ?? stop.arrivalPlatform;
+  return `${time} ${carrier ? `${carrier} ` : ""}${train}${track != null ? ` tor ${track}` : ""}`;
 }
 
 Deno.serve(async (req: Request) => {
