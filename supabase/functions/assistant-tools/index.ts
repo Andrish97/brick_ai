@@ -959,11 +959,119 @@ Deno.serve(async (req: Request) => {
       }
 
       if (!combos.length) {
+        // Jedna przesiadka nie wystarczyła — niektóre trasy (np. Zamość) naprawdę
+        // wymagają dwóch. `onwardRoutes` już zawiera pociągi odjeżdżające ZE stacji
+        // przesiadkowych 1. rzędu (bo zapytanie o nie było bez ograniczenia do samego
+        // `to`), więc drugi poziom przesiadki budujemy z tych samych danych — bez
+        // dodatkowego zapytania /schedules, tylko kolejny odczyt pełnej trasy dla garści
+        // najszybszych odjazdów z przesiadki 1. rzędu.
+        type Leg2Departure = { tc: typeof transferCandidates[0]; route: Record<string, unknown>; depMin: number };
+        const leg2Departures: Leg2Departure[] = [];
+        for (const tc of transferCandidates) {
+          for (const r of onwardRoutes) {
+            const a = stationStopIn(r, tc.stationId);
+            if (!a) continue;
+            const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
+            if (depMin === null || depMin < tc.arriveAtTransfer + MIN_TRANSFER_BUFFER_MIN) continue;
+            leg2Departures.push({ tc, route: r, depMin });
+          }
+        }
+        leg2Departures.sort((a, b) => a.depMin - b.depMin);
+        const boundedLeg2 = leg2Departures.slice(0, 6);
+
+        type Transfer2Candidate = { stationId: string; arriveAtTransfer2: number; arriveAtTransfer2Time: string; leg2: Leg2Departure };
+        const transfer2Candidates: Transfer2Candidate[] = [];
+        const seenRouteKeys = new Set<string>();
+        for (const l2 of boundedLeg2) {
+          const scheduleId = l2.route.scheduleId, orderId = l2.route.orderId;
+          if (scheduleId == null || orderId == null) continue;
+          const routeKey = `${scheduleId}:${orderId}`;
+          if (seenRouteKeys.has(routeKey)) continue;
+          seenRouteKeys.add(routeKey);
+          const full = await pkpFetch(`/schedules/route/${scheduleId}/${orderId}`, {});
+          if (!full.ok) { log("pkp_error", { reason: "route_detail_failed_leg2", scheduleId, orderId, error: full.error }); continue; }
+          const fullRoute = (full.data && typeof full.data === "object" ? full.data as Record<string, unknown> : null);
+          const stops = fullRoute ? (Array.isArray(fullRoute.stations) ? fullRoute.stations as Record<string, unknown>[]
+            : Array.isArray(fullRoute.route) ? fullRoute.route as Record<string, unknown>[] : []) : [];
+          for (const s of stops) {
+            const sid = String(s.stationId ?? "");
+            if (!sid || sid === from.id || sid === to.id || sid === l2.tc.stationId) continue;
+            const rawTime = s.arrivalTime ?? s.departureTime;
+            const arrMin = timeStrToMinutes(rawTime);
+            if (arrMin === null) continue;
+            transfer2Candidates.push({ stationId: sid, arriveAtTransfer2: arrMin, arriveAtTransfer2Time: String(rawTime), leg2: l2 });
+          }
+        }
+
+        if (transfer2Candidates.length) {
+          const t2Ids = [...new Set(transfer2Candidates.map((c) => c.stationId))];
+          const finalResult = await pkpFetch("/schedules", { stations: `${t2Ids.join(",")},${to.id}`, dateFrom: date, dateTo: date });
+          const finalRoutes = finalResult.ok ? asList(finalResult.data) : [];
+
+          type Combo3 = { t2: Transfer2Candidate; leg3Route: Record<string, unknown>; arrMin: number };
+          const combos3: Combo3[] = [];
+          for (const t2 of transfer2Candidates) {
+            for (const r of finalRoutes) {
+              const a = stationStopIn(r, t2.stationId), b = stationStopIn(r, to.id);
+              if (!a || !b) continue;
+              const oa = Number(a.orderNumber ?? -1), ob = Number(b.orderNumber ?? -2);
+              if (!(oa < ob)) continue;
+              const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
+              const arrMin = timeStrToMinutes(b.arrivalTime ?? b.departureTime);
+              if (depMin === null || arrMin === null) continue;
+              if (depMin < t2.arriveAtTransfer2 + MIN_TRANSFER_BUFFER_MIN) continue;
+              combos3.push({ t2, leg3Route: r, arrMin });
+            }
+          }
+
+          if (combos3.length) {
+            combos3.sort((x, y) => x.arrMin - y.arrMin);
+            const chosen3 = combos3[0];
+            const tc = chosen3.t2.leg2.tc;
+            const leg1Stop = stationStopIn(tc.leg1.route, from.id);
+            const leg2DepStop = stationStopIn(chosen3.t2.leg2.route, tc.stationId);
+            const leg2ArrStop = stationStopIn(chosen3.t2.leg2.route, chosen3.t2.stationId);
+            const leg3DepStop = stationStopIn(chosen3.leg3Route, chosen3.t2.stationId);
+            const leg3ArrStop = stationStopIn(chosen3.leg3Route, to.id);
+            const [transfer1Name, transfer2Name] = await Promise.all([
+              lookupStationName(tc.stationId),
+              lookupStationName(chosen3.t2.stationId),
+            ]);
+            const t1Label = transfer1Name ?? `stacja ${tc.stationId}`;
+            const t2Label = transfer2Name ?? `stacja ${chosen3.t2.stationId}`;
+
+            return json({
+              direct: false,
+              legs: [
+                {
+                  from: from.name, to: t1Label,
+                  departure: String(leg1Stop?.departureTime ?? leg1Stop?.arrivalTime ?? "").slice(0, 5),
+                  arrival: tc.arriveAtTransferTime.slice(0, 5),
+                  train: trainLabel(tc.leg1.route),
+                },
+                {
+                  from: t1Label, to: t2Label,
+                  departure: String(leg2DepStop?.departureTime ?? "").slice(0, 5),
+                  arrival: chosen3.t2.arriveAtTransfer2Time.slice(0, 5),
+                  train: trainLabel(chosen3.t2.leg2.route),
+                },
+                {
+                  from: t2Label, to: to.name,
+                  departure: String(leg3DepStop?.departureTime ?? "").slice(0, 5),
+                  arrival: String(leg3ArrStop?.arrivalTime ?? leg3ArrStop?.departureTime ?? "").slice(0, 5),
+                  train: trainLabel(chosen3.leg3Route),
+                },
+              ],
+            });
+          }
+        }
+
         const candidateNames = await Promise.all(candidateIds.slice(0, 6).map((id) => lookupStationName(id)));
         return json({
           error: "no_connection_found",
           diagnostics: {
             stage: "no_onward_combo",
+            triedTwoTransfers: true,
             transferCandidateStations: candidateIds.slice(0, 6).map((id, i) => candidateNames[i] ?? id),
             onwardRoutesCount: onwardRoutes.length,
           },
