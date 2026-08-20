@@ -645,60 +645,80 @@ type AssistantOutcome =
   | { kind: "route"; text: string }
   | { kind: "text"; text: string; grantedParts?: 1 | 3 | 4 };
 
+// Limit rund narzędzi w jednej turze — bezpiecznik przeciw nieskończonej pętli/kosztowi,
+// nie realne ograniczenie: nawet złożone łańcuchy (np. get_user_profile -> plan_train_journey)
+// mieszczą się w 2 rundach, 4 to komfortowy margines.
+const MAX_TOOL_ROUNDS = 4;
+
+// Model bywa łańcuchuje wywołania narzędzi w jednej turze — np. najpierw get_user_profile
+// (żeby "upewnić się" co do adresu), a dopiero potem plan_train_journey, mimo że to
+// drugie narzędzie samo umie rozwiązać 'dom'/'praca'. Wcześniej runAssistant obsługiwał
+// tylko JEDNO wywołanie narzędzia na turę: gdy druga odpowiedź modelu (po get_user_profile)
+// sama była kolejnym functionCall zamiast tekstu, `second.text` było puste i leciał
+// generyczny "Przepraszam, wystąpił błąd" — mimo że plan_train_journey nigdy nie zostało
+// wywołane. Pętla poniżej obsługuje dowolną (do MAX_TOOL_ROUNDS) liczbę kolejnych wywołań.
 async function runAssistant(contents: GeminiContent[], systemPrompt: string, maxOutputTokens: number, ctx: ToolContext): Promise<AssistantOutcome> {
-  let first = await generateContent(contents, systemPrompt, maxOutputTokens);
-  if (!first.functionCall && !first.text) {
-    // Zapytanie z narzędziami (funkcje + wbudowane wyszukiwanie) całkowicie zawiodło
-    // (np. błąd API 400 przy łączeniu obu typów tools) — spróbuj bez narzędzi, żeby
-    // użytkownik dostał realną odpowiedź zamiast zmarnowanego SMS-a z błędem. Tymczasowy
-    // bezpiecznik: dopóki przyczyna nie jest naprawiona, narzędzia w tej turze nie zadziałają.
-    log("tools_call_failed_retry", { convId: ctx.convId });
-    first = await generateContent(contents, systemPrompt, maxOutputTokens, false);
-  }
-  if (!first.functionCall) {
-    return { kind: "text", text: first.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie." };
-  }
+  let currentContents = contents;
+  let currentMax = maxOutputTokens;
+  let grantedParts: 1 | 3 | 4 | undefined;
 
-  const { name, args } = first.functionCall;
-  log("tool_call", { convId: ctx.convId, name, args });
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    let turn = await generateContent(currentContents, systemPrompt, currentMax);
+    if (round === 0 && !turn.functionCall && !turn.text) {
+      // Zapytanie z narzędziami (funkcje + wbudowane wyszukiwanie) całkowicie zawiodło
+      // (np. błąd API 400 przy łączeniu obu typów tools) — spróbuj bez narzędzi, żeby
+      // użytkownik dostał realną odpowiedź zamiast zmarnowanego SMS-a z błędem. Tymczasowy
+      // bezpiecznik: dopóki przyczyna nie jest naprawiona, narzędzia w tej turze nie zadziałają.
+      log("tools_call_failed_retry", { convId: ctx.convId });
+      turn = await generateContent(currentContents, systemPrompt, currentMax, false);
+    }
+    if (!turn.functionCall) {
+      return { kind: "text", text: turn.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.", grantedParts };
+    }
 
-  if (name === "close_conversation") {
-    await callAssistantTool("close_conversation", {}, ctx.userId, ctx.convId);
-    return { kind: "closed" };
-  }
+    const { name, args } = turn.functionCall;
+    log("tool_call", { convId: ctx.convId, name, args, round });
 
-  if (DETERMINISTIC_ACTIONS.has(name)) {
+    if (name === "close_conversation") {
+      await callAssistantTool("close_conversation", {}, ctx.userId, ctx.convId);
+      return { kind: "closed" };
+    }
+
+    if (DETERMINISTIC_ACTIONS.has(name)) {
+      const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId);
+      log("tool_result", { convId: ctx.convId, name, result: toolResult });
+
+      if (name === "get_fastest_arrival") return { kind: "text", text: formatFastestArrival(toolResult) };
+      if (name === "get_train_station_board") return { kind: "text", text: formatTrainStationBoard(toolResult) };
+      if (name === "get_train_status") return { kind: "text", text: formatTrainStatus(toolResult) };
+      if (name === "plan_train_journey") return { kind: "text", text: formatTrainJourney(toolResult) };
+      if (name === "get_train_disruptions") return { kind: "text", text: formatTrainDisruptions(toolResult) };
+
+      // get_directions / get_transit: pełen, sformatowany tekst trasy, wysyłany bez zmian.
+      if (toolResult.error) return { kind: "text", text: directionsErrorMessage(toolResult) };
+      return { kind: "route", text: String(toolResult.route ?? "") };
+    }
+
+    // get_user_profile / allow_long_reply: wynik wraca do modelu, które podejmuje kolejną
+    // decyzję — kolejne narzędzie albo już gotowa odpowiedź tekstowa (sprawdzane w następnej
+    // iteracji pętli).
     const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId);
     log("tool_result", { convId: ctx.convId, name, result: toolResult });
 
-    if (name === "get_fastest_arrival") return { kind: "text", text: formatFastestArrival(toolResult) };
-    if (name === "get_train_station_board") return { kind: "text", text: formatTrainStationBoard(toolResult) };
-    if (name === "get_train_status") return { kind: "text", text: formatTrainStatus(toolResult) };
-    if (name === "plan_train_journey") return { kind: "text", text: formatTrainJourney(toolResult) };
-    if (name === "get_train_disruptions") return { kind: "text", text: formatTrainDisruptions(toolResult) };
+    if (name === "allow_long_reply" && [1, 3, 4].includes(toolResult.granted_parts as number)) {
+      grantedParts = toolResult.granted_parts as 1 | 3 | 4;
+      currentMax = TOKENS_FOR_PARTS[grantedParts];
+    }
 
-    // get_directions / get_transit: pełen, sformatowany tekst trasy, wysyłany bez zmian.
-    if (toolResult.error) return { kind: "text", text: directionsErrorMessage(toolResult) };
-    return { kind: "route", text: String(toolResult.route ?? "") };
+    currentContents = [
+      ...currentContents,
+      { role: "model", parts: [turn.functionCallPart ?? { functionCall: { name, args } }] },
+      { role: "function", parts: [{ functionResponse: { name, response: toolResult } }] },
+    ];
   }
 
-  // get_user_profile / allow_long_reply: wynik wraca do modelu, który układa właściwą odpowiedź
-  const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId);
-  log("tool_result", { convId: ctx.convId, name, result: toolResult });
-
-  const grantedParts = name === "allow_long_reply" && [1, 3, 4].includes(toolResult.granted_parts as number)
-    ? (toolResult.granted_parts as 1 | 3 | 4)
-    : undefined;
-
-  const followupContents: GeminiContent[] = [
-    ...contents,
-    { role: "model", parts: [first.functionCallPart ?? { functionCall: { name, args } }] },
-    { role: "function", parts: [{ functionResponse: { name, response: toolResult } }] },
-  ];
-  const followupMax = grantedParts ? TOKENS_FOR_PARTS[grantedParts] : maxOutputTokens;
-  const second = await generateContent(followupContents, systemPrompt, followupMax);
-
-  return { kind: "text", text: second.text ?? "Przepraszam, wystąpił błąd. Spróbuj ponownie.", grantedParts };
+  log("tool_round_limit_reached", { convId: ctx.convId });
+  return { kind: "text", text: "Przepraszam, nie udało się dokończyć tej prośby. Spróbuj sformułować ją prościej.", grantedParts };
 }
 
 // Jedno dodatkowe, lekkie wywołanie Gemini (bez narzędzi, mały kontekst) — prosi model,
@@ -789,7 +809,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, histo
 
   const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
   let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
-  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${grantedParts} SMS (${SMS_PART_CHARS * grantedParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${grantedParts} SMS (${SMS_PART_CHARS * grantedParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
   log("endpoint_test_start", { convId, content, historyLen: history.length, grantedParts });
   const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId });
@@ -1025,7 +1045,7 @@ Deno.serve(async (req: Request) => {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
     systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
-  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
   const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
 
