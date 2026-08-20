@@ -896,7 +896,7 @@ Deno.serve(async (req: Request) => {
         .slice(0, 6);
 
       if (!fromLegCandidates.length) {
-        return json({ error: "no_connection_found" }, 200);
+        return json({ error: "no_connection_found", diagnostics: { stage: "no_departures_from_origin", allRoutesCount: allRoutes.length } }, 200);
       }
 
       // Pełna trasa każdego kandydata, żeby poznać WSZYSTKIE jego przystanki (filtrowane
@@ -907,15 +907,18 @@ Deno.serve(async (req: Request) => {
       // przesiadkowej (bo o nią nie pytaliśmy), więc to jedyne miejsce, gdzie ten
       // czas jest w ogóle dostępny — musi zostać przeniesiony aż do finalnej odpowiedzi.
       const transferCandidates: Array<{ stationId: string; arriveAtTransfer: number; arriveAtTransferTime: string; leg1: typeof fromLegCandidates[0] }> = [];
+      let routeDetailOk = 0, routeDetailFailed = 0, totalStopsSeen = 0;
       for (const cand of fromLegCandidates) {
         const scheduleId = cand.route.scheduleId, orderId = cand.route.orderId;
         if (scheduleId == null || orderId == null) continue;
         const full = await pkpFetch(`/schedules/route/${scheduleId}/${orderId}`, {});
-        if (!full.ok) { log("pkp_error", { reason: "route_detail_failed", scheduleId, orderId, error: full.error }); continue; }
+        if (!full.ok) { routeDetailFailed++; log("pkp_error", { reason: "route_detail_failed", scheduleId, orderId, error: full.error }); continue; }
         const fullRoute = (full.data && typeof full.data === "object" ? full.data as Record<string, unknown> : null);
         const stops = fullRoute ? (Array.isArray(fullRoute.stations) ? fullRoute.stations as Record<string, unknown>[]
           : Array.isArray(fullRoute.route) ? fullRoute.route as Record<string, unknown>[] : []) : [];
-        if (!stops.length) { log("pkp_error", { reason: "route_detail_unparsed", scheduleId, orderId, rawPreview: JSON.stringify(full.data).slice(0, 400) }); continue; }
+        if (!stops.length) { routeDetailFailed++; log("pkp_error", { reason: "route_detail_unparsed", scheduleId, orderId, rawPreview: JSON.stringify(full.data).slice(0, 400) }); continue; }
+        routeDetailOk++;
+        totalStopsSeen += stops.length;
         for (const s of stops) {
           const sid = String(s.stationId ?? "");
           if (!sid || sid === from.id || sid === to.id) continue;
@@ -927,12 +930,15 @@ Deno.serve(async (req: Request) => {
       }
 
       if (!transferCandidates.length) {
-        return json({ error: "no_connection_found" }, 200);
+        return json({
+          error: "no_connection_found",
+          diagnostics: { stage: "no_transfer_candidates", fromLegCandidatesCount: fromLegCandidates.length, routeDetailOk, routeDetailFailed, totalStopsSeen },
+        }, 200);
       }
 
       const candidateIds = [...new Set(transferCandidates.map((c) => c.stationId))];
       const onwardResult = await pkpFetch("/schedules", { stations: `${candidateIds.join(",")},${to.id}`, dateFrom: date, dateTo: date });
-      if (!onwardResult.ok) return json({ error: "no_connection_found" }, 200);
+      if (!onwardResult.ok) return json({ error: "no_connection_found", diagnostics: { stage: "onward_schedules_failed", error: onwardResult.error } }, 200);
       const onwardRoutes = asList(onwardResult.data);
 
       const MIN_TRANSFER_BUFFER_MIN = 7;
@@ -952,7 +958,17 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      if (!combos.length) return json({ error: "no_connection_found" }, 200);
+      if (!combos.length) {
+        const candidateNames = await Promise.all(candidateIds.slice(0, 6).map((id) => lookupStationName(id)));
+        return json({
+          error: "no_connection_found",
+          diagnostics: {
+            stage: "no_onward_combo",
+            transferCandidateStations: candidateIds.slice(0, 6).map((id, i) => candidateNames[i] ?? id),
+            onwardRoutesCount: onwardRoutes.length,
+          },
+        }, 200);
+      }
       combos.sort((x, y) => x.arrMin - y.arrMin || x.tc.leg1.depMin - y.tc.leg1.depMin);
       const chosen = combos[0];
       const leg1Stop = stationStopIn(chosen.tc.leg1.route, from.id);
