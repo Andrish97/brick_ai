@@ -763,13 +763,17 @@ async function buildCleanReply(outcome: Exclude<AssistantOutcome, { kind: "close
 }
 
 // Stały health-check połączenia z API PKP PLK — bez Gemini, bez bazy. Widoczny w panelu
-// admina → Testy → Dodatkowe testy. Przydatny nie tylko przy pierwszej aktywacji klucza,
+// admina → Testy → Test endpointów. Przydatny nie tylko przy pierwszej aktywacji klucza,
 // ale każdorazowo, gdy trzeba szybko sprawdzić, czy PKP_API_KEY nadal działa.
-// TYMCZASOWO rozszerzone o próbne pobranie /schedules/routes/{date} — sprawdzenie, czy
-// ten endpoint zwraca CAŁY krajowy rozkład na dany dzień w rozsądnej liczbie zapytań
-// (fundament pod lokalną kopię rozkładu + własny algorytm szukania przesiadek, zamiast
-// odpytywania PKP na żywo per kandydat). Zwęzić z powrotem do samego stations-search po
-// zakończeniu weryfikacji.
+//
+// Uwaga na przyszłość: /schedules/routes/{date} zweryfikowany i odrzucony jako fundament
+// pod lokalną synchronizację pełnego rozkładu — zwraca tylko INDEKS pociągów danego dnia
+// (scheduleId/orderId/carrierCode, bez przystanków i godzin), ~7200 pozycji ogólnokrajowo.
+// Żeby dostać realne godziny, trzeba by i tak odpytać /schedules/route/{id}/{id} osobno
+// dla każdego z nich — przy limicie Basic (100/h, 1000/dzień) to ponad 7x dzienny budżet
+// na sam jeden dzień w przód. Lokalna kopia rozkładu (i prawdziwy CSA/RAPTOR) nieopłacalne
+// przy tym tierze API; sensowniejszy kierunek to lekki cache wyników /schedules/route/*,
+// budowany przyrostowo przy okazji zapytań plan_train_journey.
 async function handlePkpTest(): Promise<Response> {
   const apiKey = Deno.env.get("PKP_API_KEY");
   if (!apiKey) {
@@ -781,45 +785,7 @@ async function handlePkpTest(): Promise<Response> {
     });
     const body = await res.text();
     log("pkp_test", { status: res.status, bodyPreview: body.slice(0, 500) });
-
-    // en-CA formatuje jako YYYY-MM-DD — dokładnie format wymagany przez PKP.
-    const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit" })
-      .format(new Date(Date.now() + 24 * 60 * 60 * 1000));
-
-    let routesInfo: Record<string, unknown>;
-    try {
-      const routesRes = await fetch(`https://pdp-api.plk-sa.pl/api/v1/schedules/routes/${tomorrow}`, { headers: { "X-API-Key": apiKey } });
-      const routesBody = await routesRes.text();
-      let parsed: unknown = null;
-      let itemCount: number | null = null;
-      let topLevelKeys: string[] | null = null;
-      try {
-        parsed = JSON.parse(routesBody);
-        if (parsed && typeof parsed === "object") {
-          topLevelKeys = Object.keys(parsed as object);
-          for (const key of topLevelKeys) {
-            const v = (parsed as Record<string, unknown>)[key];
-            if (Array.isArray(v)) { itemCount = v.length; break; }
-          }
-        }
-      } catch { /* nie JSON — zostaw parsed=null */ }
-      routesInfo = {
-        status: routesRes.status,
-        contentLength: routesRes.headers.get("content-length"),
-        bodyBytes: routesBody.length,
-        topLevelKeys,
-        itemCount,
-        bodyPreview: routesBody.slice(0, 1500),
-      };
-      log("pkp_test_routes", { date: tomorrow, ...routesInfo, bodyPreview: undefined });
-    } catch (e) {
-      routesInfo = { exception: String(e) };
-    }
-
-    return new Response(
-      JSON.stringify({ ok: res.ok, status: res.status, body: body.slice(0, 2000), routesForDate: tomorrow, routesInfo }),
-      { status: 200, headers: { ...CORS, "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ ok: res.ok, status: res.status, body: body.slice(0, 2000) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   } catch (e) {
     log("pkp_test", { exception: String(e) });
     return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
