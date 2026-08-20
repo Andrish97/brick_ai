@@ -423,6 +423,13 @@ async function resolveSingleStation(query: string): Promise<StationLookup> {
   if (!search.ok) return { ok: false, body: { error: search.error } };
   if (search.data.length === 0) return { ok: false, body: { error: "station_not_found", query } };
   if (search.data.length > 1) {
+    // API szuka przez podłańcuch, więc "Katowice" trafia też "Katowice Ligota", "Katowice
+    // Piotrowice" itd. Jeśli któryś wynik ma nazwę DOKŁADNIE (bez uwzględniania wielkości
+    // liter) równą zapytaniu, to jest jednoznaczna intencja — nie każ dopytywać tylko
+    // dlatego, że inne stacje mają tę nazwę jako prefiks.
+    const normalizedQuery = query.trim().toLowerCase();
+    const exact = search.data.filter((s) => s.name.trim().toLowerCase() === normalizedQuery);
+    if (exact.length === 1) return { ok: true, station: exact[0] };
     return { ok: false, body: { error: "ambiguous_station", query, candidates: search.data.slice(0, 5).map((s) => s.name) } };
   }
   return { ok: true, station: search.data[0] };
