@@ -1717,9 +1717,8 @@ let _pkpTestRunning = false;
 let _testChat = null;        // {turns: [{role:'user'|'model', text}], grantedParts, running, error, lastParts}
 
 // Jedno zdanie na narzędzie — endpoint_test=1, więc zero wysłanych SMS-ów i zero zapisów w bazie.
-// Ten sam zestaw co scripts/test-endpoints.ts, żeby wynik był porównywalny.
-// Testy PKP (resolve_rail_station, get_train_station_board, get_train_status, get_train_disruptions)
-// celowo tu nie są — mają osobny, stały test w zakładce „Dodatkowe testy”.
+// Ten sam zestaw co scripts/test-endpoints.ts, żeby wynik był porównywalny. Testy kolejowe PKP
+// wywołują realne API PLK (klucz PKP_API_KEY) przez te same narzędzia, których używa AI na żywo.
 const ENDPOINT_TEST_CASES = [
   { label: 'Zwykłe pytanie (bez narzędzi)', msg: 'jaka jest stolica Francji?' },
   { label: 'get_user_profile', msg: 'jakie mam ustawione imię w tym systemie?' },
@@ -1727,11 +1726,16 @@ const ENDPOINT_TEST_CASES = [
   { label: 'get_directions (pieszo, dom → praca)', msg: 'poprowadz mnie pieszo z domu do pracy' },
   { label: 'get_transit (dom → praca)', msg: 'jak dojade komunikacja miejska z domu do pracy?' },
   { label: 'get_fastest_arrival', msg: 'o ktorej najszybciej bede w pracy jesli wyjde teraz z domu?' },
+  { label: 'resolve_rail_station', msg: 'jaka jest najblizsza stacja kolejowa do mojego domu?' },
+  { label: 'get_train_station_board (dom)', msg: 'jakie pociagi odjezdzaja dzisiaj z mojej domowej stacji?' },
+  { label: 'get_train_status (dom, teraz)', msg: 'czy pociag ktory odjezdza teraz z mojej stacji ma opoznienie?' },
+  { label: 'plan_train_journey (dom → Tarnowskie Góry)', msg: 'jak dzisiaj dojade pociagiem z domu do Tarnowskich Gor?' },
+  { label: 'get_train_disruptions', msg: 'czy sa jakies utrudnienia na kolei teraz?' },
   { label: 'close_conversation (intencja, nie słowo-klucz)', msg: 'dzieki, to na razie wszystko, nie musisz juz odpisywac, konczymy' },
 ];
 
 async function renderSmsTools(mode) {
-  if (mode === 'send' || mode === 'test' || mode === 'endpoints' || mode === 'extra') smsToolsMode = mode;
+  if (mode === 'send' || mode === 'test' || mode === 'endpoints' || mode === 'chat') smsToolsMode = mode;
   await loadPhoneNumbers();
 
   const [{ data: users }, { data: convs }] = await Promise.all([
@@ -1768,7 +1772,7 @@ function _convOpts(userId, includeNew) {
 function renderSmsContent() {
   const isSend = smsToolsMode === 'send';
   const isEndpoints = smsToolsMode === 'endpoints';
-  const isExtra = smsToolsMode === 'extra';
+  const isChat = smsToolsMode === 'chat';
   const pnOpts = _pnOpts();
   const defaultPn = phoneNumbers[0]?.number || '';
   const noPn = 'Brak numerów — dodaj w sekcji Numery';
@@ -1777,8 +1781,8 @@ function renderSmsContent() {
 
   if (isEndpoints) {
     formHtml = renderEndpointTestsForm();
-  } else if (isExtra) {
-    formHtml = renderExtraTestsForm();
+  } else if (isChat) {
+    formHtml = renderTestConvosBox();
   } else if (isSend) {
     const isUser = smsToMode === 'user';
     const usersWithPhone = smsUsers.filter(u => u.phone_number);
@@ -1841,9 +1845,9 @@ function renderSmsContent() {
     </div>
     <div class="prompt-mode-bar" style="margin-bottom:20px">
       <button class="prompt-mode-btn ${isSend ? 'active' : ''}" onclick="renderSmsTools('send')">📤 Wyślij SMS</button>
-      <button class="prompt-mode-btn ${!isSend && !isEndpoints && !isExtra ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
+      <button class="prompt-mode-btn ${!isSend && !isEndpoints && !isChat ? 'active' : ''}" onclick="renderSmsTools('test')">🧪 Test odbioru</button>
       <button class="prompt-mode-btn ${isEndpoints ? 'active' : ''}" onclick="renderSmsTools('endpoints')">🔌 Test endpointów</button>
-      <button class="prompt-mode-btn ${isExtra ? 'active' : ''}" onclick="renderSmsTools('extra')">🧩 Dodatkowe testy</button>
+      <button class="prompt-mode-btn ${isChat ? 'active' : ''}" onclick="renderSmsTools('chat')">💬 Czat testowy</button>
     </div>
     <div class="section-card">${formHtml}</div>
   `;
@@ -1891,7 +1895,6 @@ function renderEndpointTestsForm() {
     : '<p style="color:var(--muted);font-size:13px;margin-top:14px">Brak wyników — uruchom testy.</p>';
 
   return `
-    ${renderTestConvosBox()}
     <p style="color:var(--muted);font-size:13px;margin-bottom:14px">
       Przepuszcza po kolei zdanie wyzwalające każde narzędzie asystenta przez tryb testowy webhooka
       (<code>?endpoint_test=1</code>). Gemini, assistant-tools i Google Maps są wywoływane naprawdę —
@@ -1899,12 +1902,25 @@ function renderEndpointTestsForm() {
       zakłada, nie wymaga ani nie zapisuje żadnej prawdziwej rozmowy, wiadomości ani użytkownika.
       Zero SMS-ów, zero danych w bazie.
     </p>
-    <button class="btn btn-primary" onclick="runEndpointTests()" ${_endpointTestsRunning ? 'disabled' : ''}>
-      ${_endpointTestsRunning ? 'Testuję…' : `▶ Uruchom wszystkie testy (${ENDPOINT_TEST_CASES.length})`}
-    </button>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="runEndpointTests()" ${_endpointTestsRunning ? 'disabled' : ''}>
+        ${_endpointTestsRunning ? 'Testuję…' : `▶ Uruchom wszystkie testy (${ENDPOINT_TEST_CASES.length})`}
+      </button>
+      <button class="btn btn-ghost" onclick="runPkpTest()" ${_pkpTestRunning ? 'disabled' : ''}>
+        ${_pkpTestRunning ? 'Testuję…' : '🚆 Test połączenia PKP (bezpośrednio, bez AI)'}
+      </button>
+    </div>
+    <p style="color:var(--muted);font-size:11px;margin-top:6px">
+      Jeśli test bezpośredni zwróci <code>PendingActivation</code>, klucz PKP_API_KEY czeka na ręczną
+      aktywację — napisz na <a href="mailto:pdp-api@plk-sa.pl" style="color:var(--accent2)">pdp-api@plk-sa.pl</a>.
+    </p>
+    <div id="pkp-test-result" style="margin-top:10px">${_pkpTestResult ? renderEndpointTestResult(_pkpTestResult) : ''}</div>
     <div id="endpoint-test-results" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">${resultsHtml}</div>
   `;
 }
+
+// ── Sub-tab: Czat testowy — wieloturowa rozmowa z tym samym "mózgiem" co prawdziwe
+// SMS-y, ale bez SMS-ów i bez zapisów w bazie (patrz komentarz przy _testChat). ──
 
 function renderTestConvosBox() {
   if (!_testChat) {
@@ -2009,27 +2025,6 @@ async function sendTestChatMessage() {
   setTimeout(() => document.getElementById('test-chat-input')?.focus(), 0);
 }
 
-// ── Sub-tab: Dodatkowe testy — diagnostyka infrastruktury zewnętrznej (PKP, Zadarma),
-// osobno od baterii testów asystenta. Bez Gemini, bez bazy — bezpośrednie zapytania. ──
-
-function renderExtraTestsForm() {
-  return `
-    <div>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
-        Sprawdza połączenie z API Otwarte Dane Kolejowe PKP PLK bezpośrednio (bez Gemini, bez bazy) —
-        wyszukanie stacji „Katowice”. Jeśli zobaczysz <code>PendingActivation</code>, klucz nadal czeka
-        na ręczną aktywację po stronie PKP PLK — napisz do nich na
-        <a href="mailto:pdp-api@plk-sa.pl" style="color:var(--accent2)">pdp-api@plk-sa.pl</a> z prośbą
-        o sprawdzenie statusu wniosku.
-      </p>
-      <button class="btn btn-ghost btn-sm" onclick="runPkpTest()" ${_pkpTestRunning ? 'disabled' : ''}>
-        ${_pkpTestRunning ? 'Testuję…' : '🚆 Test połączenia PKP'}
-      </button>
-      <div id="pkp-test-result" style="margin-top:10px">${_pkpTestResult ? renderEndpointTestResult(_pkpTestResult) : ''}</div>
-    </div>
-  `;
-}
-
 function renderEndpointTestResult(r) {
   const badgeCls = r.status === 'running' ? 'badge-yellow' : r.ok ? 'badge-green' : 'badge-red';
   const badgeLabel = r.status === 'running' ? 'w toku…' : r.ok ? 'OK' : 'błąd';
@@ -2060,7 +2055,7 @@ function renderEndpointTestResult(r) {
     return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">${header}${body}${meta}${raw}</div>`;
   }
 
-  // Format legacy (surowy dump) — używany przez test PKP w „Dodatkowe testy”,
+  // Format legacy (surowy dump) — używany przez bezpośredni test połączenia PKP,
   // gdzie surowa odpowiedź API jest samym celem testu.
   return `
     <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">
