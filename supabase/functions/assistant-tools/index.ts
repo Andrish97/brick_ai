@@ -430,6 +430,20 @@ async function resolveSingleStation(query: string): Promise<StationLookup> {
     const normalizedQuery = query.trim().toLowerCase();
     const exact = search.data.filter((s) => s.name.trim().toLowerCase() === normalizedQuery);
     if (exact.length === 1) return { ok: true, station: exact[0] };
+
+    // Niektóre miasta w ogóle nie mają stacji o nazwie DOKŁADNIE takiej jak samo miasto —
+    // np. "Kłodzko" istnieje tylko jako "Klodzko Glowne"/"Klodzko Miasto"/"Klodzko Ksiazek"/
+    // "Klodzko Zagorze" (dane PKP są bez polskich znaków). W takim wypadku stacja z
+    // przyrostkiem Główny/Główna/Główne to jednoznacznie ta "domyślna" dla miasta — tak
+    // samo oczywista jak Kraków Główny czy Warszawa Centralna.
+    const mainSuffix = /^(glowny|glowna|glowne|główny|główna|główne)$/i;
+    const main = search.data.filter((s) => {
+      const name = s.name.trim().toLowerCase();
+      if (!name.startsWith(normalizedQuery)) return false;
+      return mainSuffix.test(name.slice(normalizedQuery.length).trim());
+    });
+    if (main.length === 1) return { ok: true, station: main[0] };
+
     return { ok: false, body: { error: "ambiguous_station", query, candidates: search.data.slice(0, 5).map((s) => s.name) } };
   }
   return { ok: true, station: search.data[0] };
