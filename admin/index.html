@@ -1752,6 +1752,7 @@ async function renderSmsTools(mode) {
 
   if (!_smsSendUserId) _smsSendUserId = smsUsers.find(u => u.phone_number)?.id || '';
   if (!_smsTestUserId) _smsTestUserId = smsUsers[0]?.id || '';
+  if (mode === 'endpoints' && !_railSyncStatus) refreshRailSyncStatus();
 
   renderSmsContent();
 }
@@ -1915,8 +1916,79 @@ function renderEndpointTestsForm() {
       aktywację — napisz na <a href="mailto:pdp-api@plk-sa.pl" style="color:var(--accent2)">pdp-api@plk-sa.pl</a>.
     </p>
     <div id="pkp-test-result" style="margin-top:10px">${_pkpTestResult ? renderEndpointTestResult(_pkpTestResult) : ''}</div>
+
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:16px">
+      <label style="font-size:13px;font-weight:600">Synchronizacja lokalnego rozkładu (GTFS)</label>
+      <p style="color:var(--muted);font-size:12px;margin:4px 0 10px">
+        Ściąga rozkład z mkuran.pl do własnej bazy, żeby planer tras (plan_train_journey)
+        mógł liczyć przesiadki lokalnie zamiast pytać PKP na żywo. Normalnie leci sam co
+        2 minuty (pg_cron), ale można też ręcznie: "Uruchom" zaczyna nowy sync, "Krok"
+        wykonuje jeden kawałek postępu (to samo co robi cron co 2 min) — przydatne do
+        obejrzenia postępu na żywo bez czekania.
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-primary btn-sm" onclick="runRailSync('start')" ${_railSyncRunning ? 'disabled' : ''}>
+          ${_railSyncRunning ? 'Pracuję…' : '▶ Uruchom sync'}
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="runRailSync('tick')" ${_railSyncRunning ? 'disabled' : ''}>
+          🔁 Wykonaj krok
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="refreshRailSyncStatus()">↻ Odśwież status</button>
+      </div>
+      <div id="rail-sync-status" style="margin-top:10px">${renderRailSyncStatus()}</div>
+    </div>
+
     <div id="endpoint-test-results" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">${resultsHtml}</div>
   `;
+}
+
+// ── Synchronizacja GTFS (rail-gtfs-sync) — sterowanie ręczne z panelu, bez terminala/curl ──
+
+let _railSyncRunning = false;
+let _railSyncStatus = null;   // ostatni wiersz rail_sync_runs
+let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/tick
+
+function renderRailSyncStatus() {
+  const s = _railSyncStatus;
+  const statusLine = s
+    ? `<div style="font-size:13px">
+        Status: <strong>${escHtml(s.status)}</strong>
+        ${s.current_file ? ` · plik: ${escHtml(s.current_file)}` : ''}
+        · wierszy: ${s.rows_processed ?? 0}
+        ${s.finished_at ? ` · zakończono: ${new Date(s.finished_at).toLocaleString('pl-PL')}` : ''}
+        ${s.error ? `<div style="color:var(--danger);margin-top:4px">${escHtml(s.error)}</div>` : ''}
+      </div>`
+    : `<p style="color:var(--muted);font-size:13px">Brak jeszcze żadnej synchronizacji.</p>`;
+  const resultHtml = _railSyncResult
+    ? `<details style="margin-top:6px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">surowa odpowiedź ostatniej akcji</summary><pre style="font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(JSON.stringify(_railSyncResult, null, 2))}</pre></details>`
+    : '';
+  return statusLine + resultHtml;
+}
+
+async function refreshRailSyncStatus() {
+  const { data } = await sb.from('rail_sync_runs').select('*').order('started_at', { ascending: false }).limit(1);
+  _railSyncStatus = data?.[0] ?? null;
+  const box = document.getElementById('rail-sync-status');
+  if (box) box.innerHTML = renderRailSyncStatus();
+}
+
+async function runRailSync(action) {
+  _railSyncRunning = true;
+  renderSmsContent();
+  try {
+    const session = await getSession();
+    const res = await fetch(`${SB_URL}/functions/v1/rail-gtfs-sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+      body: JSON.stringify({ action }),
+    });
+    _railSyncResult = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  } catch (e) {
+    _railSyncResult = { error: String(e) };
+  }
+  await refreshRailSyncStatus();
+  _railSyncRunning = false;
+  renderSmsContent();
 }
 
 // ── Sub-tab: Czat testowy — wieloturowa rozmowa z tym samym "mózgiem" co prawdziwe

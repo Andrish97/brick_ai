@@ -296,9 +296,29 @@ function getSql() {
   return postgres(dbUrl, { prepare: false });
 }
 
+// Zalogowany admin z panelu (JWT Supabase) sprawdzany tym samym sposobem co
+// admin-send-sms — pozwala odpalić sync ręcznie z przycisku w panelu, bez trzymania
+// INTERNAL_SECRET po stronie przeglądarki.
+async function verifyAdminJwt(token: string): Promise<boolean> {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+  try {
+    const res = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: { Authorization: `Bearer ${token}`, apikey: anonKey },
+    });
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
 Deno.serve(async (req: Request) => {
+  const authHeader = req.headers.get("authorization") ?? "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   const secret = Deno.env.get("INTERNAL_SECRET");
-  if (!secret || req.headers.get("authorization") !== `Bearer ${secret}`) {
+  const isInternal = !!token && !!secret && token === secret;
+  const isAdmin = !!token && !isInternal && (await verifyAdminJwt(token));
+  if (!isInternal && !isAdmin) {
     return json({ error: "Unauthorized" }, 401);
   }
 
