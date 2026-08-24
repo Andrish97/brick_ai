@@ -8,21 +8,25 @@ import { ZipReader, Uint8ArrayReader, TextWriter } from "npm:@zip.js/zip.js@2.8.
 // Dwie akcje, wywoływane przez pg_cron (nie GitHub Actions — Actions w tym repo jest
 // wyłącznie do deployu):
 //   "start" (raz dziennie) — sprawdza Last-Modified feedu, jeśli zmieniony: pobiera cały
-//     zip, rozpakowuje potrzebne pliki GTFS do zwykłego tekstu i wgrywa do Supabase
-//     Storage (bucket rail-gtfs-raw), zakłada nowy wiersz rail_sync_runs.
-//   "tick" (co 2 minuty) — wznawia parsowanie+wstawianie od miejsca zapisanego w
-//     rail_sync_runs (current_file/current_offset). Małe pliki (stops/routes/calendar/
-//     calendar_dates/trips) przetwarzane w całości w jednym ticku; stop_times.txt
-//     (jedyny spodziewany duży plik) w ograniczonych kawałkach bajtowych czytanych z
-//     Storage przez Range request, żeby nigdy nie trzymać całego pliku w pamięci na raz.
-//     Po ostatnim kawałku ostatniego pliku: wywołuje Etap B (czysty SQL, funkcja
-//     rail_gtfs_transform w bazie — patrz migracja) i "mark and sweep" starych wierszy.
+//     zip (skompresowany, bez rozpakowywania) i odkłada go w całości do Supabase Storage
+//     jako _source.zip, zakłada nowy wiersz rail_sync_runs.
+//   "tick" (co 2 minuty) — wznawia pracę od miejsca zapisanego w rail_sync_runs
+//     (current_file/current_offset). Dla każdego pliku GTFS pierwszy tick go rozpakowuje
+//     z _source.zip (jeden plik na jedno wywołanie — zob. extractOneFile), kolejne go
+//     parsują: małe pliki (stops/routes/calendar/calendar_dates/trips) w całości w jednym
+//     ticku, stop_times.txt (jedyny spodziewany duży plik) w ograniczonych kawałkach
+//     bajtowych czytanych z Storage przez Range request, kilka kawałków na tick (zob.
+//     MAX_CHUNKS_PER_TICK). Po ostatnim kawałku ostatniego pliku: wywołuje Etap B (czysty
+//     SQL, funkcja rail_gtfs_transform w bazie — patrz migracja) i "mark and sweep"
+//     starych wierszy.
 //
-// UWAGA: kod nigdy nie był uruchomiony na żywo — sandbox, w którym powstał, nie ma
-// dostępu ani do mkuran.pl, ani do samego Supabase. Napisany maksymalnie defensywnie
-// (try/catch na każdym kroku, jasne komunikaty błędu w rail_sync_runs.error), ale
-// pierwsze realne uruchomienie prawdopodobnie ujawni coś do poprawki — to oczekiwane,
-// nie oznaka złej roboty. Diagnozować z rail_sync_runs.error i logów funkcji.
+// UWAGA: kod przechodził już realną, częściową weryfikację (pierwsza wersja doszła do
+// >100k wierszy stop_times.txt zanim WAF Cloudflare przed Supabase zablokował serię
+// szybkich zapytań Range, a osobno "start" trafił w WORKER_RESOURCE_LIMIT przy
+// rozpakowywaniu wszystkich plików naraz) — oba te problemy zaadresowane w obecnej
+// wersji (rozpakowywanie plik-po-pliku, kilka kawałków na tick z odstępem czasowym),
+// ale wciąż nie ma pełnego przebiegu end-to-end od "start" do "success" potwierdzonego
+// na żywo. Diagnozować z rail_sync_runs.error i logów funkcji.
 
 const FEED_URL = "https://mkuran.pl/gtfs/polish_trains.zip";
 const BUCKET = "rail-gtfs-raw";
@@ -134,13 +138,19 @@ function rowsToObjects(fileName: string, lines: string[], headerMap: Record<stri
 
 // --- Supabase Storage (bucket prywatny — service role key na każde wywołanie) ---
 
-async function storagePutText(SB: string, KEY: string, path: string, content: string): Promise<void> {
+async function storagePutText(SB: string, KEY: string, path: string, content: string | Uint8Array): Promise<void> {
   const res = await fetch(`${SB}/storage/v1/object/${BUCKET}/${path}`, {
     method: "POST",
-    headers: sbHeaders(KEY, { "Content-Type": "text/plain", "x-upsert": "true" }),
+    headers: sbHeaders(KEY, { "Content-Type": "application/octet-stream", "x-upsert": "true" }),
     body: content,
   });
   if (!res.ok) throw new Error(`storage_put_failed ${path}: HTTP ${res.status} ${await res.text()}`);
+}
+
+async function storageGetFull(SB: string, KEY: string, path: string): Promise<Uint8Array> {
+  const res = await fetch(`${SB}/storage/v1/object/${BUCKET}/${path}`, { headers: sbHeaders(KEY) });
+  if (!res.ok) throw new Error(`storage_get_failed ${path}: HTTP ${res.status} ${await res.text()}`);
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 // Zwraca fragment obiektu [start, start+len) oraz całkowity rozmiar pliku (z nagłówka
@@ -157,8 +167,15 @@ async function storageGetRange(SB: string, KEY: string, path: string, start: num
   return { text, totalSize };
 }
 
-// --- Etap A: "start" — pobierz zip, rozpakuj potrzebne pliki, wgraj do Storage ---
-
+// --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do Storage ---
+//
+// WAŻNE (poprawione po realnym WORKER_RESOURCE_LIMIT): rozpakowywanie WSZYSTKICH 6
+// plików GTFS w jednym wywołaniu — a zwłaszcza stop_times.txt, ~52MB tekstu po
+// dekompresji — potrafi przekroczyć limit zasobów pojedynczego Edge Function. "start"
+// więc TYLKO przenosi bajty (pobiera skompresowany zip, odkłada go w całości do Storage
+// jako _source.zip) — żadnej dekompresji tutaj. Samo rozpakowanie, PLIK PO PLIKU, jedno
+// wywołanie na jeden plik, dzieje się dopiero w handleTick (zob. extractOneFile)
+// — dokładnie ta sama logika "jeden krok na raz" co przy parsowaniu.
 async function handleStart(SB: string, KEY: string): Promise<Response> {
   const sql = getSql();
   try {
@@ -193,26 +210,12 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
 
     const [run] = await sql<{ id: string }[]>`
       insert into rail_sync_runs (status, current_file, current_offset, feed_last_modified)
-      values ('running', ${SMALL_FILES[0]}, 0, ${feedLastModified ? feedLastModified.toISOString() : null})
+      values ('running', ${SMALL_FILES[0]}, -1, ${feedLastModified ? feedLastModified.toISOString() : null})
       returning id
     `;
-
-    const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
-    const entries = await reader.getEntries();
-    for (const fileName of ALL_FILES) {
-      const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
-      if (!entry || entry.directory) {
-        // Nie każdy plik GTFS jest wymagany przez spec — np. calendar.txt można pominąć,
-        // jeśli cały kalendarz jest wyrażony przez calendar_dates.txt (potwierdzone: ten
-        // konkretny feed rzeczywiście go nie ma). Wyjątek: stop_times.txt — bez niego nie
-        // ma żadnego rozkładu do zbudowania, to jedyny plik, którego brak jest błędem.
-        if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
-        continue;
-      }
-      const text = await entry.getData(new TextWriter());
-      await storagePutText(SB, KEY, `${run.id}/${fileName}`, text);
-    }
-    await reader.close();
+    // current_offset = -1 to sentinel: "current_file jeszcze nie rozpakowany z zipa" —
+    // pierwszy tick dla każdego pliku musi go najpierw wydobyć, zanim zacznie parsować.
+    await storagePutText(SB, KEY, `${run.id}/_source.zip`, zipBytes);
 
     await sql.end();
     return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
@@ -220,6 +223,27 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
     await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = ${String(e)} where status = 'running'`.catch(() => {});
     await sql.end();
     return json({ ok: false, error: String(e) }, 500);
+  }
+}
+
+// Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do Storage —
+// wywoływane raz na tick, zanim ten plik może zostać sparsowany. Zwraca false, jeśli
+// pliku nie ma w zipie (dozwolone przez spec dla wszystkich poza stop_times.txt).
+async function extractOneFile(SB: string, KEY: string, runId: string, fileName: string): Promise<boolean> {
+  const zipBytes = await storageGetFull(SB, KEY, `${runId}/_source.zip`);
+  const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
+  try {
+    const entries = await reader.getEntries();
+    const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
+    if (!entry || entry.directory) {
+      if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
+      return false;
+    }
+    const text = await entry.getData(new TextWriter());
+    await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
+    return true;
+  } finally {
+    await reader.close();
   }
 }
 
@@ -236,6 +260,18 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
 
     const fileName = run.current_file;
     let rowsInserted = 0;
+
+    // current_offset === -1: ten plik jeszcze nie został rozpakowany z _source.zip —
+    // zrób to teraz, jako CAŁE to wywołanie (parsowanie zaczyna się dopiero od
+    // następnego ticku) — trzyma dekompresję jednego pliku w osobnym, lekkim wywołaniu,
+    // zamiast robić to dla wszystkich 6 plików naraz (to właśnie powodowało
+    // WORKER_RESOURCE_LIMIT w poprzedniej wersji handleStart).
+    if (run.current_offset === -1) {
+      const extracted = await extractOneFile(SB, KEY, run.id, fileName);
+      await sql`update rail_sync_runs set current_offset = 0, consecutive_errors = 0 where id = ${run.id}`;
+      await sql.end();
+      return json({ ok: true, extracted: extracted ? fileName : null, skipped: extracted ? undefined : "not_in_feed" });
+    }
 
     if (SMALL_FILES.includes(fileName)) {
       // Plik mógł nie istnieć w zipie (dozwolone przez spec GTFS — zob. handleStart) —
@@ -259,7 +295,8 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
       }
       const nextIdx = ALL_FILES.indexOf(fileName) + 1;
       const nextFile = ALL_FILES[nextIdx] ?? null;
-      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
+      // -1: następny plik jeszcze nie rozpakowany z zipa (zob. blok current_offset === -1 wyżej).
+      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = ${nextFile ? -1 : 0}, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
       if (!nextFile) await finishRun(sql, run.id);
       await sql.end();
       return json({ ok: true, file: fileName, rowsInserted, nextFile });
