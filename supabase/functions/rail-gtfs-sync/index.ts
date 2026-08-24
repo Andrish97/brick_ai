@@ -51,8 +51,14 @@ const FILE_CONFIG: Record<string, { table: string; cols: Record<string, string> 
   "stop_times.txt": { table: "rail_raw_stop_times", cols: { trip_id: "trip_id", stop_id: "stop_id", stop_sequence: "stop_sequence", arrival_time: "arrival_time", departure_time: "departure_time" } },
 };
 
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
 function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify(data), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 }
 
 function sbHeaders(key: string, extra: Record<string, string> = {}) {
@@ -313,6 +319,8 @@ async function verifyAdminJwt(token: string): Promise<boolean> {
 }
 
 Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+
   const authHeader = req.headers.get("authorization") ?? "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   const secret = Deno.env.get("INTERNAL_SECRET");
