@@ -35,6 +35,13 @@ const ALL_FILES = [...SMALL_FILES, BIG_FILE];
 // obiektu, więc mniej zapytań = mniejsze ryzyko trafienia w ten limit).
 const STOP_TIMES_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rząd dopiero uznajemy sync za faktycznie zepsuty
+// Kilka kawałków w JEDNYM ticku zamiast jednego — realnie przyspiesza cały sync (mniej
+// czekania na cron co 2 min). Ostrożnie: 3 kawałki x 8MB to bezpieczny margines pod
+// limit 2s CPU (ekstrapolacja z realnego testu: 4MB/~53k wierszy działało bez problemu,
+// więc 3x8MB powinno się zmieścić, ale to nadal szacunek, nie zmierzony fakt), a mały
+// odstęp między zapytaniami ma nie wyglądać dla Cloudflare jak seria ataku.
+const MAX_CHUNKS_PER_TICK = 3;
+const CHUNK_DELAY_MS = 500;
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
 // Mapowanie: nazwa pliku GTFS -> {tabela raw, mapowanie kolumna GTFS -> kolumna raw}.
@@ -269,35 +276,46 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
       offset = headerLine.length + 1; // pomiń nagłówek + jego \n
     }
 
-    const { text: chunk, totalSize } = await storageGetRange(SB, KEY, `${run.id}/${fileName}`, offset, STOP_TIMES_CHUNK_BYTES);
-    const lastNewline = chunk.lastIndexOf("\n");
-    const reachedEnd = offset + chunk.length >= totalSize;
-    const usableChunk = reachedEnd ? chunk : (lastNewline === -1 ? "" : chunk.slice(0, lastNewline));
-    const consumedBytes = usableChunk.length + (reachedEnd ? 0 : 1); // +1 dla samego \n odciętego z usableChunk
+    // Kilka kawałków w tym samym wywołaniu (patrz MAX_CHUNKS_PER_TICK) — postęp zapisywany
+    // do bazy PO KAŻDYM kawałku, więc jeśli któryś kolejny w tej samej pętli zawiedzie
+    // (wyjątek łapany przez zewnętrzny catch), wcześniejsze kawałki z tego wywołania i tak
+    // zostają policzone, nie trzeba ich powtarzać.
+    for (let chunkNum = 0; chunkNum < MAX_CHUNKS_PER_TICK; chunkNum++) {
+      if (chunkNum > 0) await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY_MS));
 
-    const lines = usableChunk.split("\n");
-    const objects = rowsToObjects(fileName, lines, headerMap);
-    const cfg = FILE_CONFIG[fileName];
-    const targetCols = Object.values(cfg.cols);
-    for (let i = 0; i < objects.length; i += INSERT_BATCH) {
-      const batch = objects.slice(i, i + INSERT_BATCH);
-      if (batch.length) {
-        await sql`insert into ${sql(cfg.table)} ${sql(batch, ...targetCols)}`;
-        rowsInserted += batch.length;
+      const { text: chunk, totalSize } = await storageGetRange(SB, KEY, `${run.id}/${fileName}`, offset, STOP_TIMES_CHUNK_BYTES);
+      const lastNewline = chunk.lastIndexOf("\n");
+      const reachedEnd = offset + chunk.length >= totalSize;
+      const usableChunk = reachedEnd ? chunk : (lastNewline === -1 ? "" : chunk.slice(0, lastNewline));
+      const consumedBytes = usableChunk.length + (reachedEnd ? 0 : 1); // +1 dla samego \n odciętego z usableChunk
+
+      const lines = usableChunk.split("\n");
+      const objects = rowsToObjects(fileName, lines, headerMap);
+      const cfg = FILE_CONFIG[fileName];
+      const targetCols = Object.values(cfg.cols);
+      let chunkRows = 0;
+      for (let i = 0; i < objects.length; i += INSERT_BATCH) {
+        const batch = objects.slice(i, i + INSERT_BATCH);
+        if (batch.length) {
+          await sql`insert into ${sql(cfg.table)} ${sql(batch, ...targetCols)}`;
+          chunkRows += batch.length;
+        }
       }
+      rowsInserted += chunkRows;
+      offset += consumedBytes;
+
+      if (reachedEnd) {
+        await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows} where id = ${run.id}`;
+        await finishRun(sql, run.id);
+        await sql.end();
+        return json({ ok: true, file: fileName, rowsInserted, done: true, chunksThisTick: chunkNum + 1 });
+      }
+
+      await sql`update rail_sync_runs set current_offset = ${offset}, current_header = ${JSON.stringify(headerMap)}::jsonb, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows} where id = ${run.id}`;
     }
 
-    const newOffset = offset + consumedBytes;
-    if (reachedEnd) {
-      await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
-      await finishRun(sql, run.id);
-      await sql.end();
-      return json({ ok: true, file: fileName, rowsInserted, done: true });
-    }
-
-    await sql`update rail_sync_runs set current_offset = ${newOffset}, current_header = ${JSON.stringify(headerMap)}::jsonb, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
     await sql.end();
-    return json({ ok: true, file: fileName, rowsInserted, offset: newOffset, totalSize });
+    return json({ ok: true, file: fileName, rowsInserted, offset, chunksThisTick: MAX_CHUNKS_PER_TICK });
   } catch (e) {
     // Błąd (np. przejściowa blokada Cloudflare/WAF na serię szybkich zapytań Range do
     // Storage) NIE kończy od razu całego syncu — offset/current_file nie są tu ruszane,
