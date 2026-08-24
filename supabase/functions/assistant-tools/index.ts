@@ -1,3 +1,5 @@
+import { resolveSingleStationLocal, hasFreshLocalData, runCsaJourney, type CsaResult } from "./csa.ts";
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -414,6 +416,35 @@ function resolveStationPoint(value: string, user: UserProfile): { query: string 
 
 type StationLookup = { ok: true; station: PkpStation } | { ok: false; body: Record<string, unknown> };
 
+// Logika ujednoznaczniania współdzielona (w zamyśle, choć zduplikowana z powodów
+// unikania cyklicznego importu — zob. csa.ts) między żywym wyszukiwaniem PKP a lokalnym
+// (resolveSingleStationLocal w csa.ts, przy szukaniu w rail_stops z GTFS).
+function pickBestStationMatch(candidates: PkpStation[], query: string): PkpStation | null {
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0) return null;
+  // API PKP szuka przez podłańcuch, więc "Katowice" trafia też "Katowice Ligota",
+  // "Katowice Piotrowice" itd. Jeśli któryś wynik ma nazwę DOKŁADNIE (bez uwzględniania
+  // wielkości liter) równą zapytaniu, to jest jednoznaczna intencja — nie każ dopytywać
+  // tylko dlatego, że inne stacje mają tę nazwę jako prefiks.
+  const normalizedQuery = query.trim().toLowerCase();
+  const exact = candidates.filter((s) => s.name.trim().toLowerCase() === normalizedQuery);
+  if (exact.length === 1) return exact[0];
+
+  // Niektóre miasta w ogóle nie mają stacji o nazwie DOKŁADNIE takiej jak samo miasto —
+  // np. "Kłodzko" istnieje tylko jako "Klodzko Glowne"/"Klodzko Miasto"/"Klodzko Ksiazek"/
+  // "Klodzko Zagorze" (dane PKP są bez polskich znaków). W takim wypadku stacja z
+  // przyrostkiem Główny/Główna/Główne to jednoznacznie ta "domyślna" dla miasta — tak
+  // samo oczywista jak Kraków Główny czy Warszawa Centralna.
+  const mainSuffix = /^(glowny|glowna|glowne|główny|główna|główne)$/i;
+  const main = candidates.filter((s) => {
+    const name = s.name.trim().toLowerCase();
+    if (!name.startsWith(normalizedQuery)) return false;
+    return mainSuffix.test(name.slice(normalizedQuery.length).trim());
+  });
+  if (main.length === 1) return main[0];
+  return null;
+}
+
 // Wspólny wzorzec: szukaj stacji po tekście, oddaj błąd jeśli 0 albo >1 dopasowań —
 // używane przez resolve_rail_station, get_train_station_board, get_train_status
 // i plan_train_journey, żeby zachowanie przy niejednoznacznej nazwie było identyczne
@@ -422,31 +453,10 @@ async function resolveSingleStation(query: string): Promise<StationLookup> {
   const search = await pkpSearchStations(query);
   if (!search.ok) return { ok: false, body: { error: search.error } };
   if (search.data.length === 0) return { ok: false, body: { error: "station_not_found", query } };
-  if (search.data.length > 1) {
-    // API szuka przez podłańcuch, więc "Katowice" trafia też "Katowice Ligota", "Katowice
-    // Piotrowice" itd. Jeśli któryś wynik ma nazwę DOKŁADNIE (bez uwzględniania wielkości
-    // liter) równą zapytaniu, to jest jednoznaczna intencja — nie każ dopytywać tylko
-    // dlatego, że inne stacje mają tę nazwę jako prefiks.
-    const normalizedQuery = query.trim().toLowerCase();
-    const exact = search.data.filter((s) => s.name.trim().toLowerCase() === normalizedQuery);
-    if (exact.length === 1) return { ok: true, station: exact[0] };
-
-    // Niektóre miasta w ogóle nie mają stacji o nazwie DOKŁADNIE takiej jak samo miasto —
-    // np. "Kłodzko" istnieje tylko jako "Klodzko Glowne"/"Klodzko Miasto"/"Klodzko Ksiazek"/
-    // "Klodzko Zagorze" (dane PKP są bez polskich znaków). W takim wypadku stacja z
-    // przyrostkiem Główny/Główna/Główne to jednoznacznie ta "domyślna" dla miasta — tak
-    // samo oczywista jak Kraków Główny czy Warszawa Centralna.
-    const mainSuffix = /^(glowny|glowna|glowne|główny|główna|główne)$/i;
-    const main = search.data.filter((s) => {
-      const name = s.name.trim().toLowerCase();
-      if (!name.startsWith(normalizedQuery)) return false;
-      return mainSuffix.test(name.slice(normalizedQuery.length).trim());
-    });
-    if (main.length === 1) return { ok: true, station: main[0] };
-
-    return { ok: false, body: { error: "ambiguous_station", query, candidates: search.data.slice(0, 5).map((s) => s.name) } };
-  }
-  return { ok: true, station: search.data[0] };
+  if (search.data.length === 1) return { ok: true, station: search.data[0] };
+  const best = pickBestStationMatch(search.data, query);
+  if (best) return { ok: true, station: best };
+  return { ok: false, body: { error: "ambiguous_station", query, candidates: search.data.slice(0, 5).map((s) => s.name) } };
 }
 
 // --- Data/czas (strefa Europe/Warsaw — PKP działa w czasie polskim, nie UTC) ---
@@ -837,7 +847,110 @@ Deno.serve(async (req: Request) => {
       const fromArg = typeof input.args?.from === "string" ? input.args.from.trim() : "";
       const toArg = typeof input.args?.to === "string" ? input.args.to.trim() : "";
       if (!fromArg || !toArg) return json({ error: "from and to are required" }, 400);
+      const dateArg = typeof input.args?.date === "string" ? input.args.date : "";
 
+      // Najpierw próba lokalna (CSA nad zsynchronizowanym GTFS — zob. csa.ts) — szybsza,
+      // bez limitu zapytań PKP, dowolna liczba przesiadek. Przy jakimkolwiek niepowodzeniu
+      // (brak świeżych danych, stacja nierozpoznana/niejednoznaczna lokalnie, CSA nic nie
+      // znajduje, rozbieżność z żywym API dla bliskiej daty, wyjątek) — bezwarunkowy
+      // fallback na dotychczasową żywą heurystykę PKP (planTrainJourneyLive), nigdy błąd 500.
+      const local = await tryPlanTrainJourneyLocal(url, key, user, fromArg, toArg, dateArg);
+      if (local) {
+        log("plan_train_journey_path", { path: "local" });
+        return json(local);
+      }
+      log("plan_train_journey_path", { path: "live" });
+      return await planTrainJourneyLive(url, key, user, fromArg, toArg, dateArg);
+    }
+
+    return json({ error: "Unknown action" }, 400);
+  } catch (error) {
+    console.error("assistant-tools error", String(error));
+    log("endpoint_error", { action: input.action, error: String(error) });
+    return json({ error: "Tool execution failed" }, 500);
+  }
+});
+
+// Bliska data = dziś albo jutro — jedyny zakres, w którym żywe /schedules PKP w ogóle
+// ma dane do porównania (i jedyny, w którym rozjazd lokalnego GTFS z rzeczywistością
+// realnie obchodzi użytkownika, bo za chwilę wsiada do pociągu).
+function isNearTermDate(date: string): boolean {
+  const today = todayDateStr();
+  if (date === today) return true;
+  const tomorrow = new Date(warsawNow().getTime() + 24 * 60 * 60 * 1000);
+  const tomorrowStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+  return date === tomorrowStr;
+}
+
+// Weryfikacja pierwszej nogi trasy z CSA względem żywego /schedules PKP — nie tylko
+// "pokaż opóźnienie", ale sygnał, że lokalny GTFS wciąż zgadza się z rzeczywistością.
+// Brak dopasowania w tolerancji ±3 min traktujemy jako niepotwierdzone (nie jako "brak
+// danych o opóźnieniu") — wywołujący ma wtedy spaść na żywą heurystykę zamiast pokazać
+// potencjalnie nieaktualną trasę bez ostrzeżenia.
+async function verifyFirstLegLive(leg: { from: string; departure: string }, date: string): Promise<boolean> {
+  const liveFrom = await resolveSingleStation(leg.from);
+  if (!liveFrom.ok) return false;
+  const result = await pkpFetch("/schedules", { stations: liveFrom.station.id, dateFrom: date, dateTo: date });
+  if (!result.ok) return false;
+  const plannedMin = parseTimeToMinutes(leg.departure);
+  if (plannedMin === null) return false;
+  for (const r of asList(result.data)) {
+    const stop = stationStopIn(r, liveFrom.station.id);
+    const t = timeStrToMinutes(stop?.departureTime ?? stop?.arrivalTime);
+    if (t !== null && Math.abs(t - plannedMin) <= 3) return true;
+  }
+  return false;
+}
+
+// Próba lokalna (CSA nad zsynchronizowanym GTFS) dla plan_train_journey — zwraca null
+// przy JAKIMKOLWIEK niepowodzeniu (brak świeżych danych, stacja nierozpoznana/
+// niejednoznaczna lokalnie, CSA nic nie znajduje, rozbieżność z żywym API dla bliskiej
+// daty, dowolny wyjątek), co dispatcher wyżej traktuje jako sygnał do wywołania
+// planTrainJourneyLive — nigdy nie ujawnia błędu 500 z powodu tej ścieżki.
+async function tryPlanTrainJourneyLocal(
+  url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string,
+): Promise<CsaResult | null> {
+  try {
+    if (!(await hasFreshLocalData(url, key))) return null;
+
+    const fromResolved = resolveStationPoint(fromArg, user);
+    const toResolved = resolveStationPoint(toArg, user);
+    if (!fromResolved.query || !toResolved.query) return null; // spadnij na żywą — ona da właściwy komunikat no_preferred_station
+
+    const [fromLookup, toLookup] = await Promise.all([
+      resolveSingleStationLocal(url, key, fromResolved.query),
+      resolveSingleStationLocal(url, key, toResolved.query),
+    ]);
+    if (!fromLookup.ok || !toLookup.ok) return null;
+
+    const date = dateArg || todayDateStr();
+    const isToday = date === todayDateStr();
+    const startSeconds = isToday ? (warsawNow().getHours() * 3600 + warsawNow().getMinutes() * 60) : 0;
+
+    const result = await runCsaJourney(url, key, fromLookup.station, toLookup.station, date, startSeconds);
+    if (!result) return null;
+
+    if (isNearTermDate(date)) {
+      const verified = await verifyFirstLegLive(result.legs[0], date);
+      if (!verified) {
+        log("rail_local_mismatch", { from: fromLookup.station.name, to: toLookup.station.name, date });
+        return null;
+      }
+    }
+
+    return result;
+  } catch (e) {
+    log("rail_local_error", { error: String(e) });
+    return null;
+  }
+}
+
+// Żywa heurystyka PKP (bezpośredni odcinek, potem do 1, potem do 2 przesiadek) —
+// zachowana bez zmian jako TRWAŁY bezpiecznik, nie tymczasowa łatka migracyjna. Wywoływana
+// przez dispatcher plan_train_journey wyżej, zawsze gdy próba lokalna (CSA) zawiedzie.
+async function planTrainJourneyLive(url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string): Promise<Response> {
+  {
+    {
       const fromResolved = resolveStationPoint(fromArg, user);
       if (!fromResolved.query) return json({ error: "no_preferred_station", hint: fromResolved.missing }, 200);
       const toResolved = resolveStationPoint(toArg, user);
@@ -848,7 +961,7 @@ Deno.serve(async (req: Request) => {
       if (!toLookup.ok) return json(toLookup.body, 200);
       const from = fromLookup.station, to = toLookup.station;
 
-      const date = typeof input.args?.date === "string" && input.args.date ? input.args.date : todayDateStr();
+      const date = dateArg || todayDateStr();
       const isToday = date === todayDateStr();
       const nowMin = warsawNow().getHours() * 60 + warsawNow().getMinutes();
 
@@ -1105,11 +1218,5 @@ Deno.serve(async (req: Request) => {
         ],
       });
     }
-
-    return json({ error: "Unknown action" }, 400);
-  } catch (error) {
-    console.error("assistant-tools error", String(error));
-    log("endpoint_error", { action: input.action, error: String(error) });
-    return json({ error: "Tool execution failed" }, 500);
   }
-});
+}
