@@ -193,19 +193,24 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
       return json({ ok: true, skipped: "unchanged" });
     }
 
-    const [alreadyRunning] = await sql<{ id: string; started_at: string }[]>`select id, started_at from rail_sync_runs where status = 'running' limit 1`;
-    if (alreadyRunning) {
-      // WORKER_RESOURCE_LIMIT potrafi ubić wywołanie tak brutalnie, że nie zdąży nawet
-      // wykonać własnego catch-bloku (status zostaje 'running' na zawsze) — bez tego
-      // sprawdzenia taki porzucony bieg blokowałby każdy kolejny "start" w nieskończoność.
+    // WORKER_RESOURCE_LIMIT potrafi ubić wywołanie tak brutalnie, że nie zdąży nawet
+    // wykonać własnego catch-bloku (status zostaje 'running' na zawsze) — bez tego
+    // sprawdzenia taki porzucony bieg blokowałby każdy kolejny "start" w nieskończoność.
+    // Sprawdzamy WSZYSTKIE wiersze 'running' (mogło ich się uzbierać kilka z kolejnych
+    // nieudanych prób), nie tylko pierwszy z brzegu — bez ORDER BY jeden zapytanie
+    // `limit 1` mogło trafić akurat na świeży wiersz, mijając starszy, naprawdę
+    // porzucony, i błędnie zgłosić "already_running".
+    const runningRows = await sql<{ id: string; started_at: string }[]>`select id, started_at from rail_sync_runs where status = 'running' order by started_at desc`;
+    if (runningRows.length) {
+      const freshest = runningRows[0];
+      const ageMs = Date.now() - new Date(freshest.started_at).getTime();
       // Normalny pełny przebieg (nawet czystym cronem co 2 min) mieści się dużo poniżej
-      // godziny, więc starszy 'running' bez zakończenia to niemal na pewno porzucony.
-      const ageMs = Date.now() - new Date(alreadyRunning.started_at).getTime();
+      // godziny, więc jeśli nawet najświeższy 'running' jest starszy — wszystkie są porzucone.
       if (ageMs < 60 * 60 * 1000) {
         await sql.end();
         return json({ ok: true, skipped: "already_running" });
       }
-      await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = 'stale_abandoned_run' where id = ${alreadyRunning.id}`;
+      await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = 'stale_abandoned_run' where status = 'running'`;
     }
 
     // Czyste raw tabele przed nowym syncem — na wypadek, gdyby poprzedni sync zawiódł

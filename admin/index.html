@@ -2069,10 +2069,10 @@ async function refreshRailSyncStatus() {
 // prawo zapisu do rail_sync_runs (RLS: authenticated), więc to zwykły update, bez
 // dodatkowej akcji w rail-gtfs-sync.
 async function resetStuckRailSync() {
-  const { data } = await sb.from('rail_sync_runs').select('id,status').eq('status', 'running').limit(1);
-  const stuck = data?.[0];
-  if (!stuck) { await refreshRailSyncStatus(); return; }
-  await sb.from('rail_sync_runs').update({ status: 'failed', finished_at: new Date().toISOString(), error: 'zresetowane ręcznie z panelu' }).eq('id', stuck.id);
+  // Wszystkie 'running' naraz, nie tylko jeden — mogło się ich uzbierać kilka z kolejnych
+  // nieudanych prób (np. WORKER_RESOURCE_LIMIT ubijający wywołanie zanim zdąży się samo
+  // oznaczyć jako nieudane), a "Uruchom sync" blokuje się dopóki choć JEDEN zostaje.
+  await sb.from('rail_sync_runs').update({ status: 'failed', finished_at: new Date().toISOString(), error: 'zresetowane ręcznie z panelu' }).eq('status', 'running');
   await refreshRailSyncStatus();
 }
 
