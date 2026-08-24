@@ -193,10 +193,19 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
       return json({ ok: true, skipped: "unchanged" });
     }
 
-    const [alreadyRunning] = await sql<{ id: string }[]>`select id from rail_sync_runs where status = 'running' limit 1`;
+    const [alreadyRunning] = await sql<{ id: string; started_at: string }[]>`select id, started_at from rail_sync_runs where status = 'running' limit 1`;
     if (alreadyRunning) {
-      await sql.end();
-      return json({ ok: true, skipped: "already_running" });
+      // WORKER_RESOURCE_LIMIT potrafi ubić wywołanie tak brutalnie, że nie zdąży nawet
+      // wykonać własnego catch-bloku (status zostaje 'running' na zawsze) — bez tego
+      // sprawdzenia taki porzucony bieg blokowałby każdy kolejny "start" w nieskończoność.
+      // Normalny pełny przebieg (nawet czystym cronem co 2 min) mieści się dużo poniżej
+      // godziny, więc starszy 'running' bez zakończenia to niemal na pewno porzucony.
+      const ageMs = Date.now() - new Date(alreadyRunning.started_at).getTime();
+      if (ageMs < 60 * 60 * 1000) {
+        await sql.end();
+        return json({ ok: true, skipped: "already_running" });
+      }
+      await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = 'stale_abandoned_run' where id = ${alreadyRunning.id}`;
     }
 
     // Czyste raw tabele przed nowym syncem — na wypadek, gdyby poprzedni sync zawiódł

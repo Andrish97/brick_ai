@@ -1934,7 +1934,13 @@ function renderEndpointTestsForm() {
           🔁 Wykonaj krok
         </button>
         <button class="btn btn-ghost btn-sm" onclick="refreshRailSyncStatus()">↻ Odśwież status</button>
+        <button class="btn btn-ghost btn-sm" onclick="resetStuckRailSync()" style="color:var(--danger)">🛑 Zresetuj utknięty sync</button>
       </div>
+      <p style="color:var(--muted);font-size:11px;margin-top:4px">
+        Jeśli status utknął na "running" i nic się nie zmienia (np. wywołanie zostało ubite
+        przez limit zasobów Supabase, zanim zdążyło się samo oznaczyć jako nieudane) — kliknij
+        "Zresetuj", żeby odblokować kolejny "Uruchom sync".
+      </p>
       <div id="rail-sync-status" style="margin-top:10px">${renderRailSyncStatus()}</div>
     </div>
 
@@ -1970,6 +1976,18 @@ async function refreshRailSyncStatus() {
   _railSyncStatus = data?.[0] ?? null;
   const box = document.getElementById('rail-sync-status');
   if (box) box.innerHTML = renderRailSyncStatus();
+}
+
+// Ręczne wyjście awaryjne, gdyby bieg utknął na "running" (np. wywołanie ubite przez
+// limit zasobów Supabase zanim zdążyło się samo oznaczyć jako 'failed') — panel ma już
+// prawo zapisu do rail_sync_runs (RLS: authenticated), więc to zwykły update, bez
+// dodatkowej akcji w rail-gtfs-sync.
+async function resetStuckRailSync() {
+  const { data } = await sb.from('rail_sync_runs').select('id,status').eq('status', 'running').limit(1);
+  const stuck = data?.[0];
+  if (!stuck) { await refreshRailSyncStatus(); return; }
+  await sb.from('rail_sync_runs').update({ status: 'failed', finished_at: new Date().toISOString(), error: 'zresetowane ręcznie z panelu' }).eq('id', stuck.id);
+  await refreshRailSyncStatus();
 }
 
 async function runRailSync(action) {
