@@ -189,7 +189,14 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
     const entries = await reader.getEntries();
     for (const fileName of ALL_FILES) {
       const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
-      if (!entry || entry.directory) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
+      if (!entry || entry.directory) {
+        // Nie każdy plik GTFS jest wymagany przez spec — np. calendar.txt można pominąć,
+        // jeśli cały kalendarz jest wyrażony przez calendar_dates.txt (potwierdzone: ten
+        // konkretny feed rzeczywiście go nie ma). Wyjątek: stop_times.txt — bez niego nie
+        // ma żadnego rozkładu do zbudowania, to jedyny plik, którego brak jest błędem.
+        if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
+        continue;
+      }
       const text = await entry.getData(new TextWriter());
       await storagePutText(SB, KEY, `${run.id}/${fileName}`, text);
     }
@@ -219,7 +226,12 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     let rowsInserted = 0;
 
     if (SMALL_FILES.includes(fileName)) {
-      const { text } = await storageGetRange(SB, KEY, `${run.id}/${fileName}`, 0, 200 * 1024 * 1024);
+      // Plik mógł nie istnieć w zipie (dozwolone przez spec GTFS — zob. handleStart) —
+      // brak obiektu w Storage traktujemy jako pusty plik, nie błąd.
+      let text = "";
+      try {
+        text = (await storageGetRange(SB, KEY, `${run.id}/${fileName}`, 0, 200 * 1024 * 1024)).text;
+      } catch { /* plik nieobecny w tym syncu — zero wierszy, kontynuuj */ }
       const lines = text.split("\n");
       const headerMap = buildHeaderMap(lines[0] ?? "");
       const dataLines = lines.slice(1);
