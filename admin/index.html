@@ -2072,7 +2072,15 @@ async function resetStuckRailSync() {
   // Wszystkie 'running' naraz, nie tylko jeden — mogło się ich uzbierać kilka z kolejnych
   // nieudanych prób (np. WORKER_RESOURCE_LIMIT ubijający wywołanie zanim zdąży się samo
   // oznaczyć jako nieudane), a "Uruchom sync" blokuje się dopóki choć JEDEN zostaje.
-  await sb.from('rail_sync_runs').update({ status: 'failed', finished_at: new Date().toISOString(), error: 'zresetowane ręcznie z panelu' }).eq('status', 'running');
+  const { data, error } = await sb.from('rail_sync_runs')
+    .update({ status: 'failed', finished_at: new Date().toISOString(), error: 'zresetowane ręcznie z panelu' })
+    .eq('status', 'running')
+    .select('id');
+  // Jawny, widoczny wynik zamiast cichego "nic nie widać" — łatwo pomylić "nie było czego
+  // resetować" z "przycisk nie działa", jeśli ekran wygląda identycznie przed i po.
+  _railSyncResult = error
+    ? { ok: false, error: String(error.message || error) }
+    : { ok: true, reset_count: data?.length ?? 0, note: (data?.length ?? 0) === 0 ? 'Nie było żadnego zawieszonego biegu (status running) do zresetowania.' : undefined };
   await refreshRailSyncStatus();
 }
 
