@@ -29,7 +29,12 @@ const BUCKET = "rail-gtfs-raw";
 const SMALL_FILES = ["stops.txt", "routes.txt", "calendar.txt", "calendar_dates.txt", "trips.txt"];
 const BIG_FILE = "stop_times.txt";
 const ALL_FILES = [...SMALL_FILES, BIG_FILE];
-const STOP_TIMES_CHUNK_BYTES = 4 * 1024 * 1024; // 4MB na tick — bezpieczny margines pod limit CPU 2s Edge Function
+// 8MB na tick — realny test pokazał, że 4MB (~53k wierszy) mieści się w limicie 2s CPU
+// z zapasem; 8MB to mniej zapytań Range do Storage (patrz MAX_CONSECUTIVE_ERRORS niżej —
+// Cloudflare przed Supabase potrafi zablokować serię szybkich zapytań do tego samego
+// obiektu, więc mniej zapytań = mniejsze ryzyko trafienia w ten limit).
+const STOP_TIMES_CHUNK_BYTES = 8 * 1024 * 1024;
+const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rząd dopiero uznajemy sync za faktycznie zepsuty
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
 // Mapowanie: nazwa pliku GTFS -> {tabela raw, mapowanie kolumna GTFS -> kolumna raw}.
@@ -247,7 +252,7 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
       }
       const nextIdx = ALL_FILES.indexOf(fileName) + 1;
       const nextFile = ALL_FILES[nextIdx] ?? null;
-      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = 0, current_header = null, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
+      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
       if (!nextFile) await finishRun(sql, run.id);
       await sql.end();
       return json({ ok: true, file: fileName, rowsInserted, nextFile });
@@ -284,17 +289,30 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
 
     const newOffset = offset + consumedBytes;
     if (reachedEnd) {
-      await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
+      await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
       await finishRun(sql, run.id);
       await sql.end();
       return json({ ok: true, file: fileName, rowsInserted, done: true });
     }
 
-    await sql`update rail_sync_runs set current_offset = ${newOffset}, current_header = ${JSON.stringify(headerMap)}::jsonb, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
+    await sql`update rail_sync_runs set current_offset = ${newOffset}, current_header = ${JSON.stringify(headerMap)}::jsonb, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
     await sql.end();
     return json({ ok: true, file: fileName, rowsInserted, offset: newOffset, totalSize });
   } catch (e) {
-    await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = ${String(e)} where status = 'running'`.catch(() => {});
+    // Błąd (np. przejściowa blokada Cloudflare/WAF na serię szybkich zapytań Range do
+    // Storage) NIE kończy od razu całego syncu — offset/current_file nie są tu ruszane,
+    // więc kolejny tick po prostu spróbuje ten sam kawałek jeszcze raz. Dopiero po
+    // MAX_CONSECUTIVE_ERRORS pod rząd uznajemy to za faktycznie zepsute, nie przejściowe.
+    try {
+      await sql`
+        update rail_sync_runs
+        set consecutive_errors = consecutive_errors + 1,
+            error = ${String(e)},
+            status = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then 'failed' else status end,
+            finished_at = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then now() else finished_at end
+        where status = 'running'
+      `;
+    } catch { /* baza sama niedostępna — nic więcej nie da się tu zrobić */ }
     await sql.end();
     return json({ ok: false, error: String(e) }, 500);
   }
