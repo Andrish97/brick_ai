@@ -518,8 +518,33 @@ function onLoggedIn(user) {
   document.getElementById('setup-overlay').classList.add('hidden');
   document.getElementById('app').classList.add('visible');
   document.getElementById('user-email-label').textContent = user.email;
-  showPage('dashboard');
+  const { page, sub } = parseHashRoute();
+  showPage(page);
+  if (page === 'sms-tools' && sub) renderSmsTools(sub);
 }
+
+// ── Routing przez URL hash (#strona albo #strona/podzakladka) — dzięki temu odświeżenie
+// strony albo bezpośredni link wraca do tego samego widoku, zamiast zawsze na Dashboard. ──
+
+function parseHashRoute() {
+  const hash = location.hash.replace(/^#/, '');
+  if (!hash) return { page: 'dashboard', sub: null };
+  const [page, sub] = hash.split('/');
+  return { page: page || 'dashboard', sub: sub || null };
+}
+
+function updateHash(page, sub) {
+  const hash = sub ? `#${page}/${sub}` : `#${page}`;
+  if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+
+window.addEventListener('hashchange', () => {
+  if (!currentUser) return; // jeszcze niezalogowany — nic do zrobienia
+  const { page, sub } = parseHashRoute();
+  if (page === currentPage && (page !== 'sms-tools' || sub === smsToolsMode)) return; // już tam jesteśmy
+  showPage(page);
+  if (page === 'sms-tools' && sub) renderSmsTools(sub);
+});
 
 // ══════════════════════════════════════════════════════
 //  AUTH
@@ -571,6 +596,7 @@ function closeSidebar() {
 function showPage(page) {
   closeSidebar(); // wybór strony w menu mobilnym powinien od razu je zamykać
   currentPage = page;
+  updateHash(page, page === 'sms-tools' ? smsToolsMode : null);
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
   const navEl = document.getElementById(`nav-${page}`);
   if (navEl) navEl.classList.add('active');
@@ -1794,6 +1820,8 @@ const ENDPOINT_TEST_CASES = [
 
 async function renderSmsTools(mode) {
   if (mode === 'send' || mode === 'test' || mode === 'endpoints' || mode === 'chat') smsToolsMode = mode;
+  currentPage = 'sms-tools';
+  updateHash('sms-tools', smsToolsMode);
   await loadPhoneNumbers();
 
   const [{ data: users }, { data: convs }] = await Promise.all([
