@@ -2007,25 +2007,31 @@ function renderEndpointTestsForm() {
       <label style="font-size:13px;font-weight:600">Synchronizacja lokalnego rozkładu (GTFS)</label>
       <p style="color:var(--muted);font-size:12px;margin:4px 0 10px">
         Ściąga rozkład z mkuran.pl do własnej bazy, żeby planer tras (plan_train_journey)
-        mógł liczyć przesiadki lokalnie zamiast pytać PKP na żywo. Normalnie leci sam co
-        2 minuty (pg_cron), ale można też ręcznie: "Uruchom" zaczyna nowy sync, "Krok"
-        wykonuje jeden kawałek postępu (to samo co robi cron co 2 min) — przydatne do
-        obejrzenia postępu na żywo bez czekania.
+        mógł liczyć przesiadki lokalnie zamiast pytać PKP na żywo. "Uruchom" zaczyna nowy
+        sync, "Krok" wykonuje jeden kawałek postępu ręcznie, "Dokończ sync teraz" każe
+        bazie samej przelecieć przez wszystkie kroki od razu (patrz niżej).
       </p>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <button class="btn btn-primary btn-sm" onclick="runRailSync('start')" ${_railSyncRunning ? 'disabled' : ''}>
           ${_railSyncRunning ? 'Pracuję…' : '▶ Uruchom sync'}
         </button>
         <button class="btn btn-ghost btn-sm" onclick="runRailSync('tick')" ${_railSyncRunning ? 'disabled' : ''}>
-          🔁 Wykonaj krok
+          🔁 Wykonaj jeden krok
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="driveRailSyncToCompletion()" ${_railSyncRunning ? 'disabled' : ''}>
+          ${_railSyncRunning ? 'Baza sama pędzi przez kroki…' : '🚀 Dokończ sync teraz (bez czekania na cron)'}
         </button>
         <button class="btn btn-ghost btn-sm" onclick="refreshRailSyncStatus()">↻ Odśwież status</button>
         <button class="btn btn-ghost btn-sm" onclick="resetStuckRailSync()" style="color:var(--danger)">🛑 Zresetuj utknięty sync</button>
       </div>
       <p style="color:var(--muted);font-size:11px;margin-top:4px">
-        Jeśli status utknął na "running" i nic się nie zmienia (np. wywołanie zostało ubite
-        przez limit zasobów Supabase, zanim zdążyło się samo oznaczyć jako nieudane) — kliknij
-        "Zresetuj", żeby odblokować kolejny "Uruchom sync".
+        Sync leci teraz sam, całościowo — funkcja w bazie (<code>rail_gtfs_drive_ticks</code>)
+        sama odpala kolejne kroki jeden po drugim w pętli (cron uruchamia ją co 3 minuty jako
+        zapasowy mechanizm), więc cała synchronizacja kończy się w ≈kilka minut zamiast
+        czekania 20-30 minut na osobne "ticki" co 2 minuty. "Dokończ sync teraz" wywołuje tę
+        samą funkcję od razu, bez czekania na crona — do szybkiego testowania. Jeśli status
+        utknął na "running" bez ruchu (np. wywołanie zostało ubite przez limit zasobów
+        Supabase) — "Zresetuj" odblokowuje kolejny "Uruchom sync".
       </p>
       <div id="rail-sync-status" style="margin-top:10px">${renderRailSyncStatus()}</div>
     </div>
@@ -2038,7 +2044,7 @@ function renderEndpointTestsForm() {
 
 let _railSyncRunning = false;
 let _railSyncStatus = null;   // ostatni wiersz rail_sync_runs
-let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/tick
+let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/tick/RPC
 
 function renderRailSyncStatus() {
   const s = _railSyncStatus;
@@ -2097,6 +2103,25 @@ async function runRailSync(action) {
     _railSyncResult = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
   } catch (e) {
     _railSyncResult = { error: String(e) };
+  }
+  await refreshRailSyncStatus();
+  _railSyncRunning = false;
+  renderSmsContent();
+}
+
+// Zamiast klikać "Krok" ręcznie w kółko albo czekać na cron co 3 minuty — woła RPC
+// rail_gtfs_drive_ticks(), które samo, po stronie Postgresa, odpala serię ticków w pętli
+// (przez pg_net) i zwraca dopiero, gdy sync jest gotowy (albo napotka błąd/limit rund).
+// Cały postęp mimo to trafia do rail_sync_runs na bieżąco, więc "Odśwież status" w trakcie
+// też pokazuje aktualny stan — to wywołanie po prostu czeka na koniec zamiast robić jeden krok.
+async function driveRailSyncToCompletion() {
+  _railSyncRunning = true;
+  renderSmsContent();
+  try {
+    const { data, error } = await sb.rpc('rail_gtfs_drive_ticks');
+    _railSyncResult = error ? { ok: false, error: String(error.message || error) } : data;
+  } catch (e) {
+    _railSyncResult = { ok: false, error: String(e) };
   }
   await refreshRailSyncStatus();
   _railSyncRunning = false;
