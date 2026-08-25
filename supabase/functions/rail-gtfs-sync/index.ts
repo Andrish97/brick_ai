@@ -230,6 +230,12 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
     // current_offset = -1 to sentinel: "current_file jeszcze nie rozpakowany z zipa" —
     // pierwszy tick dla każdego pliku musi go najpierw wydobyć, zanim zacznie parsować.
     await storagePutText(SB, KEY, `${run.id}/_source.zip`, zipBytes);
+    // Ta sama weryfikacja co w extractOneFile — zaobserwowany realnie przypadek, gdzie
+    // POST upload zwraca 200 OK, ale obiekt nie zostaje poprawnie zapisany w Storage.
+    const verify = await storageGetRange(SB, KEY, `${run.id}/_source.zip`, 0, 64);
+    if (verify.totalSize < zipBytes.length) {
+      throw new Error(`start_upload_verify_failed _source.zip: uploaded ${zipBytes.length} bytes, storage reports only ${verify.totalSize}`);
+    }
 
     await sql.end();
     return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
@@ -255,6 +261,19 @@ async function extractOneFile(SB: string, KEY: string, runId: string, fileName: 
     }
     const text = await entry.getData(new TextWriter());
     await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
+    // Weryfikacja UPLOAD-u — realnie zaobserwowane: POST dla dużego (~52MB) ciała
+    // potrafi zwrócić 200 OK, a obiekt mimo to nie zostaje poprawnie zapisany (kolejny
+    // odczyt daje 404 NoSuchKey). Bez tego current_offset przechodzi na 0 (uznane za
+    // "wyodrębnione"), a błąd wychodzi dopiero przy parsowaniu, z mylącym komunikatem.
+    // Rzucenie tutaj zamiast tego zostawia current_offset na -1, więc następny tick
+    // po prostu spróbuje wgrać ten plik jeszcze raz.
+    // Rozmiar w bajtach (Storage) jest zawsze >= długości stringa w jednostkach UTF-16
+    // (text.length) — znaki spoza ASCII tylko DODAJĄ bajty, nigdy nie ubywa — więc to
+    // bezpieczny, zawsze-prawdziwy dla poprawnego uploadu warunek.
+    const verify = await storageGetRange(SB, KEY, `${runId}/${fileName}`, 0, 64);
+    if (verify.totalSize < text.length) {
+      throw new Error(`extract_upload_verify_failed ${fileName}: uploaded ${text.length} JS chars, storage reports only ${verify.totalSize} bytes`);
+    }
     return true;
   } finally {
     await reader.close();
