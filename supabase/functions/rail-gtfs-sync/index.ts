@@ -304,18 +304,29 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     // WORKER_RESOURCE_LIMIT w poprzedniej wersji handleStart).
     if (run.current_offset === -1) {
       const { extracted, totalSize } = await extractOneFile(SB, KEY, run.id, fileName);
-      await sql`update rail_sync_runs set current_offset = 0, current_total_bytes = ${extracted ? totalSize : null}, consecutive_errors = 0 where id = ${run.id}`;
+      // -2: potwierdzone PRZY EKSTRAKCJI, że pliku nie było w zipie (dozwolone przez spec
+      // GTFS dla wszystkiego poza stop_times.txt — zob. extractOneFile). Odróżnione od 0
+      // ("wyodrębniony, gotowy do parsowania"), żeby dalszy kod mógł rozróżnić legalny
+      // brak pliku od nieoczekiwanego 404 przy odczycie pliku, który rzekomo istnieje.
+      const nextOffset = extracted ? 0 : -2;
+      await sql`update rail_sync_runs set current_offset = ${nextOffset}, current_total_bytes = ${extracted ? totalSize : null}, consecutive_errors = 0 where id = ${run.id}`;
       await sql.end();
       return json({ ok: true, extracted: extracted ? fileName : null, skipped: extracted ? undefined : "not_in_feed" });
     }
 
     if (SMALL_FILES.includes(fileName)) {
-      // Plik mógł nie istnieć w zipie (dozwolone przez spec GTFS — zob. handleStart) —
-      // brak obiektu w Storage traktujemy jako pusty plik, nie błąd.
       let text = "";
-      try {
+      if (run.current_offset !== -2) {
+        // current_offset === 0 tutaj oznacza, że extractOneFile zgłosił sukces — obiekt
+        // POWINIEN istnieć. 404 w tym miejscu to nie legalny brak pliku (ten przypadek to
+        // current_offset === -2 wyżej, i wtedy w ogóle nie próbujemy czytać), tylko realny
+        // błąd trwałości zapisu w Storage (obserwowane na produkcji: POST dla dużego ciała
+        // potrafi zwrócić 200 i przejść weryfikację od razu, a mimo to obiekt później nie
+        // jest odczytywalny) — ma polecieć do ogólnej obsługi błędów niżej, która przy
+        // takim błędzie resetuje current_offset na -1, żeby następny tick spróbował
+        // wyodrębnić ten plik jeszcze raz od zera, zamiast w kółko czytać martwą ścieżkę.
         text = (await storageGetRange(SB, KEY, `${run.id}/${fileName}`, 0, 200 * 1024 * 1024)).text;
-      } catch { /* plik nieobecny w tym syncu — zero wierszy, kontynuuj */ }
+      }
       const lines = text.split("\n");
       const headerMap = buildHeaderMap(lines[0] ?? "");
       const dataLines = lines.slice(1);
@@ -394,11 +405,22 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     // Storage) NIE kończy od razu całego syncu — offset/current_file nie są tu ruszane,
     // więc kolejny tick po prostu spróbuje ten sam kawałek jeszcze raz. Dopiero po
     // MAX_CONSECUTIVE_ERRORS pod rząd uznajemy to za faktycznie zepsute, nie przejściowe.
+    //
+    // WYJĄTEK: "obiekt nie znaleziony" (NoSuchKey) przy odczycie pliku, który extractOneFile
+    // zgłosił jako poprawnie wgrany — obserwowane realnie na produkcji: POST dla dużego
+    // ciała (~52MB, stop_times.txt) potrafi zwrócić 200 i przejść natychmiastową
+    // weryfikację po uploadzie, a mimo to obiekt później okazuje się nieodczytywalny.
+    // Samo powtarzanie tego samego odczytu nic nie naprawi — resetujemy current_offset na
+    // -1, żeby następny tick wyodrębnił plik od nowa z _source.zip zamiast w kółko trafiać
+    // w tę samą martwą ścieżkę aż do wyczerpania MAX_CONSECUTIVE_ERRORS.
+    const isMissingObject = String(e).includes("NoSuchKey");
     try {
       await sql`
         update rail_sync_runs
         set consecutive_errors = consecutive_errors + 1,
             error = ${String(e)},
+            current_offset = case when ${isMissingObject} and current_offset >= 0 then -1 else current_offset end,
+            current_header = case when ${isMissingObject} and current_offset >= 0 then null else current_header end,
             status = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then 'failed' else status end,
             finished_at = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then now() else finished_at end
         where status = 'running'
