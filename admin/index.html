@@ -569,6 +569,7 @@ async function doLogin() {
 }
 
 async function doLogout() {
+  stopRailSyncPolling();
   await sb.auth.signOut();
   currentUser = null;
   document.getElementById('app').classList.remove('visible');
@@ -595,6 +596,9 @@ function closeSidebar() {
 
 function showPage(page) {
   closeSidebar(); // wybór strony w menu mobilnym powinien od razu je zamykać
+  // Odpytywanie statusu syncu GTFS ma sens tylko, gdy karta "Test endpointów" jest
+  // widoczna — renderSmsTools() sam je z powrotem uruchomi, jeśli faktycznie tam trafimy.
+  if (page !== 'sms-tools') stopRailSyncPolling();
   currentPage = page;
   updateHash(page, page === 'sms-tools' ? smsToolsMode : null);
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
@@ -1838,7 +1842,12 @@ async function renderSmsTools(mode) {
 
   if (!_smsSendUserId) _smsSendUserId = smsUsers.find(u => u.phone_number)?.id || '';
   if (!_smsTestUserId) _smsTestUserId = smsUsers[0]?.id || '';
-  if (mode === 'endpoints' && !_railSyncStatus) refreshRailSyncStatus();
+  if (smsToolsMode === 'endpoints') {
+    await refreshRailSyncStatus();
+    startRailSyncPolling();
+  } else {
+    stopRailSyncPolling();
+  }
 
   renderSmsContent();
 }
@@ -2010,18 +2019,17 @@ function renderEndpointTestsForm() {
         mógł liczyć przesiadki lokalnie zamiast pytać PKP na żywo. Dzieje się to całkiem
         samo, bez żadnego klikania: raz dziennie o 2:00 (czasu serwera) baza sama zaczyna
         nowy sync i sama, w pętli, przechodzi przez wszystkie kroki aż do końca — a status
-        poniżej odświeża się na żywo, gdy tylko coś jest w toku (nie trzeba klikać
-        "Odśwież"). Przycisk "Zsynchronizuj teraz" poniżej to tylko wygodne "zrób to od
-        razu", zamiast czekać do 2:00.
+        poniżej odświeża się sam, na żywo, bez potrzeby klikania czegokolwiek. Przycisk
+        "Zsynchronizuj teraz" poniżej to tylko wygodne "zrób to od razu", zamiast czekać
+        do 2:00.
       </p>
       <div id="rail-sync-buttons" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${renderRailSyncButtons()}</div>
       <p style="color:var(--muted);font-size:11px;margin-top:4px">
         "Zsynchronizuj teraz" robi całość jednym kliknięciem: zaczyna nowy sync (albo,
         jeśli feed od ostatniego razu się nie zmienił, kończy natychmiast bez zbędnej
-        pracy) i sam pędzi przez wszystkie kroki aż do końca. Status niżej odświeża się co
-        3 sekundy sam, dopóki coś jest w toku — również wtedy, gdy sync napędza wyłącznie
-        codzienny harmonogram, bez żadnego kliknięcia w tej karcie. "Krok" wykonuje jeden
-        pojedynczy kawałek postępu ręcznie — przydatne tylko do diagnozowania. Jeśli status
+        pracy) i sam pędzi przez wszystkie kroki aż do końca. Status niżej odświeża się
+        sam co kilka sekund, dopóki ta karta jest otwarta — również wtedy, gdy sync
+        napędza wyłącznie codzienny harmonogram, bez żadnego kliknięcia. Jeśli status
         utknął na "running" bez ruchu (np. wywołanie zostało ubite przez limit zasobów
         Supabase) — "Zresetuj" odblokowuje kolejną próbę.
       </p>
@@ -2053,10 +2061,6 @@ function renderRailSyncButtons() {
     <button class="btn btn-primary btn-sm" onclick="syncNow()" ${busy ? 'disabled' : ''}>
       ${busy ? 'Sync w toku…' : '⚡ Zsynchronizuj teraz'}
     </button>
-    <button class="btn btn-ghost btn-sm" onclick="runRailSync('tick')" ${busy ? 'disabled' : ''}>
-      🔁 Wykonaj jeden krok (debug)
-    </button>
-    <button class="btn btn-ghost btn-sm" onclick="refreshRailSyncStatus()">↻ Odśwież status</button>
     <button class="btn btn-ghost btn-sm" onclick="resetStuckRailSync()" style="color:var(--danger)">🛑 Zresetuj utknięty sync</button>
   `;
 }
@@ -2092,10 +2096,19 @@ async function refreshRailSyncStatus() {
   if (box) box.innerHTML = renderRailSyncStatus();
   const buttonsBox = document.getElementById('rail-sync-buttons');
   if (buttonsBox) buttonsBox.innerHTML = renderRailSyncButtons();
-  const isRunning = _railSyncStatus?.status === 'running';
-  if (isRunning && !_railSyncPollTimer) {
-    _railSyncPollTimer = setInterval(refreshRailSyncStatus, 3000);
-  } else if (!isRunning && _railSyncPollTimer) {
+}
+
+// Bez osobnego przycisku "Odśwież" — dopóki karta "Test endpointów" jest otwarta, stan
+// syncu ma się sam dopytywać w tle, więc jest zawsze aktualny bez żadnego klikania.
+// Uruchamiane/zatrzymywane przy wejściu/wyjściu z tej pod-zakładki (zob. renderSmsTools,
+// showPage) — nie ma sensu odpytywać bazy, gdy ta karta w ogóle nie jest widoczna.
+function startRailSyncPolling() {
+  stopRailSyncPolling();
+  _railSyncPollTimer = setInterval(refreshRailSyncStatus, 4000);
+}
+
+function stopRailSyncPolling() {
+  if (_railSyncPollTimer) {
     clearInterval(_railSyncPollTimer);
     _railSyncPollTimer = null;
   }
@@ -2108,7 +2121,7 @@ async function refreshRailSyncStatus() {
 async function resetStuckRailSync() {
   // Wszystkie 'running' naraz, nie tylko jeden — mogło się ich uzbierać kilka z kolejnych
   // nieudanych prób (np. WORKER_RESOURCE_LIMIT ubijający wywołanie zanim zdąży się samo
-  // oznaczyć jako nieudane), a "Uruchom sync" blokuje się dopóki choć JEDEN zostaje.
+  // oznaczyć jako nieudane), a "Zsynchronizuj teraz" blokuje się dopóki choć JEDEN zostaje.
   const { data, error } = await sb.from('rail_sync_runs')
     .update({ status: 'failed', finished_at: new Date().toISOString(), error: 'zresetowane ręcznie z panelu' })
     .eq('status', 'running')
@@ -2119,25 +2132,6 @@ async function resetStuckRailSync() {
     ? { ok: false, error: String(error.message || error) }
     : { ok: true, reset_count: data?.length ?? 0, note: (data?.length ?? 0) === 0 ? 'Nie było żadnego zawieszonego biegu (status running) do zresetowania.' : undefined };
   await refreshRailSyncStatus();
-}
-
-async function runRailSync(action) {
-  _railSyncRunning = true;
-  renderSmsContent();
-  try {
-    const session = await getSession();
-    const res = await fetch(`${SB_URL}/functions/v1/rail-gtfs-sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
-      body: JSON.stringify({ action }),
-    });
-    _railSyncResult = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-  } catch (e) {
-    _railSyncResult = { error: String(e) };
-  }
-  await refreshRailSyncStatus();
-  _railSyncRunning = false;
-  renderSmsContent();
 }
 
 // Jedno kliknięcie robi całość: najpierw "start" (tani no-op, jeśli feed się nie
