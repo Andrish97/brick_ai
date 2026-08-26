@@ -147,8 +147,21 @@ async function storagePutText(SB: string, KEY: string, path: string, content: st
   if (!res.ok) throw new Error(`storage_put_failed ${path}: HTTP ${res.status} ${await res.text()}`);
 }
 
+// Cloudflare stoi przed Supabase Storage. Realnie zaobserwowane: powtarzanie DOKŁADNIE
+// tego samego zapytania Range kilka razy z odstępem (do ~3s) po 404 dalej dawało ten sam
+// 404 — nie wyglądało to na propagację (która powinna się z czasem "naprawić"), tylko na
+// przyklejony NEGATYWNY CACHE tej samej odpowiedzi pod tym samym URL-em: skoro pierwsze
+// zapytanie zaraz po uploadzie trafiło jeszcze na 404, Cloudflare mogło je zacache'ować i
+// serwować z brzegu bez ponownego pytania originu, niezależnie ile razy i jak długo się
+// czeka. Losowy parametr zapytania + Cache-Control: no-cache wymuszają, żeby KAŻDE
+// zapytanie odczytu faktycznie trafiło do originu, zamiast dostać starą, zacache'owaną
+// odpowiedź.
+function noCacheUrl(SB: string, path: string): string {
+  return `${SB}/storage/v1/object/${BUCKET}/${path}?_cb=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
 async function storageGetFull(SB: string, KEY: string, path: string): Promise<Uint8Array> {
-  const res = await fetch(`${SB}/storage/v1/object/${BUCKET}/${path}`, { headers: sbHeaders(KEY) });
+  const res = await fetch(noCacheUrl(SB, path), { headers: sbHeaders(KEY, { "Cache-Control": "no-cache" }) });
   if (!res.ok) throw new Error(`storage_get_failed ${path}: HTTP ${res.status} ${await res.text()}`);
   return new Uint8Array(await res.arrayBuffer());
 }
@@ -157,8 +170,8 @@ async function storageGetFull(SB: string, KEY: string, path: string): Promise<Ui
 // Content-Range odpowiedzi). Jeśli plik jest krótszy niż żądany zakres, zwrócony tekst
 // będzie krótszy — to sygnał końca pliku.
 async function storageGetRange(SB: string, KEY: string, path: string, start: number, len: number): Promise<{ text: string; totalSize: number }> {
-  const res = await fetch(`${SB}/storage/v1/object/${BUCKET}/${path}`, {
-    headers: sbHeaders(KEY, { Range: `bytes=${start}-${start + len - 1}` }),
+  const res = await fetch(noCacheUrl(SB, path), {
+    headers: sbHeaders(KEY, { Range: `bytes=${start}-${start + len - 1}`, "Cache-Control": "no-cache" }),
   });
   if (!res.ok && res.status !== 206) throw new Error(`storage_range_failed ${path}: HTTP ${res.status} ${await res.text()}`);
   const contentRange = res.headers.get("content-range"); // format: "bytes start-end/total"
