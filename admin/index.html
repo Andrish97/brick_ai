@@ -2066,14 +2066,14 @@ let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/t
 let _railSyncResultOpen = false; // czy sekcja "surowa odpowiedź" jest rozwinięta (przetrwać odświeżanie na żywo)
 let _railSyncPollTimer = null; // interval id, gdy trwa automatyczne odpytywanie postępu
 
-// "Zajęty" liczony z realnego stanu w bazie (_railSyncStatus, dopytywanego przez
 // Przycisk blokujemy TYLKO, gdy TA karta ma własne wywołanie w locie (_railSyncRunning) —
 // żeby nie dało się kliknąć drugi raz w to samo, zanim pierwsze zdąży się zakończyć.
-// Kliknięcie, gdy sync trwa z innego źródła (cron w tle, inna karta), jest bezpieczne:
-// "start" wtedy tylko potwierdza już trwający bieg (skipped: already_running), a
-// rail_gtfs_drive_ticks() ma własną blokadę (advisory lock) chroniącą przed realnym
-// ściganiem się dwóch napędzających pętli — więc to najszybszy sposób na "zerknij, co
-// się teraz dzieje" bez ryzyka zepsucia czegokolwiek.
+// Kliknięcie, gdy sync trwa z innego źródła (cron w tle, inna karta), jest w praktyce
+// bezpieczne: "start" wtedy tylko potwierdza już trwający bieg (skipped: already_running),
+// a każdy pojedynczy "tick" jest sam w sobie odporny na przerwanie — więc to najszybszy
+// sposób na "zerknij, co się teraz dzieje" / popchnij dalej ręcznie. Jedyne, czego to NIE
+// wyklucza, to rzadkie nałożenie się tej pętli z pętlą crona w tym samym momencie (patrz
+// komentarz przy syncNow) — nieszkodliwe, nie realne ryzyko.
 function renderRailSyncButtons() {
   const inFlight = _railSyncRunning;
   const dbRunning = !inFlight && _railSyncStatus?.status === 'running';
@@ -2192,12 +2192,25 @@ async function resetStuckRailSync() {
 }
 
 // Jedno kliknięcie robi całość: najpierw "start" (tani no-op, jeśli feed się nie
-// zmienił albo sync już trwa — bezpiecznie wywoływać zawsze), potem RPC
-// rail_gtfs_drive_ticks(), które samo, po stronie Postgresa, odpala serię ticków w pętli
-// (przez pg_net) i zwraca dopiero, gdy sync jest gotowy (albo napotka błąd/limit rund).
-// Ten sam mechanizm leci też sam raz dziennie przez pg_cron (rail-gtfs-sync-start-daily
-// o 2:00 + rail-gtfs-sync-tick-driver jako napędzający backup co 3 min) — ten przycisk
-// to wyłącznie wygodne "zrób to teraz" zamiast czekać na harmonogram.
+// zmienił albo sync już trwa — bezpiecznie wywoływać zawsze), potem seria "ticków" w
+// pętli TU, W PRZEGLĄDARCE — nie przez RPC rail_gtfs_drive_ticks() (tamta droga okazała
+// się realnie zepsuta: PostgREST/rola `authenticated` ma własny, krótki statement_timeout,
+// a ustawienie SET statement_timeout NA POZIOMIE FUNKCJI go nie nadpisuje — Postgres
+// uzbraja ten limit raz, na starcie zapytania najwyższego poziomu, zanim funkcja w ogóle
+// zdąży zmienić GUC; zweryfikowane lokalnie, że nawet "SET statement_timeout" wewnątrz
+// funkcji nie ratuje wywołania trwającego dłużej niż limit sesji wołającego). Zwykłe
+// zapytania HTTP do samej Edge Function (jak tutaj) nie przechodzą przez ten limit wcale.
+//
+// Uwaga: cron nadal woła rail_gtfs_drive_ticks() bezpośrednio (pg_cron nie idzie przez
+// PostgREST, więc ten limit go nie dotyczy) — to wciąż działa i ma własną blokadę
+// (advisory lock) chroniącą przed dwoma równoległymi CRONOWYMI przebiegami. Teoretyczne
+// nałożenie się pętli z tej karty z pętlą crona w tym samym momencie nie jest tu
+// zablokowane — w najgorszym razie skutkuje kilkoma zdublowanymi wierszami w tabelach
+// rail_raw_* (nieszkodliwe dla CSA: zbędny duplikat połączenia, nie błędna trasa), nie
+// utratą postępu ani błędną odpowiedzią.
+const RAIL_SYNC_MAX_TICKS = 60;
+const RAIL_SYNC_TICK_DELAY_MS = 500;
+
 async function syncNow() {
   _railSyncRunning = true;
   renderSmsContent();
@@ -2210,12 +2223,23 @@ async function syncNow() {
     });
     const startJson = await startRes.json().catch(() => ({ error: `HTTP ${startRes.status}` }));
     await refreshRailSyncStatus();
-    let driveJson = null;
+
+    let lastTick = null;
+    let ticks = 0;
     if (startJson?.ok !== false) {
-      const { data, error } = await sb.rpc('rail_gtfs_drive_ticks');
-      driveJson = error ? { ok: false, error: String(error.message || error) } : data;
+      for (; ticks < RAIL_SYNC_MAX_TICKS; ticks++) {
+        if (ticks > 0) await new Promise((resolve) => setTimeout(resolve, RAIL_SYNC_TICK_DELAY_MS));
+        const tickRes = await fetch(`${SB_URL}/functions/v1/rail-gtfs-sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+          body: JSON.stringify({ action: 'tick' }),
+        });
+        lastTick = await tickRes.json().catch(() => ({ error: `HTTP ${tickRes.status}` }));
+        await refreshRailSyncStatus();
+        if (lastTick?.done || lastTick?.skipped === 'nothing_running' || lastTick?.ok === false) break;
+      }
     }
-    _railSyncResult = { start: startJson, drive: driveJson };
+    _railSyncResult = { start: startJson, ticks, last: lastTick };
   } catch (e) {
     _railSyncResult = { ok: false, error: String(e) };
   }
