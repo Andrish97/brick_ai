@@ -2065,10 +2065,42 @@ function renderRailSyncButtons() {
   `;
 }
 
+// Kolejność plików GTFS dokładnie jak w rail-gtfs-sync/index.ts (ALL_FILES) — musi się
+// zgadzać, bo procent liczony jest z pozycji current_file na tej liście. Pięć małych
+// plików razem to niewielki, z grubsza stały ułamek paska (kończą się w 1-2 tickach
+// każdy), reszta to stop_times.txt — jedyny plik na tyle duży, żeby jego postęp w
+// bajtach (current_offset / current_total_bytes) był widoczny i wart pokazania.
+const RAIL_SYNC_SMALL_FILES = ['stops.txt', 'routes.txt', 'calendar.txt', 'calendar_dates.txt', 'trips.txt'];
+const RAIL_SYNC_BIG_FILE = 'stop_times.txt';
+const RAIL_SYNC_SMALL_WEIGHT = 10; // % paska na wszystkie małe pliki razem
+const RAIL_SYNC_BIG_WEIGHT = 100 - RAIL_SYNC_SMALL_WEIGHT;
+
+function railSyncPercent(s) {
+  if (!s) return 0;
+  if (s.status === 'success') return 100;
+  if (s.status !== 'running') return 0;
+  if (!s.current_file) return 100; // między ostatnim kawałkiem a zapisem statusu 'success'
+  if (s.current_file === RAIL_SYNC_BIG_FILE) {
+    const frac = s.current_total_bytes ? Math.min(1, Math.max(0, (s.current_offset || 0) / s.current_total_bytes)) : 0;
+    return RAIL_SYNC_SMALL_WEIGHT + frac * RAIL_SYNC_BIG_WEIGHT;
+  }
+  const idx = RAIL_SYNC_SMALL_FILES.indexOf(s.current_file);
+  return idx === -1 ? 0 : (idx / RAIL_SYNC_SMALL_FILES.length) * RAIL_SYNC_SMALL_WEIGHT;
+}
+
 function renderRailSyncStatus() {
   const s = _railSyncStatus;
   const running = s?.status === 'running';
   const elapsed = running && s.started_at ? Math.max(0, Math.round((Date.now() - new Date(s.started_at).getTime()) / 1000)) : null;
+  const pct = railSyncPercent(s);
+  const barHtml = running
+    ? `<div style="margin:8px 0 2px">
+        <div style="height:8px;border-radius:4px;background:var(--bg);border:1px solid var(--border);overflow:hidden">
+          <div style="height:100%;width:${pct.toFixed(1)}%;background:var(--accent2);transition:width 0.5s ease"></div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">${pct.toFixed(0)}%</div>
+      </div>`
+    : '';
   const statusLine = s
     ? `<div style="font-size:13px">
         Status: <strong>${escHtml(s.status)}</strong>${running ? ' <span style="color:var(--accent2)">● trwa…</span>' : ''}
@@ -2076,6 +2108,7 @@ function renderRailSyncStatus() {
         · wierszy: ${s.rows_processed ?? 0}
         ${elapsed !== null ? ` · od ${elapsed}s` : ''}
         ${s.finished_at ? ` · zakończono: ${new Date(s.finished_at).toLocaleString('pl-PL')}` : ''}
+        ${barHtml}
         ${s.error ? `<div style="color:var(--danger);margin-top:4px">${escHtml(s.error)}</div>` : ''}
       </div>`
     : `<p style="color:var(--muted);font-size:13px">Brak jeszcze żadnej synchronizacji.</p>`;

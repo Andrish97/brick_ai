@@ -247,9 +247,12 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
 }
 
 // Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do Storage —
-// wywoływane raz na tick, zanim ten plik może zostać sparsowany. Zwraca false, jeśli
+// wywoływane raz na tick, zanim ten plik może zostać sparsowany. extracted=false, jeśli
 // pliku nie ma w zipie (dozwolone przez spec dla wszystkich poza stop_times.txt).
-async function extractOneFile(SB: string, KEY: string, runId: string, fileName: string): Promise<boolean> {
+// totalSize (rozmiar w bajtach zwrócony przez Storage) pozwala panelowi admina policzyć
+// procent postępu bieżącego pliku (current_offset / totalSize) — najważniejsze dla
+// stop_times.txt, jedynego pliku na tyle dużego, żeby to miało sens wizualnie.
+async function extractOneFile(SB: string, KEY: string, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
   const zipBytes = await storageGetFull(SB, KEY, `${runId}/_source.zip`);
   const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
   try {
@@ -257,7 +260,7 @@ async function extractOneFile(SB: string, KEY: string, runId: string, fileName: 
     const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
     if (!entry || entry.directory) {
       if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
-      return false;
+      return { extracted: false, totalSize: 0 };
     }
     const text = await entry.getData(new TextWriter());
     await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
@@ -274,7 +277,7 @@ async function extractOneFile(SB: string, KEY: string, runId: string, fileName: 
     if (verify.totalSize < text.length) {
       throw new Error(`extract_upload_verify_failed ${fileName}: uploaded ${text.length} JS chars, storage reports only ${verify.totalSize} bytes`);
     }
-    return true;
+    return { extracted: true, totalSize: verify.totalSize };
   } finally {
     await reader.close();
   }
@@ -300,8 +303,8 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     // zamiast robić to dla wszystkich 6 plików naraz (to właśnie powodowało
     // WORKER_RESOURCE_LIMIT w poprzedniej wersji handleStart).
     if (run.current_offset === -1) {
-      const extracted = await extractOneFile(SB, KEY, run.id, fileName);
-      await sql`update rail_sync_runs set current_offset = 0, consecutive_errors = 0 where id = ${run.id}`;
+      const { extracted, totalSize } = await extractOneFile(SB, KEY, run.id, fileName);
+      await sql`update rail_sync_runs set current_offset = 0, current_total_bytes = ${extracted ? totalSize : null}, consecutive_errors = 0 where id = ${run.id}`;
       await sql.end();
       return json({ ok: true, extracted: extracted ? fileName : null, skipped: extracted ? undefined : "not_in_feed" });
     }
