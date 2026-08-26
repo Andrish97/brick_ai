@@ -385,6 +385,24 @@
       border-bottom: 1px solid rgba(124,58,237,.2);
     }
     .uni-section:first-child { margin-top: 0; }
+
+    /* Ukośne paski przesuwające się w pasku postępu syncu GTFS — widoczny ruch nawet
+       między aktualizacjami procentu (np. w trakcie jednego kawałka stop_times.txt),
+       żeby nie wyglądało jak zawieszone. */
+    @keyframes rail-sync-stripes {
+      from { background-position: 0 0; }
+      to { background-position: 28px 0; }
+    }
+    .rail-sync-bar-fill {
+      background-image: repeating-linear-gradient(
+        45deg,
+        rgba(255,255,255,.18) 0, rgba(255,255,255,.18) 7px,
+        transparent 7px, transparent 14px
+      );
+      background-color: var(--accent2);
+      background-size: 28px 28px;
+      animation: rail-sync-stripes 0.7s linear infinite;
+    }
   </style>
 </head>
 <body>
@@ -2045,6 +2063,7 @@ function renderEndpointTestsForm() {
 let _railSyncRunning = false;
 let _railSyncStatus = null;   // ostatni wiersz rail_sync_runs
 let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/tick/RPC
+let _railSyncResultOpen = false; // czy sekcja "surowa odpowiedź" jest rozwinięta (przetrwać odświeżanie na żywo)
 let _railSyncPollTimer = null; // interval id, gdy trwa automatyczne odpytywanie postępu
 
 // "Zajęty" liczony z realnego stanu w bazie (_railSyncStatus, dopytywanego przez
@@ -2098,7 +2117,7 @@ function renderRailSyncStatus() {
   const barHtml = running
     ? `<div style="margin:8px 0 2px">
         <div style="height:8px;border-radius:4px;background:var(--bg);border:1px solid var(--border);overflow:hidden">
-          <div style="height:100%;width:${pct.toFixed(1)}%;background:var(--accent2);transition:width 0.5s ease"></div>
+          <div class="rail-sync-bar-fill" style="height:100%;width:${pct.toFixed(1)}%;transition:width 0.5s ease"></div>
         </div>
         <div style="font-size:11px;color:var(--muted);margin-top:3px">${pct.toFixed(0)}%</div>
       </div>`
@@ -2114,8 +2133,11 @@ function renderRailSyncStatus() {
         ${s.error ? `<div style="color:var(--danger);margin-top:4px">${escHtml(s.error)}</div>` : ''}
       </div>`
     : `<p style="color:var(--muted);font-size:13px">Brak jeszcze żadnej synchronizacji.</p>`;
+  // ontoggle zapisuje stan otwarcia — bez tego co kilka sekund odświeżanie na żywo
+  // podmienia cały ten fragment na świeży (domyślnie zamknięty) <details>, więc próba
+  // zaznaczenia/skopiowania tekstu w środku traci zawartość w połowie, zanim się uda.
   const resultHtml = _railSyncResult
-    ? `<details style="margin-top:6px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">surowa odpowiedź ostatniej akcji</summary><pre style="font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(JSON.stringify(_railSyncResult, null, 2))}</pre></details>`
+    ? `<details ${_railSyncResultOpen ? 'open' : ''} ontoggle="_railSyncResultOpen = this.open" style="margin-top:6px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">surowa odpowiedź ostatniej akcji</summary><pre style="font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(JSON.stringify(_railSyncResult, null, 2))}</pre></details>`
     : '';
   return statusLine + resultHtml;
 }
@@ -2139,7 +2161,7 @@ async function refreshRailSyncStatus() {
 // showPage) — nie ma sensu odpytywać bazy, gdy ta karta w ogóle nie jest widoczna.
 function startRailSyncPolling() {
   stopRailSyncPolling();
-  _railSyncPollTimer = setInterval(refreshRailSyncStatus, 4000);
+  _railSyncPollTimer = setInterval(refreshRailSyncStatus, 2000);
 }
 
 function stopRailSyncPolling() {
