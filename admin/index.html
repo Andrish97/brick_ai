@@ -2054,6 +2054,26 @@ function renderEndpointTestsForm() {
       <div id="rail-sync-status" style="margin-top:10px">${renderRailSyncStatus()}</div>
     </div>
 
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:16px">
+      <label style="font-size:13px;font-weight:600">Test wyszukiwania połączenia</label>
+      <p style="color:var(--muted);font-size:12px;margin:4px 0 10px">
+        Realne pytanie o trasę przez ten sam mechanizm co prawdziwy SMS (Gemini +
+        plan_train_journey), bez wysyłania SMS-a. Pokazuje wprost, czy odpowiedź
+        faktycznie policzył lokalny rozkład (CSA, z tabel wypełnionych przez sync
+        powyżej), czy zapasowa ścieżka na żywo przez PKP — to jedyny pewny sposób
+        sprawdzenia, czy zsynchronizowane dane realnie działają w wyszukiwarce.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="journey-test-from" type="text" placeholder="Skąd (np. Katowice)" value="${escHtml(_journeyTest.from)}" oninput="_journeyTest.from = this.value" style="flex:1;min-width:140px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px">
+        <input id="journey-test-to" type="text" placeholder="Dokąd (np. Zamość)" value="${escHtml(_journeyTest.to)}" oninput="_journeyTest.to = this.value" style="flex:1;min-width:140px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px">
+        <input id="journey-test-date" type="text" placeholder="Kiedy (np. jutro rano)" value="${escHtml(_journeyTest.date)}" oninput="_journeyTest.date = this.value" style="flex:1;min-width:140px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px">
+        <button class="btn btn-primary btn-sm" onclick="runJourneyTest()" ${_journeyTest.running ? 'disabled' : ''}>
+          ${_journeyTest.running ? 'Szukam…' : '🔎 Szukaj połączenia'}
+        </button>
+      </div>
+      <div id="journey-test-result" style="margin-top:10px">${renderJourneyTestResult()}</div>
+    </div>
+
     <div id="endpoint-test-results" style="margin-top:16px;display:flex;flex-direction:column;gap:10px">${resultsHtml}</div>
   `;
 }
@@ -2065,6 +2085,94 @@ let _railSyncStatus = null;   // ostatni wiersz rail_sync_runs
 let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/tick/RPC
 let _railSyncResultOpen = false; // czy sekcja "surowa odpowiedź" jest rozwinięta (przetrwać odświeżanie na żywo)
 let _railSyncPollTimer = null; // interval id, gdy trwa automatyczne odpytywanie postępu
+
+// ── Test wyszukiwania połączenia — realne pytanie przez Gemini+plan_train_journey (bez
+// SMS-a), z jawnym pokazaniem czy odpowiedziała ścieżka lokalna (CSA) czy zapasowa żywa
+// (PKP) — dokładnie to, czego nie dawał żaden dotychczasowy test syncu samego w sobie:
+// dowód, że zsynchronizowane dane faktycznie działają w wyszukiwarce, nie tylko że
+// sync doszedł do 'success'. ──
+let _journeyTest = { from: '', to: '', date: 'jutro rano', running: false, result: null };
+
+function renderJourneyTestResult() {
+  const r = _journeyTest.result;
+  if (!r) return '';
+  const pathBadge = r.error
+    ? `<span class="badge badge-red">błąd</span>`
+    : r.path === 'local' && !r.mismatch && !r.localError
+      ? `<span class="badge badge-green">policzone lokalnie (CSA)</span>`
+      : r.path === 'live'
+        ? `<span class="badge badge-yellow">ścieżka zapasowa — na żywo (PKP)</span>`
+        : `<span class="badge badge-yellow">brak dowodu, że użyto lokalnych danych</span>`;
+  const body = r.error
+    ? `<div style="font-size:12px;color:var(--danger);margin-top:8px">${escHtml(r.error)}</div>`
+    : r.closed
+      ? `<div style="font-size:12px;color:var(--muted);margin-top:8px;font-style:italic">— rozmowa zamknięta, brak odpowiedzi SMS —</div>`
+      : r.reply
+        ? `<div style="font-size:13px;margin-top:8px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(r.reply)}</div>`
+        : `<div style="font-size:12px;color:var(--muted);margin-top:8px;font-style:italic">Brak odpowiedzi tekstowej — model mógł nie wywołać plan_train_journey wcale (spróbuj przeformułować pytanie).</div>`;
+  const diag = r.localError
+    ? `<div style="font-size:11px;color:var(--danger);margin-top:6px">Wyjątek w ścieżce lokalnej: ${escHtml(r.localError)}</div>`
+    : r.mismatch
+      ? `<div style="font-size:11px;color:var(--danger);margin-top:6px">Lokalny wynik nie zgodził się z żywym API PKP dla bliskiej daty — spadło na ścieżkę na żywo.</div>`
+      : '';
+  const raw = `<details style="margin-top:6px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">surowa odpowiedź + wpisy logów</summary><pre style="font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(JSON.stringify(r, null, 2))}</pre></details>`;
+  return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong style="font-size:13px">${escHtml(_journeyTest.from)} → ${escHtml(_journeyTest.to)} (${escHtml(_journeyTest.date)})</strong>
+        ${pathBadge}
+      </div>
+      ${body}${diag}${raw}
+    </div>`;
+}
+
+async function runJourneyTest() {
+  if (_journeyTest.running || !_journeyTest.from.trim() || !_journeyTest.to.trim()) return;
+  _journeyTest.running = true;
+  _journeyTest.result = null;
+  renderSmsContent();
+
+  const startedAt = new Date().toISOString();
+  const msg = `Jak dojadę pociągiem z ${_journeyTest.from.trim()} do ${_journeyTest.to.trim()} (${_journeyTest.date.trim() || 'jutro'})?`;
+  let result;
+  try {
+    const res = await fetch(`${SB_URL}/functions/v1/zadarma-sms-webhook?endpoint_test=1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'incoming_sms', msg, history: [], grantedParts: 3 }),
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    if (!res.ok || json?.ok === false) {
+      result = { error: json?.error || text || `HTTP ${res.status}` };
+    } else {
+      result = { reply: json?.reply ?? null, closed: !!json?.closed, parts: json?.parts ?? null };
+    }
+  } catch (e) {
+    result = { error: String(e) };
+  }
+
+  // Diagnostyka: plan_train_journey loguje którą ścieżką faktycznie odpowiedział
+  // (assistant-tools/index.ts) — dopytujemy te wpisy zamiast zgadywać z samej treści SMS-a.
+  try {
+    const { data: logRows } = await sb.from('logs')
+      .select('type,data,created_at')
+      .in('type', ['plan_train_journey_path', 'rail_local_mismatch', 'rail_local_error'])
+      .gte('created_at', startedAt)
+      .order('created_at', { ascending: true })
+      .limit(5);
+    const pathRow = logRows?.find(l => l.type === 'plan_train_journey_path');
+    result.path = pathRow?.data?.path ?? null;
+    result.mismatch = logRows?.some(l => l.type === 'rail_local_mismatch') ?? false;
+    const errRow = logRows?.find(l => l.type === 'rail_local_error');
+    result.localError = errRow?.data?.error ?? null;
+    result.logRows = logRows ?? [];
+  } catch { /* diagnostyka opcjonalna — nie blokuj wyniku samej odpowiedzi */ }
+
+  _journeyTest.result = result;
+  _journeyTest.running = false;
+  renderSmsContent();
+}
 
 // Przycisk blokujemy TYLKO, gdy TA karta ma własne wywołanie w locie (_railSyncRunning) —
 // żeby nie dało się kliknąć drugi raz w to samo, zanim pierwsze zdąży się zakończyć.
