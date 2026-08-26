@@ -2014,16 +2014,7 @@ function renderEndpointTestsForm() {
         "Odśwież"). Przycisk "Zsynchronizuj teraz" poniżej to tylko wygodne "zrób to od
         razu", zamiast czekać do 2:00.
       </p>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-        <button class="btn btn-primary btn-sm" onclick="syncNow()" ${_railSyncRunning ? 'disabled' : ''}>
-          ${_railSyncRunning ? 'Sync w toku…' : '⚡ Zsynchronizuj teraz'}
-        </button>
-        <button class="btn btn-ghost btn-sm" onclick="runRailSync('tick')" ${_railSyncRunning ? 'disabled' : ''}>
-          🔁 Wykonaj jeden krok (debug)
-        </button>
-        <button class="btn btn-ghost btn-sm" onclick="refreshRailSyncStatus()">↻ Odśwież status</button>
-        <button class="btn btn-ghost btn-sm" onclick="resetStuckRailSync()" style="color:var(--danger)">🛑 Zresetuj utknięty sync</button>
-      </div>
+      <div id="rail-sync-buttons" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${renderRailSyncButtons()}</div>
       <p style="color:var(--muted);font-size:11px;margin-top:4px">
         "Zsynchronizuj teraz" robi całość jednym kliknięciem: zaczyna nowy sync (albo,
         jeśli feed od ostatniego razu się nie zmienił, kończy natychmiast bez zbędnej
@@ -2047,6 +2038,28 @@ let _railSyncRunning = false;
 let _railSyncStatus = null;   // ostatni wiersz rail_sync_runs
 let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/tick/RPC
 let _railSyncPollTimer = null; // interval id, gdy trwa automatyczne odpytywanie postępu
+
+// "Zajęty" liczony z realnego stanu w bazie (_railSyncStatus, dopytywanego przez
+// refreshRailSyncStatus/pollowanie), nie tylko z lokalnego _railSyncRunning tej karty —
+// inaczej przycisk wyglądałby na wolny nawet gdy sync akurat leci sam z crona (albo z
+// innej otwartej karty przeglądarki), i dałoby się kliknąć "od nowa" w to samo.
+function isRailSyncBusy() {
+  return _railSyncRunning || _railSyncStatus?.status === 'running';
+}
+
+function renderRailSyncButtons() {
+  const busy = isRailSyncBusy();
+  return `
+    <button class="btn btn-primary btn-sm" onclick="syncNow()" ${busy ? 'disabled' : ''}>
+      ${busy ? 'Sync w toku…' : '⚡ Zsynchronizuj teraz'}
+    </button>
+    <button class="btn btn-ghost btn-sm" onclick="runRailSync('tick')" ${busy ? 'disabled' : ''}>
+      🔁 Wykonaj jeden krok (debug)
+    </button>
+    <button class="btn btn-ghost btn-sm" onclick="refreshRailSyncStatus()">↻ Odśwież status</button>
+    <button class="btn btn-ghost btn-sm" onclick="resetStuckRailSync()" style="color:var(--danger)">🛑 Zresetuj utknięty sync</button>
+  `;
+}
 
 function renderRailSyncStatus() {
   const s = _railSyncStatus;
@@ -2077,6 +2090,8 @@ async function refreshRailSyncStatus() {
   _railSyncStatus = data?.[0] ?? null;
   const box = document.getElementById('rail-sync-status');
   if (box) box.innerHTML = renderRailSyncStatus();
+  const buttonsBox = document.getElementById('rail-sync-buttons');
+  if (buttonsBox) buttonsBox.innerHTML = renderRailSyncButtons();
   const isRunning = _railSyncStatus?.status === 'running';
   if (isRunning && !_railSyncPollTimer) {
     _railSyncPollTimer = setInterval(refreshRailSyncStatus, 3000);
