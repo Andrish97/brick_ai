@@ -167,6 +167,30 @@ async function storageGetRange(SB: string, KEY: string, path: string, start: num
   return { text, totalSize };
 }
 
+// Weryfikacja tuż po uploadzie (storagePutText -> od razu storageGetRange) realnie
+// obserwowana jako zawodna NIEZALEŻNIE od rozmiaru pliku — 404 NoSuchKey łapany nawet
+// dla stops.txt (kilkaset KB), nie tylko dla ~52MB stop_times.txt, więc to nie kwestia
+// wielkości ciała POST, tylko krótkiego opóźnienia między zapisem a tym, kiedy staje się
+// on odczytywalny przez Range GET (Cloudflare stoi przed Supabase Storage — prawdopodobny
+// winowajca to chwilowa niespójność cache'u brzegowego dla świeżo zapisanego obiektu).
+// Kilka prób z odstępem zamiast jednorazowego sprawdzenia — jeśli to faktycznie kwestia
+// propagacji, kolejna próba po chwili powinna już widzieć obiekt.
+async function verifyObjectPersisted(SB: string, KEY: string, path: string, minBytes: number): Promise<number> {
+  const delaysMs = [400, 900, 1800];
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt - 1]));
+    try {
+      const verify = await storageGetRange(SB, KEY, path, 0, 64);
+      if (verify.totalSize >= minBytes) return verify.totalSize;
+      lastError = new Error(`reported size ${verify.totalSize} < expected ${minBytes}`);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw new Error(`verify_upload_failed ${path} after ${delaysMs.length + 1} attempts: ${String(lastError)}`);
+}
+
 // --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do Storage ---
 //
 // WAŻNE (poprawione po realnym WORKER_RESOURCE_LIMIT): rozpakowywanie WSZYSTKICH 6
@@ -230,12 +254,10 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
     // current_offset = -1 to sentinel: "current_file jeszcze nie rozpakowany z zipa" —
     // pierwszy tick dla każdego pliku musi go najpierw wydobyć, zanim zacznie parsować.
     await storagePutText(SB, KEY, `${run.id}/_source.zip`, zipBytes);
-    // Ta sama weryfikacja co w extractOneFile — zaobserwowany realnie przypadek, gdzie
-    // POST upload zwraca 200 OK, ale obiekt nie zostaje poprawnie zapisany w Storage.
-    const verify = await storageGetRange(SB, KEY, `${run.id}/_source.zip`, 0, 64);
-    if (verify.totalSize < zipBytes.length) {
-      throw new Error(`start_upload_verify_failed _source.zip: uploaded ${zipBytes.length} bytes, storage reports only ${verify.totalSize}`);
-    }
+    // Ta sama weryfikacja co w extractOneFile (z ponawianiem — zob. verifyObjectPersisted)
+    // — zaobserwowany realnie przypadek, gdzie POST upload zwraca 200 OK, a obiekt przez
+    // chwilę nie jest jeszcze odczytywalny przez Range GET.
+    await verifyObjectPersisted(SB, KEY, `${run.id}/_source.zip`, zipBytes.length);
 
     await sql.end();
     return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
@@ -264,20 +286,19 @@ async function extractOneFile(SB: string, KEY: string, runId: string, fileName: 
     }
     const text = await entry.getData(new TextWriter());
     await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
-    // Weryfikacja UPLOAD-u — realnie zaobserwowane: POST dla dużego (~52MB) ciała
-    // potrafi zwrócić 200 OK, a obiekt mimo to nie zostaje poprawnie zapisany (kolejny
-    // odczyt daje 404 NoSuchKey). Bez tego current_offset przechodzi na 0 (uznane za
-    // "wyodrębnione"), a błąd wychodzi dopiero przy parsowaniu, z mylącym komunikatem.
-    // Rzucenie tutaj zamiast tego zostawia current_offset na -1, więc następny tick
-    // po prostu spróbuje wgrać ten plik jeszcze raz.
+    // Weryfikacja UPLOAD-u z ponawianiem (zob. verifyObjectPersisted) — realnie
+    // zaobserwowane NIEZALEŻNIE od rozmiaru pliku (nawet dla kilkusetkilobajtowego
+    // stops.txt, nie tylko ~52MB stop_times.txt): POST zwraca 200 OK, a obiekt przez
+    // chwilę nie jest jeszcze odczytywalny przez Range GET (404 NoSuchKey) — wygląda na
+    // krótkie opóźnienie propagacji, nie odrzucony upload. Bez tego current_offset
+    // przechodzi na 0 (uznane za "wyodrębnione"), a błąd wychodzi dopiero przy
+    // parsowaniu, z mylącym komunikatem. Rzucenie tutaj (po wyczerpaniu prób) zostawia
+    // current_offset na -1, więc następny tick po prostu spróbuje wgrać plik jeszcze raz.
     // Rozmiar w bajtach (Storage) jest zawsze >= długości stringa w jednostkach UTF-16
     // (text.length) — znaki spoza ASCII tylko DODAJĄ bajty, nigdy nie ubywa — więc to
     // bezpieczny, zawsze-prawdziwy dla poprawnego uploadu warunek.
-    const verify = await storageGetRange(SB, KEY, `${runId}/${fileName}`, 0, 64);
-    if (verify.totalSize < text.length) {
-      throw new Error(`extract_upload_verify_failed ${fileName}: uploaded ${text.length} JS chars, storage reports only ${verify.totalSize} bytes`);
-    }
-    return { extracted: true, totalSize: verify.totalSize };
+    const totalSize = await verifyObjectPersisted(SB, KEY, `${runId}/${fileName}`, text.length);
+    return { extracted: true, totalSize };
   } finally {
     await reader.close();
   }
