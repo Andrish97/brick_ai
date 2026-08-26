@@ -2048,18 +2048,20 @@ let _railSyncResult = null;   // surowa odpowiedź ostatniego wywołania start/t
 let _railSyncPollTimer = null; // interval id, gdy trwa automatyczne odpytywanie postępu
 
 // "Zajęty" liczony z realnego stanu w bazie (_railSyncStatus, dopytywanego przez
-// refreshRailSyncStatus/pollowanie), nie tylko z lokalnego _railSyncRunning tej karty —
-// inaczej przycisk wyglądałby na wolny nawet gdy sync akurat leci sam z crona (albo z
-// innej otwartej karty przeglądarki), i dałoby się kliknąć "od nowa" w to samo.
-function isRailSyncBusy() {
-  return _railSyncRunning || _railSyncStatus?.status === 'running';
-}
-
+// Przycisk blokujemy TYLKO, gdy TA karta ma własne wywołanie w locie (_railSyncRunning) —
+// żeby nie dało się kliknąć drugi raz w to samo, zanim pierwsze zdąży się zakończyć.
+// Kliknięcie, gdy sync trwa z innego źródła (cron w tle, inna karta), jest bezpieczne:
+// "start" wtedy tylko potwierdza już trwający bieg (skipped: already_running), a
+// rail_gtfs_drive_ticks() ma własną blokadę (advisory lock) chroniącą przed realnym
+// ściganiem się dwóch napędzających pętli — więc to najszybszy sposób na "zerknij, co
+// się teraz dzieje" bez ryzyka zepsucia czegokolwiek.
 function renderRailSyncButtons() {
-  const busy = isRailSyncBusy();
+  const inFlight = _railSyncRunning;
+  const dbRunning = !inFlight && _railSyncStatus?.status === 'running';
+  const label = inFlight ? 'Sync w toku…' : dbRunning ? '🔎 Sprawdź / popchnij dalej' : '⚡ Zsynchronizuj teraz';
   return `
-    <button class="btn btn-primary btn-sm" onclick="syncNow()" ${busy ? 'disabled' : ''}>
-      ${busy ? 'Sync w toku…' : '⚡ Zsynchronizuj teraz'}
+    <button class="btn btn-primary btn-sm" onclick="syncNow()" ${inFlight ? 'disabled' : ''}>
+      ${label}
     </button>
     <button class="btn btn-ghost btn-sm" onclick="resetStuckRailSync()" style="color:var(--danger)">🛑 Zresetuj utknięty sync</button>
   `;
