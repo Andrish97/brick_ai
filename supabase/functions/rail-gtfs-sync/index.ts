@@ -76,7 +76,7 @@ const CORS = {
 // Znacznik wersji dołączany do KAŻDEJ odpowiedzi — jedyny pewny sposób sprawdzenia z
 // panelu, czy faktycznie działający kod pokrywa się z ostatnio wdrożonym commitem, zamiast
 // zgadywać po treści błędu, czy "deploy" naprawdę już objął tę konkretną instancję funkcji.
-const FN_VERSION = "storage-cachebust-v5-retry-everywhere";
+const FN_VERSION = "storage-cachebust-v6-list-debug";
 
 function json(data: unknown, status = 200): Response {
   const body = data && typeof data === "object" && !Array.isArray(data) ? { ...data, _fnVersion: FN_VERSION } : data;
@@ -144,13 +144,20 @@ function rowsToObjects(fileName: string, lines: string[], headerMap: Record<stri
 
 // --- Supabase Storage (bucket prywatny — service role key na każde wywołanie) ---
 
-async function storagePutText(SB: string, KEY: string, path: string, content: string | Uint8Array): Promise<void> {
+// Zwraca surową treść odpowiedzi Supabase Storage na upload (zwykle {"Key":"bucket/path"})
+// — dotąd nigdzie nieużywana, a to jedyny fragment prawdy, którego jeszcze nie
+// sprawdziliśmy: CO DOKŁADNIE Storage mówi, że właśnie zapisało, skoro kolejny odczyt
+// tej samej ścieżki, nawet po kilku realnych próbach z odstępem, konsekwentnie nie
+// znajduje obiektu.
+async function storagePutText(SB: string, KEY: string, path: string, content: string | Uint8Array): Promise<string> {
   const res = await fetch(`${SB}/storage/v1/object/${BUCKET}/${path}`, {
     method: "POST",
     headers: sbHeaders(KEY, { "Content-Type": "application/octet-stream", "x-upsert": "true" }),
     body: content,
   });
-  if (!res.ok) throw new Error(`storage_put_failed ${path}: HTTP ${res.status} ${await res.text()}`);
+  const bodyText = await res.text();
+  if (!res.ok) throw new Error(`storage_put_failed ${path}: HTTP ${res.status} ${bodyText}`);
+  return bodyText;
 }
 
 // Cloudflare stoi przed Supabase Storage. Realnie zaobserwowane: powtarzanie DOKŁADNIE
@@ -186,7 +193,9 @@ async function storageGetFull(SB: string, KEY: string, path: string): Promise<Ui
       lastError = e;
     }
   }
-  throw new Error(`[[SGF attemptsRun=${delaysMs.length + 1}]] ${String(lastError)}`);
+  const prefix = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+  const listing = await storageListDebug(SB, KEY, prefix);
+  throw new Error(`[[SGF attemptsRun=${delaysMs.length + 1}]] listing(${prefix})=${listing} | ${String(lastError)}`);
 }
 
 // Jedna próba odczytu fragmentu obiektu [start, start+len) oraz całkowitego rozmiaru
@@ -213,6 +222,24 @@ async function storageGetRangeOnce(SB: string, KEY: string, path: string, start:
 // dokładnie ten sam 404 bez żadnego ponawiania. Retry jest więc teraz WBUDOWANY w samą
 // storageGetRange, używaną wszędzie — jedno miejsce chroniące każdego wołającego,
 // zamiast każdorazowego opakowywania osobno.
+// Jedyny dotąd niesprawdzony fakt: co Storage NAPRAWDĘ ma zapisane w folderze tego
+// syncu, niezależnie od tego, czy GET na konkretną ścieżkę się udaje. Wywoływane tylko
+// diagnostycznie, po wyczerpaniu prawdziwych prób odczytu — pokazuje ziemię pod nogami
+// zamiast kolejnego zgadywania po kształcie błędu 404.
+async function storageListDebug(SB: string, KEY: string, prefix: string): Promise<string> {
+  try {
+    const res = await fetch(`${SB}/storage/v1/object/list/${BUCKET}`, {
+      method: "POST",
+      headers: sbHeaders(KEY, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ prefix, limit: 20 }),
+    });
+    const bodyText = await res.text();
+    return `HTTP ${res.status} ${bodyText}`;
+  } catch (e) {
+    return `list_failed: ${String(e)}`;
+  }
+}
+
 async function storageGetRange(SB: string, KEY: string, path: string, start: number, len: number): Promise<{ text: string; totalSize: number }> {
   const delaysMs = [400, 900, 1800];
   let lastError: unknown;
@@ -224,7 +251,9 @@ async function storageGetRange(SB: string, KEY: string, path: string, start: num
       lastError = e;
     }
   }
-  throw new Error(`[[SGR attemptsRun=${delaysMs.length + 1}]] ${String(lastError)}`);
+  const prefix = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+  const listing = await storageListDebug(SB, KEY, prefix);
+  throw new Error(`[[SGR attemptsRun=${delaysMs.length + 1}]] listing(${prefix})=${listing} | ${String(lastError)}`);
 }
 
 // Weryfikacja tuż po uploadzie (storagePutText -> od razu storageGetRange, samo już z
@@ -359,8 +388,9 @@ async function extractOneFile(SB: string, KEY: string, runId: string, fileName: 
     } catch (e) {
       throw new Error(`[[EOF:3-getData]] ${String(e)}`);
     }
+    let putResponse: string;
     try {
-      await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
+      putResponse = await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
     } catch (e) {
       throw new Error(`[[EOF:4-putText]] ${String(e)}`);
     }
@@ -379,7 +409,10 @@ async function extractOneFile(SB: string, KEY: string, runId: string, fileName: 
     try {
       totalSize = await verifyObjectPersisted(SB, KEY, `${runId}/${fileName}`, text.length);
     } catch (e) {
-      throw new Error(`[[EOF:5-verify]] ${String(e)}`);
+      // putResponse dołączony tutaj — jedyny dotąd niesprawdzony fakt: co DOKŁADNIE
+      // Supabase Storage odpowiedziało na sam upload, skoro odczyt zaraz potem
+      // konsekwentnie (nawet po kilku realnych próbach z odstępem) nie widzi obiektu.
+      throw new Error(`[[EOF:5-verify]] putResponse=${JSON.stringify(putResponse)} ${String(e)}`);
     }
     return { extracted: true, totalSize };
   } finally {
