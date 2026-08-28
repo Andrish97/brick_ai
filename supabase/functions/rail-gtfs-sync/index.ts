@@ -525,7 +525,16 @@ class PostgresBlobWriter extends Writer<never> {
 // totalSize) — najważniejsze dla stop_times.txt, jedynego pliku na tyle dużego, żeby to
 // miało sens wizualnie.
 async function extractOneFile(sql: SqlClient, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
-  const reader = new ZipReader(new PostgresBlobReader(sql, runId, SOURCE_ZIP));
+  // useWebWorkers: false — realny dowód z Supabase Metrics: MAX CPU TIME 2265ms, tuż nad
+  // twardym limitem 2000ms CPU na jedno wywołanie (podczas gdy MAX EXECUTION TIME — czas
+  // ściany, licząc oczekiwanie — to tylko ~11s, więc to nie zawieszenie ani nie problem z
+  // pamięcią, tylko realny czas CPU dekompresji). zip.js domyślnie PRÓBUJE odpalić
+  // dekompresję w Web Workerze (useWebWorkers: true domyślnie) — w tym jednowątkowym,
+  // piaskownicowym środowisku Edge Function to niepotrzebne (i tak nic nie zrównolegla) i
+  // niepewne, ile faktycznie kosztuje/jak jest rozliczane. Wyłączenie trzyma dekompresję w
+  // tym samym kontekście wykonania, na natywnym DecompressionStream (useCompressionStream
+  // zostaje domyślnie włączone).
+  const reader = new ZipReader(new PostgresBlobReader(sql, runId, SOURCE_ZIP), { useWebWorkers: false });
   try {
     const entries = await reader.getEntries();
     const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
@@ -534,7 +543,7 @@ async function extractOneFile(sql: SqlClient, runId: string, fileName: string): 
       return { extracted: false, totalSize: 0 };
     }
     const writer = new PostgresBlobWriter(sql, runId, fileName);
-    await entry.getData(writer);
+    await entry.getData(writer, { useWebWorkers: false });
     return { extracted: true, totalSize: writer.totalBytesWritten };
   } finally {
     await reader.close();
