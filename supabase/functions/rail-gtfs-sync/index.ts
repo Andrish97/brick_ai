@@ -76,7 +76,7 @@ const CORS = {
 // Znacznik wersji dołączany do KAŻDEJ odpowiedzi — jedyny pewny sposób sprawdzenia z
 // panelu, czy faktycznie działający kod pokrywa się z ostatnio wdrożonym commitem, zamiast
 // zgadywać po treści błędu, czy "deploy" naprawdę już objął tę konkretną instancję funkcji.
-const FN_VERSION = "storage-cachebust-v2";
+const FN_VERSION = "storage-cachebust-v3-vop-marker";
 
 function json(data: unknown, status = 200): Response {
   const body = data && typeof data === "object" && !Array.isArray(data) ? { ...data, _fnVersion: FN_VERSION } : data;
@@ -197,7 +197,9 @@ async function storageGetRange(SB: string, KEY: string, path: string, start: num
 async function verifyObjectPersisted(SB: string, KEY: string, path: string, minBytes: number): Promise<number> {
   const delaysMs = [400, 900, 1800];
   let lastError: unknown;
+  let attemptsRun = 0;
   for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
+    attemptsRun = attempt + 1;
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt - 1]));
     try {
       const verify = await storageGetRange(SB, KEY, path, 0, 64);
@@ -207,7 +209,9 @@ async function verifyObjectPersisted(SB: string, KEY: string, path: string, minB
       lastError = e;
     }
   }
-  throw new Error(`verify_upload_failed ${path} after ${delaysMs.length + 1} attempts: ${String(lastError)}`);
+  // Znacznik [[VOP]] jednoznacznie potwierdza z treści błędu w panelu, że TA funkcja
+  // faktycznie się wykonała (i ile razy) — bez zgadywania po samym kształcie komunikatu.
+  throw new Error(`[[VOP attemptsRun=${attemptsRun}]] verify_upload_failed ${path}: ${String(lastError)}`);
 }
 
 // --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do Storage ---
