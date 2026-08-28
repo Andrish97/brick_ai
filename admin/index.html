@@ -2391,13 +2391,22 @@ async function syncNow() {
     if (startRes.ok && startJson?.ok !== false) {
       for (; ticks < RAIL_SYNC_MAX_TICKS; ticks++) {
         if (ticks > 0) await new Promise((resolve) => setTimeout(resolve, RAIL_SYNC_TICK_DELAY_MS));
-        const tickRes = await fetch(`${SB_URL}/functions/v1/rail-gtfs-sync`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
-          body: JSON.stringify({ action: 'tick' }),
-        });
-        lastTick = await tickRes.json().catch(() => ({ error: `HTTP ${tickRes.status}` }));
-        await refreshRailSyncStatus();
+        // fetch() sam może rzucić (TypeError: Failed to fetch — realny, jednorazowy zanik
+        // sieci, zwłaszcza na telefonie), nie tylko zwrócić błędną odpowiedź HTTP. Bez tego
+        // złapania taki jeden zanik wypadał do zewnętrznego catch i kończył CAŁĄ pętlę
+        // ticków — dokładnie ten sam problem UX co przy lastTick?.ok===false wcześniej,
+        // tylko na poziomie samego fetch() zamiast odpowiedzi serwera.
+        try {
+          const tickRes = await fetch(`${SB_URL}/functions/v1/rail-gtfs-sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+            body: JSON.stringify({ action: 'tick' }),
+          });
+          lastTick = await tickRes.json().catch(() => ({ error: `HTTP ${tickRes.status}` }));
+        } catch (e) {
+          lastTick = { ok: false, error: String(e) };
+        }
+        await refreshRailSyncStatus().catch(() => {});
         // NIE przerywać samo na lastTick?.ok===false — pojedynczy nieudany tick (np.
         // fetch_timeout do mkuran.pl) jest z założenia tolerowany PO STRONIE SERWERA (do
         // MAX_CONSECUTIVE_ERRORS pod rząd, offset się nie rusza, następny tick po prostu
