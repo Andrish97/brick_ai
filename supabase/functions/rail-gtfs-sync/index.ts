@@ -1,5 +1,5 @@
 import postgres from "npm:postgres@3.4.5";
-import { ZipReader, Uint8ArrayReader, TextWriter } from "npm:@zip.js/zip.js@2.8.59";
+import { Reader, ZipReader, TextWriter } from "npm:@zip.js/zip.js@2.8.59";
 
 // Synchronizacja lokalnej kopii rozkładu kolejowego z darmowego feedu GTFS
 // (https://mkuran.pl/gtfs/polish_trains.zip, zbudowanego z tego samego źródła co
@@ -407,16 +407,58 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
   }
 }
 
+// Realny objaw na produkcji: po naprawie pobierania (Range, po kawałku) sync utknął na
+// KOLEJNYM kroku — rozpakowaniu pierwszego pliku (stops.txt) z już poprawnie pobranego
+// ~35MB zipa. Przyczyna: dokładnie ta sama klasa błędu co przy pobieraniu, tylko krok
+// dalej — `getBlobFull` + `Uint8ArrayReader` ładowały CAŁY zip do pamięci naraz, zanim
+// zip.js w ogóle zacznie cokolwiek z niego czytać. zip.js ma własny, generyczny interfejs
+// `Reader` z metodą `readUint8Array(index, length)`, wywoływaną przez bibliotekę TYLKO po
+// potrzebne fragmenty (spis centralny na końcu pliku, potem dane JEDNEGO wpisu) — dokładnie
+// ten sam mechanizm co getBlobRange, którym stop_times.txt jest już czytany kawałkami.
+// PostgresBlobReader podłącza go wprost do bazy zamiast buforować cały zip w JS.
+class PostgresBlobReader extends Reader<never> {
+  // Deklaracja .d.ts zip.js wymaga argumentu konstruktora i nie zna pola "initialized",
+  // choć oba istnieją inaczej/nie istnieją w realnym środowisku uruchomieniowym (Stream()
+  // w dist/zip.js nie przyjmuje argumentu; "initialized" istnieje, ale nie jest
+  // wystawione w tym konkretnym typie) — rozjazd samych deklaracji typów, nie realnego
+  // zachowania biblioteki (zweryfikowane wprost w dist/zip.js).
+  initialized = false;
+  constructor(private sql: SqlClient, private runId: string, private fileName: string) {
+    super(undefined as never);
+  }
+  override async init(): Promise<void> {
+    const [row] = await this.sql<{ total: number }[]>`
+      select octet_length(content) as total from rail_sync_blobs where run_id = ${this.runId} and file_name = ${this.fileName}
+    `;
+    if (!row) throw new Error(`source_zip_missing run=${this.runId}`);
+    this.size = row.total;
+    this.initialized = true;
+  }
+  override async readUint8Array(index: number, length: number): Promise<Uint8Array> {
+    const range = await getBlobRange(this.sql, this.runId, this.fileName, index, length);
+    if (!range) throw new Error(`source_zip_missing run=${this.runId}`);
+    // Realny, odtworzony i zweryfikowany bug: postgres.js zwraca bytea jako Node.js
+    // Buffer (podklasa Uint8Array), a Buffer.prototype.slice() NIE kopiuje — dzieli tę
+    // samą pamięć z oryginałem (w przeciwieństwie do zwykłego Uint8Array.prototype.slice,
+    // które zawsze kopiuje). zip.js wewnętrznie robi `array.slice(...).buffer`, zakładając
+    // że to da świeży, dokładnie-taki-długi bufor — dla zwykłego Uint8Array tak jest, ale
+    // dla Buffer .buffer nadal wskazuje na CAŁY, znacznie większy oryginalny bufor. Efekt:
+    // rekord EOCD (koniec centralnego katalogu zipa) był odczytywany spod złego adresu —
+    // realne dane pod dobrym offsetem, ale zip.js czytał z offsetu 0 w cudzym, dużo
+    // większym buforze, dając bezsensowny "numer dysku" i fałszywy błąd "Split zip file".
+    // Zwrócenie świeżego, zwykłego Uint8Array (kopia) obchodzi ten cudzy Buffer całkowicie.
+    return new Uint8Array(range.bytes);
+  }
+}
+
 // Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do rail_sync_blobs —
 // wywoływane raz na tick, zanim ten plik może zostać sparsowany. extracted=false, jeśli
-// pliku nie ma w zipie (dozwolone przez spec dla wszystkich poza stop_times.txt).
-// totalSize pozwala panelowi admina policzyć procent postępu bieżącego pliku
-// (current_offset / totalSize) — najważniejsze dla stop_times.txt, jedynego pliku na
-// tyle dużego, żeby to miało sens wizualnie.
+// pliku nie ma w zipie (dozwolone przez spec dla wszystkiego poza stop_times.txt).
+// totalSize pozwala panelowi admina policzyć postęp bieżącego pliku (current_offset /
+// totalSize) — najważniejsze dla stop_times.txt, jedynego pliku na tyle dużego, żeby to
+// miało sens wizualnie.
 async function extractOneFile(sql: SqlClient, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
-  const zipBytes = await getBlobFull(sql, runId, SOURCE_ZIP);
-  if (!zipBytes) throw new Error(`source_zip_missing run=${runId}`);
-  const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
+  const reader = new ZipReader(new PostgresBlobReader(sql, runId, SOURCE_ZIP));
   try {
     const entries = await reader.getEntries();
     const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
