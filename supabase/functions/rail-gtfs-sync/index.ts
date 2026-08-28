@@ -607,7 +607,30 @@ function getSql() {
   // Poolerze aż do ich idle-timeoutu. Przy puli do 10 na crash to realne ryzyko wyczerpania
   // limitu połączeń poolera, co mogłoby tłumaczyć crash nawet na taniej ścieżce ("busy"/
   // "already_running"), zanim doszłoby do jakiejkolwiek cięższej pracy.
-  return postgres(dbUrl, { prepare: false, max: 1 });
+  return postgres(dbUrl, {
+    prepare: false,
+    max: 1,
+    // Realny, znaleziony i zweryfikowany lokalnie bug: postgres.js domyślnie zwraca kolumny
+    // bigint (current_offset, current_total_bytes — zob. migracje) jako JS STRING, nie
+    // number, żeby uniknąć cichej utraty precyzji poza Number.MAX_SAFE_INTEGER. Nasze
+    // wartości (bajty pojedynczego pliku GTFS) są daleko poniżej tego limitu, więc string
+    // jest tu czystą pułapką: `"4194304" + 4194304 - 1` w JS to KONKATENACJA STRINGÓW
+    // (bo jeden operand jest stringiem), nie dodawanie — dawało kompletnie bezsensowny
+    // Range dla każdego kawałka pobierania po pierwszym (offset=0 działał tylko przez
+    // przypadek wiodącego zera). Ten sam błąd łamał też porównania sentinel current_offset
+    // === -1/-2 (string "-1" !== number -1) i arytmetykę offsetu w BIG_FILE. Jeden parser
+    // tutaj naprawia to źródłowo dla całego pliku zamiast łatania każdego miejsca użycia
+    // z osobna — zweryfikowane lokalnie: prawdziwy number, poprawna arytmetyka, poprawne
+    // porównania sentinel, poprawny zapis-i-odczyt w obie strony.
+    types: {
+      bigint: {
+        to: 20,
+        from: [20],
+        serialize: (x: number) => String(x),
+        parse: (x: string) => Number(x),
+      },
+    },
+  });
 }
 
 // Zalogowany admin z panelu (JWT Supabase) sprawdzany tym samym sposobem co
