@@ -2361,7 +2361,11 @@ async function syncNow() {
 
     let lastTick = null;
     let ticks = 0;
-    if (startJson?.ok !== false) {
+    // startRes.ok (status HTTP) I startJson?.ok !== false — samo sprawdzenie ok!==false
+    // przepuszczało crash platformy (np. WORKER_RESOURCE_LIMIT), bo taka odpowiedź to
+    // {code, message} bez pola "ok" w ogóle (undefined !== false jest prawdą), więc pętla
+    // ticków leciała dalej i po prostu napędzała jakikolwiek inny, stary "running" wiersz.
+    if (startRes.ok && startJson?.ok !== false) {
       for (; ticks < RAIL_SYNC_MAX_TICKS; ticks++) {
         if (ticks > 0) await new Promise((resolve) => setTimeout(resolve, RAIL_SYNC_TICK_DELAY_MS));
         const tickRes = await fetch(`${SB_URL}/functions/v1/rail-gtfs-sync`, {

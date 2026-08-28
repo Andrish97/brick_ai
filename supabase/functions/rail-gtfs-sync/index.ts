@@ -495,7 +495,14 @@ async function finishRun(sql: SqlClient, runId: string, isAutomatic: boolean): P
 function getSql() {
   const dbUrl = Deno.env.get("RAIL_DB_URL");
   if (!dbUrl) throw new Error("RAIL_DB_URL not set — potrzebny connection string do Transaction poolera Supabase Postgres");
-  return postgres(dbUrl, { prepare: false });
+  // max: 1 — bez tego postgres.js otwiera pulę do 10 połączeń na KAŻDE wywołanie, mimo że
+  // ten kod i tak zawsze wykonuje jedno zapytanie na raz, sekwencyjnie (nigdy Promise.all).
+  // Każde wywołanie ubite przez WORKER_RESOURCE_LIMIT (a było ich w tej sesji sporo) nigdy
+  // nie dochodzi do własnego sql.end() — zostawia otwarte połączenia na Transaction
+  // Poolerze aż do ich idle-timeoutu. Przy puli do 10 na crash to realne ryzyko wyczerpania
+  // limitu połączeń poolera, co mogłoby tłumaczyć crash nawet na taniej ścieżce ("busy"/
+  // "already_running"), zanim doszłoby do jakiejkolwiek cięższej pracy.
+  return postgres(dbUrl, { prepare: false, max: 1 });
 }
 
 // Zalogowany admin z panelu (JWT Supabase) sprawdzany tym samym sposobem co
