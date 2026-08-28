@@ -38,6 +38,10 @@ import { ZipReader, Uint8ArrayReader, TextWriter } from "npm:@zip.js/zip.js@2.8.
 // byłoby czystym szumem.
 
 const FEED_URL = "https://mkuran.pl/gtfs/polish_trains.zip";
+const SOURCE_ZIP = "_source.zip";
+// Zip pobierany kawałkami przez Range, tak jak stop_times.txt jest CZYTANY kawałkami —
+// zob. komentarz przy downloadOneChunk.
+const DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const SMALL_FILES = ["stops.txt", "routes.txt", "calendar.txt", "calendar_dates.txt", "trips.txt"];
 const BIG_FILE = "stop_times.txt";
 const ALL_FILES = [...SMALL_FILES, BIG_FILE];
@@ -195,64 +199,42 @@ async function reassembleChunks(sql: SqlClient, runId: string, fileName: string,
   await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
 }
 
-// Realny błąd na produkcji (WORKER_RESOURCE_LIMIT w "start", potwierdzony na CAŁKIEM
-// świeżym biegu — bez żadnego innego wywołania w tle, więc to nie rywalizacja o blokady):
-// `new Uint8Array(await zipRes.arrayBuffer())` trzyma CAŁY pobrany plik zipa w pamięci
-// naraz, zanim cokolwiek trafi do Postgresa. Zamiast buforować całość, czytamy strumień
-// odpowiedzi HTTP kawałkami i piszemy każdy kawałek do bazy na bieżąco — szczytowe zużycie
-// pamięci to jeden kawałek (BLOB_WRITE_CHUNK_BYTES), nie cały plik, niezależnie od jego
-// rozmiaru.
-async function putBlobStreaming(sql: SqlClient, runId: string, fileName: string, stream: ReadableStream<Uint8Array>): Promise<void> {
-  const tmpPrefix = `~chunk~${fileName}~`;
-  await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
-
-  const reader = stream.getReader();
-  let buffered: Uint8Array[] = [];
-  let bufferedLen = 0;
-  let chunkIndex = 0;
-
-  const flush = async () => {
-    if (bufferedLen === 0) return;
-    const merged = new Uint8Array(bufferedLen);
-    let off = 0;
-    for (const piece of buffered) {
-      merged.set(piece, off);
-      off += piece.length;
-    }
-    buffered = [];
-    bufferedLen = 0;
-    await putBlob(sql, runId, `${tmpPrefix}${String(chunkIndex).padStart(5, "0")}`, merged);
-    chunkIndex++;
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value && value.length) {
-      buffered.push(value);
-      bufferedLen += value.length;
-      if (bufferedLen >= BLOB_WRITE_CHUNK_BYTES) await flush();
-    }
+// Realny dowód na produkcji (Supabase Dashboard, wykres pamięci): pojedyncze wywołanie
+// "start" osiągnęło szczytowe zużycie pamięci ~260MB w kilka sekund — MIMO że kod już
+// wtedy czytał odpowiedź HTTP przez ReadableStream.getReader() zamiast .arrayBuffer().
+// Wniosek: fetch() w tym środowisku najwyraźniej buforuje całą odpowiedź po swojej
+// stronie niezależnie od tego, jak strumień jest potem konsumowany — samo API
+// ReadableStream nie daje żadnej gwarancji ograniczenia pamięci, jeśli klient HTTP pod
+// spodem i tak ściąga całość naraz. Jedyny sposób, żeby NAPRAWDĘ ograniczyć rozmiar
+// pojedynczego pobrania, to ograniczyć go PO STRONIE SERWERA przez nagłówek Range —
+// dokładnie ten sam mechanizm, którym stop_times.txt jest już CZYTANY kawałkami z
+// rail_sync_blobs (getBlobRange). Pobieranie zipa jest więc teraz też rozłożone na ticki:
+// jeden Range na jedno wywołanie, offset trzymany w current_offset (current_file =
+// SOURCE_ZIP), tak samo jak każdy inny krok tego syncu.
+async function downloadOneChunk(sql: SqlClient, runId: string, offset: number, knownTotalBytes: number | null): Promise<{ done: boolean; totalBytes: number | null; newOffset: number }> {
+  const rangeEnd = offset + DOWNLOAD_CHUNK_BYTES - 1;
+  const res = await fetch(FEED_URL, { headers: { Range: `bytes=${offset}-${rangeEnd}` } });
+  if (res.status !== 206) {
+    throw new Error(`range_not_supported: serwer feedu zwrócił HTTP ${res.status} zamiast 206 Partial Content dla Range bytes=${offset}-${rangeEnd}`);
   }
-  await flush();
+  const contentRange = res.headers.get("content-range"); // format: "bytes X-Y/TOTAL"
+  const totalFromHeader = contentRange ? parseInt(contentRange.split("/")[1] ?? "", 10) : NaN;
+  const totalBytes = Number.isFinite(totalFromHeader) ? totalFromHeader : knownTotalBytes;
 
-  if (chunkIndex === 0) {
-    await putBlob(sql, runId, fileName, new Uint8Array(0));
-    return;
+  const buf = new Uint8Array(await res.arrayBuffer());
+  const tmpPrefix = `~chunk~${SOURCE_ZIP}~`;
+  const chunkIndex = Math.floor(offset / DOWNLOAD_CHUNK_BYTES);
+  await putBlob(sql, runId, `${tmpPrefix}${String(chunkIndex).padStart(6, "0")}`, buf);
+
+  const newOffset = offset + buf.length;
+  const done = totalBytes !== null ? newOffset >= totalBytes : buf.length < DOWNLOAD_CHUNK_BYTES;
+  if (done) {
+    await reassembleChunks(sql, runId, SOURCE_ZIP, tmpPrefix);
+    await sql`update rail_sync_runs set current_file = ${SMALL_FILES[0]}, current_offset = -1, current_total_bytes = null, consecutive_errors = 0 where id = ${runId}`;
+  } else {
+    await sql`update rail_sync_runs set current_offset = ${newOffset}, current_total_bytes = ${totalBytes}, consecutive_errors = 0 where id = ${runId}`;
   }
-  if (chunkIndex === 1) {
-    // Dokładnie jeden kawałek — przenieś go wprost pod docelową nazwę, bez SQL-owego
-    // sklejania jednego elementu ze sobą.
-    await sql`
-      insert into rail_sync_blobs (run_id, file_name, content)
-      select ${runId}, ${fileName}, content from rail_sync_blobs
-      where run_id = ${runId} and file_name = ${tmpPrefix + "00000"}
-      on conflict (run_id, file_name) do update set content = excluded.content
-    `;
-    await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name = ${tmpPrefix + "00000"}`;
-    return;
-  }
-  await reassembleChunks(sql, runId, fileName, tmpPrefix);
+  return { done, totalBytes, newOffset };
 }
 
 async function getBlobFull(sql: SqlClient, runId: string, fileName: string): Promise<Uint8Array | null> {
@@ -320,6 +302,8 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     const headRes = await fetch(FEED_URL, { method: "HEAD" });
     const lastModifiedHeader = headRes.headers.get("last-modified");
     const feedLastModified = lastModifiedHeader ? new Date(lastModifiedHeader) : null;
+    const contentLengthHeader = headRes.headers.get("content-length");
+    const feedTotalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
 
     const [lastSuccess] = await sql<{ feed_last_modified: string | null }[]>`
       select feed_last_modified from rail_sync_runs
@@ -352,23 +336,19 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     // ale tylko przy pełnym sukcesie).
     await sql`truncate rail_raw_stops, rail_raw_routes, rail_raw_calendar, rail_raw_calendar_dates, rail_raw_trips, rail_raw_stop_times`;
 
-    const zipRes = await fetch(FEED_URL);
-    if (!zipRes.ok) throw new Error(`feed_fetch_failed: HTTP ${zipRes.status}`);
-    if (!zipRes.body) throw new Error("feed_fetch_failed: brak strumienia odpowiedzi");
-
+    // "start" już NIE pobiera zipa samo — tylko zakłada wiersz biegu z current_file =
+    // SOURCE_ZIP. Samo pobieranie jest teraz krok-po-kroku przez "tick" (zob.
+    // downloadOneChunk) dokładnie tym samym mechanizmem co reszta syncu.
     const [run] = await sql<{ id: string }[]>`
-      insert into rail_sync_runs (status, current_file, current_offset, feed_last_modified)
-      values ('running', ${SMALL_FILES[0]}, -1, ${feedLastModified ? feedLastModified.toISOString() : null})
+      insert into rail_sync_runs (status, current_file, current_offset, current_total_bytes, feed_last_modified)
+      values ('running', ${SOURCE_ZIP}, 0, ${feedTotalBytes}, ${feedLastModified ? feedLastModified.toISOString() : null})
       returning id
     `;
-    // current_offset = -1 to sentinel: "current_file jeszcze nie rozpakowany z zipa" —
-    // pierwszy tick dla każdego pliku musi go najpierw wydobyć, zanim zacznie parsować.
     // Blob-y po starych/nieudanych biegach nie są już potrzebne.
     await sql`delete from rail_sync_blobs where run_id <> ${run.id}`;
-    await putBlobStreaming(sql, run.id, "_source.zip", zipRes.body);
 
-    if (isAutomatic) await logRailSync(sql, "started", { runId: run.id });
-    return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
+    if (isAutomatic) await logRailSync(sql, "started", { runId: run.id, feedTotalBytes });
+    return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null, feedTotalBytes });
   } catch (e) {
     if (isAutomatic) await logRailSync(sql, "failed", { stage: "start", error: String(e) });
     await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = ${String(e)} where status = 'running'`.catch(() => {});
@@ -386,7 +366,7 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
 // (current_offset / totalSize) — najważniejsze dla stop_times.txt, jedynego pliku na
 // tyle dużego, żeby to miało sens wizualnie.
 async function extractOneFile(sql: SqlClient, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
-  const zipBytes = await getBlobFull(sql, runId, "_source.zip");
+  const zipBytes = await getBlobFull(sql, runId, SOURCE_ZIP);
   if (!zipBytes) throw new Error(`source_zip_missing run=${runId}`);
   const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
   try {
@@ -415,10 +395,23 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
   }
   try {
     const [run] = await sql<{
-      id: string; current_file: string | null; current_offset: number; current_header: unknown;
-    }[]>`select id, current_file, current_offset, current_header from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
+      id: string; current_file: string | null; current_offset: number; current_header: unknown; current_total_bytes: number | null;
+    }[]>`select id, current_file, current_offset, current_header, current_total_bytes from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
     if (!run) { return json({ ok: true, skipped: "nothing_running" }); }
     if (!run.current_file) { return json({ ok: true, skipped: "no_current_file" }); }
+
+    // current_file === SOURCE_ZIP: sam zip jeszcze się pobiera, kawałek po kawałku przez
+    // Range (zob. downloadOneChunk) — dopiero po zakończeniu current_file przechodzi na
+    // pierwszy plik GTFS i reszta tej funkcji (rozpakowywanie/parsowanie) rusza normalnie.
+    if (run.current_file === SOURCE_ZIP) {
+      const { done, totalBytes, newOffset } = await downloadOneChunk(sql, run.id, run.current_offset, run.current_total_bytes);
+      // UWAGA: "done" tutaj oznacza tylko "ten kawałek pobierania zipa skończony", NIE
+      // "cały sync skończony" — celowo NIE nazwane "done" w odpowiedzi, bo panel
+      // (syncNow() w admin/index.html) przerywa pętlę ticków, gdy lastTick?.done jest
+      // prawdziwe, licząc na to, że to oznacza koniec CAŁEGO syncu (tak jak przy ostatnim
+      // kawałku stop_times.txt).
+      return json({ ok: true, downloading: true, offset: newOffset, totalBytes, downloadDone: done });
+    }
 
     const fileName = run.current_file;
     let rowsInserted = 0;
