@@ -8,49 +8,43 @@ import { ZipReader, Uint8ArrayReader, TextWriter } from "npm:@zip.js/zip.js@2.8.
 // Dwie akcje, wywoływane przez pg_cron (nie GitHub Actions — Actions w tym repo jest
 // wyłącznie do deployu):
 //   "start" (raz dziennie) — sprawdza Last-Modified feedu, jeśli zmieniony: pobiera cały
-//     zip (skompresowany, bez rozpakowywania) i odkłada go w całości do Supabase Storage
-//     jako _source.zip, zakłada nowy wiersz rail_sync_runs.
-//   "tick" (co 2 minuty) — wznawia pracę od miejsca zapisanego w rail_sync_runs
-//     (current_file/current_offset). Dla każdego pliku GTFS pierwszy tick go rozpakowuje
-//     z _source.zip (jeden plik na jedno wywołanie — zob. extractOneFile), kolejne go
-//     parsują: małe pliki (stops/routes/calendar/calendar_dates/trips) w całości w jednym
-//     ticku, stop_times.txt (jedyny spodziewany duży plik) w ograniczonych kawałkach
-//     bajtowych czytanych z Storage przez Range request, kilka kawałków na tick (zob.
-//     MAX_CHUNKS_PER_TICK). Po ostatnim kawałku ostatniego pliku: wywołuje Etap B (czysty
-//     SQL, funkcja rail_gtfs_transform w bazie — patrz migracja) i "mark and sweep"
-//     starych wierszy.
+//     zip (skompresowany, bez rozpakowywania) i odkłada go w całości do tabeli
+//     rail_sync_blobs, zakłada nowy wiersz rail_sync_runs.
+//   "tick" — wznawia pracę od miejsca zapisanego w rail_sync_runs (current_file/
+//     current_offset). Dla każdego pliku GTFS pierwszy tick go rozpakowuje z _source.zip
+//     (jeden plik na jedno wywołanie — zob. extractOneFile), kolejne go parsują: małe
+//     pliki (stops/routes/calendar/calendar_dates/trips) w całości w jednym ticku,
+//     stop_times.txt (jedyny spodziewany duży plik) w ograniczonych kawałkach bajtowych
+//     czytanych z rail_sync_blobs, kilka kawałków na tick (zob. MAX_CHUNKS_PER_TICK). Po
+//     ostatnim kawałku ostatniego pliku: wywołuje Etap B (czysty SQL, funkcja
+//     rail_gtfs_transform w bazie — patrz migracja) i "mark and sweep" starych wierszy.
 //
-// UWAGA: kod przechodził już realną, częściową weryfikację (pierwsza wersja doszła do
-// >100k wierszy stop_times.txt zanim WAF Cloudflare przed Supabase zablokował serię
-// szybkich zapytań Range, a osobno "start" trafił w WORKER_RESOURCE_LIMIT przy
-// rozpakowywaniu wszystkich plików naraz) — oba te problemy zaadresowane w obecnej
-// wersji (rozpakowywanie plik-po-pliku, kilka kawałków na tick z odstępem czasowym),
-// ale wciąż nie ma pełnego przebiegu end-to-end od "start" do "success" potwierdzonego
-// na żywo. Diagnozować z rail_sync_runs.error i logów funkcji.
+// Plik między krokami trzymany jest wprost w Postgresie (tabela rail_sync_blobs,
+// migracja 20240125000000), nie w Supabase Storage — Storage (osobny serwis za
+// Cloudflare) okazał się mieć realną, powtarzalną niespójność odczytu-tuż-po-zapisie
+// (potwierdzone: nawet kilka prawdziwych prób odczytu z odstępem i wymuszonym pominięciem
+// cache'a dalej dawało 404 na obiekt, który listing bucketu pokazywał jako istniejący/
+// nieistniejący niespójnie z tym, co zwracał konkretny odczyt) — zwykłe zapytanie SQL do
+// tej samej bazy, z którą ta funkcja i tak już rozmawia do wszystkich innych operacji,
+// tej klasy problemów strukturalnie nie ma.
 
 const FEED_URL = "https://mkuran.pl/gtfs/polish_trains.zip";
-const BUCKET = "rail-gtfs-raw";
 const SMALL_FILES = ["stops.txt", "routes.txt", "calendar.txt", "calendar_dates.txt", "trips.txt"];
 const BIG_FILE = "stop_times.txt";
 const ALL_FILES = [...SMALL_FILES, BIG_FILE];
 // 8MB na tick — realny test pokazał, że 4MB (~53k wierszy) mieści się w limicie 2s CPU
-// z zapasem; 8MB to mniej zapytań Range do Storage (patrz MAX_CONSECUTIVE_ERRORS niżej —
-// Cloudflare przed Supabase potrafi zablokować serię szybkich zapytań do tego samego
-// obiektu, więc mniej zapytań = mniejsze ryzyko trafienia w ten limit).
+// z zapasem.
 const STOP_TIMES_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rząd dopiero uznajemy sync za faktycznie zepsuty
-// Kilka kawałków w JEDNYM ticku zamiast jednego — realnie przyspiesza cały sync (mniej
-// czekania na cron co 2 min). Ostrożnie: 3 kawałki x 8MB to bezpieczny margines pod
-// limit 2s CPU (ekstrapolacja z realnego testu: 4MB/~53k wierszy działało bez problemu,
-// więc 3x8MB powinno się zmieścić, ale to nadal szacunek, nie zmierzony fakt), a mały
-// odstęp między zapytaniami ma nie wyglądać dla Cloudflare jak seria ataku.
+// Kilka kawałków w JEDNYM ticku zamiast jednego — realnie przyspiesza cały sync. 3 kawałki
+// x 8MB to bezpieczny margines pod limit 2s CPU (ekstrapolacja z realnego testu: 4MB/~53k
+// wierszy działało bez problemu).
 const MAX_CHUNKS_PER_TICK = 3;
-const CHUNK_DELAY_MS = 500;
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
 // Mapowanie: nazwa pliku GTFS -> {tabela raw, mapowanie kolumna GTFS -> kolumna raw}.
-// Tylko pola faktycznie potrzebne CSA i istniejącym formatterom (zob. plan) — reszta
-// kolumn GTFS jest ignorowana, jeśli w ogóle obecna w danym eksporcie.
+// Tylko pola faktycznie potrzebne CSA i istniejącym formatterom — reszta kolumn GTFS jest
+// ignorowana, jeśli w ogóle obecna w danym eksporcie.
 const FILE_CONFIG: Record<string, { table: string; cols: Record<string, string> }> = {
   "stops.txt": { table: "rail_raw_stops", cols: { stop_id: "stop_id", stop_name: "name", stop_lat: "lat", stop_lon: "lon" } },
   "routes.txt": { table: "rail_raw_routes", cols: { route_id: "route_id", route_short_name: "short_name", route_long_name: "long_name", route_type: "route_type" } },
@@ -73,18 +67,8 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-// Znacznik wersji dołączany do KAŻDEJ odpowiedzi — jedyny pewny sposób sprawdzenia z
-// panelu, czy faktycznie działający kod pokrywa się z ostatnio wdrożonym commitem, zamiast
-// zgadywać po treści błędu, czy "deploy" naprawdę już objął tę konkretną instancję funkcji.
-const FN_VERSION = "storage-cachebust-v6-list-debug";
-
 function json(data: unknown, status = 200): Response {
-  const body = data && typeof data === "object" && !Array.isArray(data) ? { ...data, _fnVersion: FN_VERSION } : data;
-  return new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
-}
-
-function sbHeaders(key: string, extra: Record<string, string> = {}) {
-  return { apikey: key, Authorization: `Bearer ${key}`, ...extra };
+  return new Response(JSON.stringify(data), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 }
 
 // --- Parsowanie CSV (RFC4180-owe pola w cudzysłowie z przecinkami/escaped "") ---
@@ -142,150 +126,57 @@ function rowsToObjects(fileName: string, lines: string[], headerMap: Record<stri
   return out;
 }
 
-// --- Supabase Storage (bucket prywatny — service role key na każde wywołanie) ---
-
-// Zwraca surową treść odpowiedzi Supabase Storage na upload (zwykle {"Key":"bucket/path"})
-// — dotąd nigdzie nieużywana, a to jedyny fragment prawdy, którego jeszcze nie
-// sprawdziliśmy: CO DOKŁADNIE Storage mówi, że właśnie zapisało, skoro kolejny odczyt
-// tej samej ścieżki, nawet po kilku realnych próbach z odstępem, konsekwentnie nie
-// znajduje obiektu.
-async function storagePutText(SB: string, KEY: string, path: string, content: string | Uint8Array): Promise<string> {
-  const res = await fetch(`${SB}/storage/v1/object/${BUCKET}/${path}`, {
-    method: "POST",
-    headers: sbHeaders(KEY, { "Content-Type": "application/octet-stream", "x-upsert": "true" }),
-    body: content,
-  });
-  const bodyText = await res.text();
-  if (!res.ok) throw new Error(`storage_put_failed ${path}: HTTP ${res.status} ${bodyText}`);
-  return bodyText;
+function indexOfByte(bytes: Uint8Array, byte: number): number {
+  for (let i = 0; i < bytes.length; i++) if (bytes[i] === byte) return i;
+  return -1;
 }
 
-// Cloudflare stoi przed Supabase Storage. Realnie zaobserwowane: powtarzanie DOKŁADNIE
-// tego samego zapytania Range kilka razy z odstępem (do ~3s) po 404 dalej dawało ten sam
-// 404 — nie wyglądało to na propagację (która powinna się z czasem "naprawić"), tylko na
-// przyklejony NEGATYWNY CACHE tej samej odpowiedzi pod tym samym URL-em: skoro pierwsze
-// zapytanie zaraz po uploadzie trafiło jeszcze na 404, Cloudflare mogło je zacache'ować i
-// serwować z brzegu bez ponownego pytania originu, niezależnie ile razy i jak długo się
-// czeka. Losowy parametr zapytania + Cache-Control: no-cache wymuszają, żeby KAŻDE
-// zapytanie odczytu faktycznie trafiło do originu, zamiast dostać starą, zacache'owaną
-// odpowiedź.
-function noCacheUrl(SB: string, path: string): string {
-  return `${SB}/storage/v1/object/${BUCKET}/${path}?_cb=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+function lastIndexOfByte(bytes: Uint8Array, byte: number): number {
+  for (let i = bytes.length - 1; i >= 0; i--) if (bytes[i] === byte) return i;
+  return -1;
 }
 
-async function storageGetFullOnce(SB: string, KEY: string, path: string): Promise<Uint8Array> {
-  const res = await fetch(noCacheUrl(SB, path), { headers: sbHeaders(KEY, { "Cache-Control": "no-cache" }) });
-  if (!res.ok) throw new Error(`storage_get_failed ${path}: HTTP ${res.status} ${await res.text()}`);
-  return new Uint8Array(await res.arrayBuffer());
+const NEWLINE = 0x0a;
+
+// --- Blob-y pomiędzy krokami syncu — w Postgresie (rail_sync_blobs), nie w Storage ---
+
+type SqlClient = ReturnType<typeof getSql>;
+
+async function putBlob(sql: SqlClient, runId: string, fileName: string, content: Uint8Array): Promise<void> {
+  await sql`
+    insert into rail_sync_blobs (run_id, file_name, content)
+    values (${runId}, ${fileName}, ${content})
+    on conflict (run_id, file_name) do update set content = excluded.content
+  `;
 }
 
-// Ta sama odporność co storageGetRange — _source.zip jest pisany przez JEDNO wywołanie
-// ("start") i czytany przez INNE, PÓŹNIEJSZE wywołanie (pierwszy "tick") — dokładnie ten
-// sam wzorzec odczytu-tuż-po-zapisie-z-innego-requesta, który już okazał się zawodny.
-async function storageGetFull(SB: string, KEY: string, path: string): Promise<Uint8Array> {
-  const delaysMs = [400, 900, 1800];
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
-    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt - 1]));
-    try {
-      return await storageGetFullOnce(SB, KEY, path);
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  const prefix = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
-  const listing = await storageListDebug(SB, KEY, prefix);
-  throw new Error(`[[SGF attemptsRun=${delaysMs.length + 1}]] listing(${prefix})=${listing} | ${String(lastError)}`);
+async function getBlobFull(sql: SqlClient, runId: string, fileName: string): Promise<Uint8Array | null> {
+  const [row] = await sql<{ content: Uint8Array }[]>`
+    select content from rail_sync_blobs where run_id = ${runId} and file_name = ${fileName}
+  `;
+  return row ? row.content : null;
 }
 
-// Jedna próba odczytu fragmentu obiektu [start, start+len) oraz całkowitego rozmiaru
-// pliku (z nagłówka Content-Range odpowiedzi). Jeśli plik jest krótszy niż żądany zakres,
-// zwrócony tekst będzie krótszy — to sygnał końca pliku. Bez ponawiania — patrz
-// storageGetRange (opakowanie z retry), które powinno być używane wszędzie indziej.
-async function storageGetRangeOnce(SB: string, KEY: string, path: string, start: number, len: number): Promise<{ text: string; totalSize: number }> {
-  const res = await fetch(noCacheUrl(SB, path), {
-    headers: sbHeaders(KEY, { Range: `bytes=${start}-${start + len - 1}`, "Cache-Control": "no-cache" }),
-  });
-  if (!res.ok && res.status !== 206) throw new Error(`storage_range_failed ${path}: HTTP ${res.status} ${await res.text()}`);
-  const contentRange = res.headers.get("content-range"); // format: "bytes start-end/total"
-  const totalSize = contentRange ? parseInt(contentRange.split("/")[1] ?? "0", 10) : start + len;
-  const text = await res.text();
-  return { text, totalSize };
+// Fragment [start, start+len) w bajtach oraz całkowity rozmiar obiektu — substring na
+// bytea jest 1-indeksowane i tnie po BAJTACH (nie znakach), zweryfikowane lokalnie na
+// prawdziwym Postgresie razem z przecięciem wielobajtowego znaku UTF-8 w środku zakresu.
+async function getBlobRange(sql: SqlClient, runId: string, fileName: string, start: number, len: number): Promise<{ bytes: Uint8Array; totalSize: number } | null> {
+  const [row] = await sql<{ chunk: Uint8Array; total: number }[]>`
+    select substring(content from ${start + 1} for ${len}) as chunk, octet_length(content) as total
+    from rail_sync_blobs where run_id = ${runId} and file_name = ${fileName}
+  `;
+  return row ? { bytes: row.chunk, totalSize: row.total } : null;
 }
 
-// Realnie zaobserwowane: odczyt obiektu tuż PO tym, jak inny (poprawny, zweryfikowany)
-// zapis go stworzył potrafi na chwilę dostać 404 NoSuchKey — NIEZALEŻNIE od rozmiaru
-// pliku, i nie tylko bezpośrednio po własnym uploadzie tego samego wywołania: pierwsza
-// wersja tej odporności chroniła TYLKO weryfikację zaraz po uploadzie (zob. historia
-// verifyObjectPersisted), a osobne, PÓŹNIEJSZE odczyty tego samego pliku (np. w
-// następnym "ticku", zwłaszcza gdy w tle równolegle napędza też cron) wciąż trafiały na
-// dokładnie ten sam 404 bez żadnego ponawiania. Retry jest więc teraz WBUDOWANY w samą
-// storageGetRange, używaną wszędzie — jedno miejsce chroniące każdego wołającego,
-// zamiast każdorazowego opakowywania osobno.
-// Jedyny dotąd niesprawdzony fakt: co Storage NAPRAWDĘ ma zapisane w folderze tego
-// syncu, niezależnie od tego, czy GET na konkretną ścieżkę się udaje. Wywoływane tylko
-// diagnostycznie, po wyczerpaniu prawdziwych prób odczytu — pokazuje ziemię pod nogami
-// zamiast kolejnego zgadywania po kształcie błędu 404.
-async function storageListDebug(SB: string, KEY: string, prefix: string): Promise<string> {
-  try {
-    const res = await fetch(`${SB}/storage/v1/object/list/${BUCKET}`, {
-      method: "POST",
-      headers: sbHeaders(KEY, { "Content-Type": "application/json" }),
-      body: JSON.stringify({ prefix, limit: 20 }),
-    });
-    const bodyText = await res.text();
-    return `HTTP ${res.status} ${bodyText}`;
-  } catch (e) {
-    return `list_failed: ${String(e)}`;
-  }
-}
-
-async function storageGetRange(SB: string, KEY: string, path: string, start: number, len: number): Promise<{ text: string; totalSize: number }> {
-  const delaysMs = [400, 900, 1800];
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
-    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt - 1]));
-    try {
-      return await storageGetRangeOnce(SB, KEY, path, start, len);
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  const prefix = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
-  const listing = await storageListDebug(SB, KEY, prefix);
-  throw new Error(`[[SGR attemptsRun=${delaysMs.length + 1}]] listing(${prefix})=${listing} | ${String(lastError)}`);
-}
-
-// Weryfikacja tuż po uploadzie (storagePutText -> od razu storageGetRange, samo już z
-// ponawianiem) — sprawdza dodatkowo, że zgłoszony rozmiar faktycznie odpowiada temu, co
-// wgraliśmy (nie tylko że obiekt w ogóle istnieje).
-async function verifyObjectPersisted(SB: string, KEY: string, path: string, minBytes: number): Promise<number> {
-  // Sam odczyt (storageGetRange) już ponawia na brak/błąd — tu tylko dodatkowo pilnujemy
-  // osobnego, rzadszego przypadku: obiekt ISTNIEJE, ale zgłoszony rozmiar jest za mały
-  // (np. upload przerwany w połowie) — kilka prób na wypadek, gdyby i TO był chwilowy
-  // stan przejściowy tuż po zapisie.
-  const sizeDelaysMs = [400, 900];
-  for (let attempt = 0; attempt <= sizeDelaysMs.length; attempt++) {
-    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, sizeDelaysMs[attempt - 1]));
-    const verify = await storageGetRange(SB, KEY, path, 0, 64);
-    if (verify.totalSize >= minBytes) return verify.totalSize;
-    if (attempt === sizeDelaysMs.length) {
-      throw new Error(`[[VOP size]] verify_upload_failed ${path}: reported size ${verify.totalSize} < expected ${minBytes}`);
-    }
-  }
-  throw new Error(`[[VOP unreachable]] ${path}`); // nieosiągalne — TS wymaga zwrotu/rzutu na każdej ścieżce
-}
-
-// --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do Storage ---
+// --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do bazy ---
 //
-// WAŻNE (poprawione po realnym WORKER_RESOURCE_LIMIT): rozpakowywanie WSZYSTKICH 6
-// plików GTFS w jednym wywołaniu — a zwłaszcza stop_times.txt, ~52MB tekstu po
-// dekompresji — potrafi przekroczyć limit zasobów pojedynczego Edge Function. "start"
-// więc TYLKO przenosi bajty (pobiera skompresowany zip, odkłada go w całości do Storage
-// jako _source.zip) — żadnej dekompresji tutaj. Samo rozpakowanie, PLIK PO PLIKU, jedno
-// wywołanie na jeden plik, dzieje się dopiero w handleTick (zob. extractOneFile)
-// — dokładnie ta sama logika "jeden krok na raz" co przy parsowaniu.
-async function handleStart(SB: string, KEY: string): Promise<Response> {
+// Rozpakowywanie WSZYSTKICH 6 plików GTFS w jednym wywołaniu — a zwłaszcza stop_times.txt,
+// ~52MB tekstu po dekompresji — potrafi przekroczyć limit zasobów pojedynczego Edge
+// Function (obserwowane realnie: WORKER_RESOURCE_LIMIT). "start" więc TYLKO przenosi
+// bajty (pobiera skompresowany zip, odkłada go w całości jako _source.zip) — żadnej
+// dekompresji tutaj. Samo rozpakowanie, PLIK PO PLIKU, jedno wywołanie na jeden plik,
+// dzieje się dopiero w handleTick (zob. extractOneFile).
+async function handleStart(): Promise<Response> {
   const sql = getSql();
   try {
     const headRes = await fetch(FEED_URL, { method: "HEAD" });
@@ -306,15 +197,13 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
     // wykonać własnego catch-bloku (status zostaje 'running' na zawsze) — bez tego
     // sprawdzenia taki porzucony bieg blokowałby każdy kolejny "start" w nieskończoność.
     // Sprawdzamy WSZYSTKIE wiersze 'running' (mogło ich się uzbierać kilka z kolejnych
-    // nieudanych prób), nie tylko pierwszy z brzegu — bez ORDER BY jeden zapytanie
-    // `limit 1` mogło trafić akurat na świeży wiersz, mijając starszy, naprawdę
-    // porzucony, i błędnie zgłosić "already_running".
+    // nieudanych prób), nie tylko pierwszy z brzegu.
     const runningRows = await sql<{ id: string; started_at: string }[]>`select id, started_at from rail_sync_runs where status = 'running' order by started_at desc`;
     if (runningRows.length) {
       const freshest = runningRows[0];
       const ageMs = Date.now() - new Date(freshest.started_at).getTime();
-      // Normalny pełny przebieg (nawet czystym cronem co 2 min) mieści się dużo poniżej
-      // godziny, więc jeśli nawet najświeższy 'running' jest starszy — wszystkie są porzucone.
+      // Normalny pełny przebieg mieści się dużo poniżej godziny, więc jeśli nawet
+      // najświeższy 'running' jest starszy — wszystkie są porzucone.
       if (ageMs < 60 * 60 * 1000) {
         await sql.end();
         return json({ ok: true, skipped: "already_running" });
@@ -338,11 +227,9 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
     `;
     // current_offset = -1 to sentinel: "current_file jeszcze nie rozpakowany z zipa" —
     // pierwszy tick dla każdego pliku musi go najpierw wydobyć, zanim zacznie parsować.
-    await storagePutText(SB, KEY, `${run.id}/_source.zip`, zipBytes);
-    // Ta sama weryfikacja co w extractOneFile (z ponawianiem — zob. verifyObjectPersisted)
-    // — zaobserwowany realnie przypadek, gdzie POST upload zwraca 200 OK, a obiekt przez
-    // chwilę nie jest jeszcze odczytywalny przez Range GET.
-    await verifyObjectPersisted(SB, KEY, `${run.id}/_source.zip`, zipBytes.length);
+    // Blob-y po starych/nieudanych biegach nie są już potrzebne.
+    await sql`delete from rail_sync_blobs where run_id <> ${run.id}`;
+    await putBlob(sql, run.id, "_source.zip", zipBytes);
 
     await sql.end();
     return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
@@ -353,83 +240,35 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
   }
 }
 
-// Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do Storage —
+// Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do rail_sync_blobs —
 // wywoływane raz na tick, zanim ten plik może zostać sparsowany. extracted=false, jeśli
 // pliku nie ma w zipie (dozwolone przez spec dla wszystkich poza stop_times.txt).
-// totalSize (rozmiar w bajtach zwrócony przez Storage) pozwala panelowi admina policzyć
-// procent postępu bieżącego pliku (current_offset / totalSize) — najważniejsze dla
-// stop_times.txt, jedynego pliku na tyle dużego, żeby to miało sens wizualnie.
-async function extractOneFile(SB: string, KEY: string, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
-  // Punkty kontrolne [[EOF:n]] — jeśli błąd dalej pojawia się bez ŻADNEGO z tych
-  // znaczników w treści, to dowód, że ta funkcja W OGÓLE się nie wykonuje dla danego
-  // zapytania (problem deployu/routingu), a nie że któryś jej krok faktycznie zawodzi.
-  let zipBytes: Uint8Array;
-  try {
-    zipBytes = await storageGetFull(SB, KEY, `${runId}/_source.zip`);
-  } catch (e) {
-    throw new Error(`[[EOF:1-getFullZip]] ${String(e)}`);
-  }
+// totalSize pozwala panelowi admina policzyć procent postępu bieżącego pliku
+// (current_offset / totalSize) — najważniejsze dla stop_times.txt, jedynego pliku na
+// tyle dużego, żeby to miało sens wizualnie.
+async function extractOneFile(sql: SqlClient, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
+  const zipBytes = await getBlobFull(sql, runId, "_source.zip");
+  if (!zipBytes) throw new Error(`source_zip_missing run=${runId}`);
   const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
   try {
-    let entries;
-    try {
-      entries = await reader.getEntries();
-    } catch (e) {
-      throw new Error(`[[EOF:2-getEntries]] ${String(e)}`);
-    }
+    const entries = await reader.getEntries();
     const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
     if (!entry || entry.directory) {
       if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
       return { extracted: false, totalSize: 0 };
     }
-    let text: string;
-    try {
-      text = await entry.getData(new TextWriter());
-    } catch (e) {
-      throw new Error(`[[EOF:3-getData]] ${String(e)}`);
-    }
-    let putResponse: string;
-    try {
-      putResponse = await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
-    } catch (e) {
-      throw new Error(`[[EOF:4-putText]] ${String(e)}`);
-    }
-    // Weryfikacja UPLOAD-u z ponawianiem (zob. verifyObjectPersisted) — realnie
-    // zaobserwowane NIEZALEŻNIE od rozmiaru pliku (nawet dla kilkusetkilobajtowego
-    // stops.txt, nie tylko ~52MB stop_times.txt): POST zwraca 200 OK, a obiekt przez
-    // chwilę nie jest jeszcze odczytywalny przez Range GET (404 NoSuchKey) — wygląda na
-    // krótkie opóźnienie propagacji, nie odrzucony upload. Bez tego current_offset
-    // przechodzi na 0 (uznane za "wyodrębnione"), a błąd wychodzi dopiero przy
-    // parsowaniu, z mylącym komunikatem. Rzucenie tutaj (po wyczerpaniu prób) zostawia
-    // current_offset na -1, więc następny tick po prostu spróbuje wgrać plik jeszcze raz.
-    // Rozmiar w bajtach (Storage) jest zawsze >= długości stringa w jednostkach UTF-16
-    // (text.length) — znaki spoza ASCII tylko DODAJĄ bajty, nigdy nie ubywa — więc to
-    // bezpieczny, zawsze-prawdziwy dla poprawnego uploadu warunek.
-    let totalSize: number;
-    try {
-      totalSize = await verifyObjectPersisted(SB, KEY, `${runId}/${fileName}`, text.length);
-    } catch (e) {
-      // putResponse dołączony tutaj — jedyny dotąd niesprawdzony fakt: co DOKŁADNIE
-      // Supabase Storage odpowiedziało na sam upload, skoro odczyt zaraz potem
-      // konsekwentnie (nawet po kilku realnych próbach z odstępem) nie widzi obiektu.
-      throw new Error(`[[EOF:5-verify]] putResponse=${JSON.stringify(putResponse)} ${String(e)}`);
-    }
-    return { extracted: true, totalSize };
+    const text = await entry.getData(new TextWriter());
+    const bytes = new TextEncoder().encode(text);
+    await putBlob(sql, runId, fileName, bytes);
+    return { extracted: true, totalSize: bytes.length };
   } finally {
-    try {
-      await reader.close();
-    } catch (e) {
-      // Nie nadpisuj oryginalnego błędu z bloku try — tylko dopisz do konsoli, jeśli
-      // samo zamknięcie readera też zawiedzie (co i tak nie powinno się zdarzyć dla
-      // czysto pamięciowego Uint8ArrayReader).
-      console.error("[[EOF:6-readerClose]]", String(e));
-    }
+    await reader.close();
   }
 }
 
 // --- Etap A (ciąg dalszy) + Etap B: "tick" — jeden krok postępu, zawsze bezpieczny do przerwania ---
 
-async function handleTick(SB: string, KEY: string): Promise<Response> {
+async function handleTick(): Promise<Response> {
   const sql = getSql();
   try {
     const [run] = await sql<{
@@ -444,14 +283,12 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     // current_offset === -1: ten plik jeszcze nie został rozpakowany z _source.zip —
     // zrób to teraz, jako CAŁE to wywołanie (parsowanie zaczyna się dopiero od
     // następnego ticku) — trzyma dekompresję jednego pliku w osobnym, lekkim wywołaniu,
-    // zamiast robić to dla wszystkich 6 plików naraz (to właśnie powodowało
-    // WORKER_RESOURCE_LIMIT w poprzedniej wersji handleStart).
+    // zamiast robić to dla wszystkich 6 plików naraz.
     if (run.current_offset === -1) {
-      const { extracted, totalSize } = await extractOneFile(SB, KEY, run.id, fileName);
+      const { extracted, totalSize } = await extractOneFile(sql, run.id, fileName);
       // -2: potwierdzone PRZY EKSTRAKCJI, że pliku nie było w zipie (dozwolone przez spec
-      // GTFS dla wszystkiego poza stop_times.txt — zob. extractOneFile). Odróżnione od 0
-      // ("wyodrębniony, gotowy do parsowania"), żeby dalszy kod mógł rozróżnić legalny
-      // brak pliku od nieoczekiwanego 404 przy odczycie pliku, który rzekomo istnieje.
+      // GTFS dla wszystkiego poza stop_times.txt). Odróżnione od 0 ("wyodrębniony,
+      // gotowy do parsowania").
       const nextOffset = extracted ? 0 : -2;
       await sql`update rail_sync_runs set current_offset = ${nextOffset}, current_total_bytes = ${extracted ? totalSize : null}, consecutive_errors = 0 where id = ${run.id}`;
       await sql.end();
@@ -461,15 +298,8 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     if (SMALL_FILES.includes(fileName)) {
       let text = "";
       if (run.current_offset !== -2) {
-        // current_offset === 0 tutaj oznacza, że extractOneFile zgłosił sukces — obiekt
-        // POWINIEN istnieć. 404 w tym miejscu to nie legalny brak pliku (ten przypadek to
-        // current_offset === -2 wyżej, i wtedy w ogóle nie próbujemy czytać), tylko realny
-        // błąd trwałości zapisu w Storage (obserwowane na produkcji: POST dla dużego ciała
-        // potrafi zwrócić 200 i przejść weryfikację od razu, a mimo to obiekt później nie
-        // jest odczytywalny) — ma polecieć do ogólnej obsługi błędów niżej, która przy
-        // takim błędzie resetuje current_offset na -1, żeby następny tick spróbował
-        // wyodrębnić ten plik jeszcze raz od zera, zamiast w kółko czytać martwą ścieżkę.
-        text = (await storageGetRange(SB, KEY, `${run.id}/${fileName}`, 0, 200 * 1024 * 1024)).text;
+        const blob = await getBlobFull(sql, run.id, fileName);
+        text = blob ? new TextDecoder().decode(blob) : "";
       }
       const lines = text.split("\n");
       const headerMap = buildHeaderMap(lines[0] ?? "");
@@ -498,10 +328,12 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     let offset = run.current_offset;
     if (!headerMap) {
       // Pierwszy tick tego pliku — dociągnij nagłówek z samego początku.
-      const first = await storageGetRange(SB, KEY, `${run.id}/${fileName}`, 0, 8192);
-      const headerLine = first.text.split("\n")[0] ?? "";
-      headerMap = buildHeaderMap(headerLine);
-      offset = headerLine.length + 1; // pomiń nagłówek + jego \n
+      const first = await getBlobRange(sql, run.id, fileName, 0, 8192);
+      if (!first) throw new Error(`blob_missing ${fileName} run=${run.id}`);
+      const nlIdx = indexOfByte(first.bytes, NEWLINE);
+      const headerLineBytes = nlIdx === -1 ? first.bytes : first.bytes.slice(0, nlIdx);
+      headerMap = buildHeaderMap(new TextDecoder().decode(headerLineBytes));
+      offset = nlIdx === -1 ? first.bytes.length : nlIdx + 1; // bajt tuż po nagłówku + jego \n
     }
 
     // Kilka kawałków w tym samym wywołaniu (patrz MAX_CHUNKS_PER_TICK) — postęp zapisywany
@@ -509,13 +341,14 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     // (wyjątek łapany przez zewnętrzny catch), wcześniejsze kawałki z tego wywołania i tak
     // zostają policzone, nie trzeba ich powtarzać.
     for (let chunkNum = 0; chunkNum < MAX_CHUNKS_PER_TICK; chunkNum++) {
-      if (chunkNum > 0) await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY_MS));
-
-      const { text: chunk, totalSize } = await storageGetRange(SB, KEY, `${run.id}/${fileName}`, offset, STOP_TIMES_CHUNK_BYTES);
-      const lastNewline = chunk.lastIndexOf("\n");
-      const reachedEnd = offset + chunk.length >= totalSize;
-      const usableChunk = reachedEnd ? chunk : (lastNewline === -1 ? "" : chunk.slice(0, lastNewline));
-      const consumedBytes = usableChunk.length + (reachedEnd ? 0 : 1); // +1 dla samego \n odciętego z usableChunk
+      const range = await getBlobRange(sql, run.id, fileName, offset, STOP_TIMES_CHUNK_BYTES);
+      if (!range) throw new Error(`blob_missing ${fileName} run=${run.id}`);
+      const { bytes: chunkBytes, totalSize } = range;
+      const reachedEnd = offset + chunkBytes.length >= totalSize;
+      const lastNl = lastIndexOfByte(chunkBytes, NEWLINE);
+      const usableBytes = reachedEnd ? chunkBytes : (lastNl === -1 ? new Uint8Array(0) : chunkBytes.slice(0, lastNl));
+      const consumedBytes = usableBytes.length + (reachedEnd ? 0 : 1); // +1 dla samego \n odciętego z usableBytes
+      const usableChunk = new TextDecoder().decode(usableBytes);
 
       const lines = usableChunk.split("\n");
       const objects = rowsToObjects(fileName, lines, headerMap);
@@ -545,26 +378,14 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
     await sql.end();
     return json({ ok: true, file: fileName, rowsInserted, offset, chunksThisTick: MAX_CHUNKS_PER_TICK });
   } catch (e) {
-    // Błąd (np. przejściowa blokada Cloudflare/WAF na serię szybkich zapytań Range do
-    // Storage) NIE kończy od razu całego syncu — offset/current_file nie są tu ruszane,
-    // więc kolejny tick po prostu spróbuje ten sam kawałek jeszcze raz. Dopiero po
+    // Błąd NIE kończy od razu całego syncu — offset/current_file nie są tu ruszane, więc
+    // kolejny tick po prostu spróbuje ten sam kawałek jeszcze raz. Dopiero po
     // MAX_CONSECUTIVE_ERRORS pod rząd uznajemy to za faktycznie zepsute, nie przejściowe.
-    //
-    // WYJĄTEK: "obiekt nie znaleziony" (NoSuchKey) przy odczycie pliku, który extractOneFile
-    // zgłosił jako poprawnie wgrany — obserwowane realnie na produkcji: POST dla dużego
-    // ciała (~52MB, stop_times.txt) potrafi zwrócić 200 i przejść natychmiastową
-    // weryfikację po uploadzie, a mimo to obiekt później okazuje się nieodczytywalny.
-    // Samo powtarzanie tego samego odczytu nic nie naprawi — resetujemy current_offset na
-    // -1, żeby następny tick wyodrębnił plik od nowa z _source.zip zamiast w kółko trafiać
-    // w tę samą martwą ścieżkę aż do wyczerpania MAX_CONSECUTIVE_ERRORS.
-    const isMissingObject = String(e).includes("NoSuchKey");
     try {
       await sql`
         update rail_sync_runs
         set consecutive_errors = consecutive_errors + 1,
             error = ${String(e)},
-            current_offset = case when ${isMissingObject} and current_offset >= 0 then -1 else current_offset end,
-            current_header = case when ${isMissingObject} and current_offset >= 0 then null else current_header end,
             status = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then 'failed' else status end,
             finished_at = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then now() else finished_at end
         where status = 'running'
@@ -578,7 +399,7 @@ async function handleTick(SB: string, KEY: string): Promise<Response> {
 // Etap B: transformacja raw -> docelowe + rail_connections + mark-and-sweep, w całości
 // jako jedna funkcja Postgres (zob. migracja) — wywołana raz, po ostatnim kawałku
 // ostatniego pliku. Zero pracy JS/CPU po stronie Edge Function dla tego kroku.
-async function finishRun(sql: ReturnType<typeof getSql>, runId: string): Promise<void> {
+async function finishRun(sql: SqlClient, runId: string): Promise<void> {
   await sql`select rail_gtfs_transform(${runId}::uuid)`;
   await sql`update rail_sync_runs set status = 'success', finished_at = now() where id = ${runId}`;
 }
@@ -617,13 +438,10 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Unauthorized" }, 401);
   }
 
-  const SB = Deno.env.get("SUPABASE_URL")!;
-  const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
   let body: { action?: string } = {};
   try { body = await req.json(); } catch { /* brak body — traktuj jak brak akcji */ }
 
-  if (body.action === "start") return await handleStart(SB, KEY);
-  if (body.action === "tick") return await handleTick(SB, KEY);
+  if (body.action === "start") return await handleStart();
+  if (body.action === "tick") return await handleTick();
   return json({ error: "unknown action, expected 'start' or 'tick'" }, 400);
 });
