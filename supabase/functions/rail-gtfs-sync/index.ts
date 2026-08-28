@@ -209,6 +209,28 @@ async function getBlobRange(sql: SqlClient, runId: string, fileName: string, sta
   return row ? { bytes: row.chunk, totalSize: row.total } : null;
 }
 
+// Realny dowód z logów Supabase: kilka nakładających się wywołań tej funkcji potrafi
+// zacząć jednocześnie pisać do tych samych wierszy rail_sync_blobs, wpadając w kolejkę
+// na blokadzie wiersza — każde czeka na poprzednie, a kolejne wywołania klienta (co
+// 500ms) dokładają się do rosnącej kolejki, aż suma zasobów przekroczy limit pamięci.
+// Zwykła tabela zamiast pg_try_advisory_lock — RAIL_DB_URL idzie przez Transaction
+// Pooler, gdzie blokady sesyjne nie są bezpieczne.
+const WORKER_LOCK_HOLD_SECONDS = 60;
+
+async function tryAcquireWorkerLock(sql: SqlClient): Promise<boolean> {
+  const [row] = await sql<{ id: boolean }[]>`
+    update rail_sync_worker_lock
+    set locked_until = now() + (${WORKER_LOCK_HOLD_SECONDS} || ' seconds')::interval
+    where id = true and (locked_until is null or locked_until < now())
+    returning id
+  `;
+  return !!row;
+}
+
+async function releaseWorkerLock(sql: SqlClient): Promise<void> {
+  await sql`update rail_sync_worker_lock set locked_until = null where id = true`.catch(() => {});
+}
+
 // Jedyny log tego mechanizmu, i tylko dla przebiegów automatycznych — zob. komentarz na
 // górze pliku. Jeden typ w tabeli `logs` ("rail_sync"), rozróżniany polem data.event.
 async function logRailSync(sql: SqlClient, event: "started" | "finished" | "failed", data: Record<string, unknown>): Promise<void> {
@@ -223,6 +245,13 @@ async function logRailSync(sql: SqlClient, event: "started" | "finished" | "fail
 // --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do bazy ---
 async function handleStart(isAutomatic: boolean): Promise<Response> {
   const sql = getSql();
+  // Blokada zaraz na wstępie, przed jakąkolwiek prawdziwą pracą — ścieżka "busy" ma
+  // zostać tania (jedno zapytanie), żeby nakładające się wywołania NIE dokładały się do
+  // kolejki na blokadach wierszy w rail_sync_blobs (zob. komentarz przy tryAcquireWorkerLock).
+  if (!(await tryAcquireWorkerLock(sql))) {
+    await sql.end();
+    return json({ ok: true, skipped: "busy" });
+  }
   try {
     const headRes = await fetch(FEED_URL, { method: "HEAD" });
     const lastModifiedHeader = headRes.headers.get("last-modified");
@@ -234,7 +263,6 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
       order by finished_at desc nulls last limit 1
     `;
     if (feedLastModified && lastSuccess?.feed_last_modified && new Date(lastSuccess.feed_last_modified).getTime() === feedLastModified.getTime()) {
-      await sql.end();
       return json({ ok: true, skipped: "unchanged" });
     }
 
@@ -250,7 +278,6 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
       // Normalny pełny przebieg mieści się dużo poniżej godziny, więc jeśli nawet
       // najświeższy 'running' jest starszy — wszystkie są porzucone.
       if (ageMs < 60 * 60 * 1000) {
-        await sql.end();
         return json({ ok: true, skipped: "already_running" });
       }
       await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = 'stale_abandoned_run' where status = 'running'`;
@@ -277,13 +304,14 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     await putBlobLarge(sql, run.id, "_source.zip", zipBytes);
 
     if (isAutomatic) await logRailSync(sql, "started", { runId: run.id });
-    await sql.end();
     return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
   } catch (e) {
     if (isAutomatic) await logRailSync(sql, "failed", { stage: "start", error: String(e) });
     await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = ${String(e)} where status = 'running'`.catch(() => {});
-    await sql.end();
     return json({ ok: false, error: String(e) }, 500);
+  } finally {
+    await releaseWorkerLock(sql);
+    await sql.end();
   }
 }
 
@@ -317,12 +345,16 @@ async function extractOneFile(sql: SqlClient, runId: string, fileName: string): 
 
 async function handleTick(isAutomatic: boolean): Promise<Response> {
   const sql = getSql();
+  if (!(await tryAcquireWorkerLock(sql))) {
+    await sql.end();
+    return json({ ok: true, skipped: "busy" });
+  }
   try {
     const [run] = await sql<{
       id: string; current_file: string | null; current_offset: number; current_header: unknown;
     }[]>`select id, current_file, current_offset, current_header from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
-    if (!run) { await sql.end(); return json({ ok: true, skipped: "nothing_running" }); }
-    if (!run.current_file) { await sql.end(); return json({ ok: true, skipped: "no_current_file" }); }
+    if (!run) { return json({ ok: true, skipped: "nothing_running" }); }
+    if (!run.current_file) { return json({ ok: true, skipped: "no_current_file" }); }
 
     const fileName = run.current_file;
     let rowsInserted = 0;
@@ -338,7 +370,6 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       // gotowy do parsowania").
       const nextOffset = extracted ? 0 : -2;
       await sql`update rail_sync_runs set current_offset = ${nextOffset}, current_total_bytes = ${extracted ? totalSize : null}, consecutive_errors = 0 where id = ${run.id}`;
-      await sql.end();
       return json({ ok: true, extracted: extracted ? fileName : null, skipped: extracted ? undefined : "not_in_feed" });
     }
 
@@ -366,7 +397,6 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       // -1: następny plik jeszcze nie rozpakowany z zipa (zob. blok current_offset === -1 wyżej).
       await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = ${nextFile ? -1 : 0}, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
       if (!nextFile) await finishRun(sql, run.id, isAutomatic);
-      await sql.end();
       return json({ ok: true, file: fileName, rowsInserted, nextFile });
     }
 
@@ -415,14 +445,15 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       if (reachedEnd) {
         await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows} where id = ${run.id}`;
         await finishRun(sql, run.id, isAutomatic);
-        await sql.end();
         return json({ ok: true, file: fileName, rowsInserted, done: true, chunksThisTick: chunkNum + 1 });
       }
 
-      await sql`update rail_sync_runs set current_offset = ${offset}, current_header = ${JSON.stringify(headerMap)}::jsonb, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows} where id = ${run.id}`;
+      // sql.json(...), NIE ręczny JSON.stringify(...)::jsonb — ten drugi podwójnie koduje
+      // (zob. logRailSync powyżej); z ręcznym rzutowaniem headerMap wracał z bazy jako
+      // string zamiast obiektu na każdym kolejnym ticku tego pliku po pierwszym.
+      await sql`update rail_sync_runs set current_offset = ${offset}, current_header = ${sql.json(headerMap)}, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows} where id = ${run.id}`;
     }
 
-    await sql.end();
     return json({ ok: true, file: fileName, rowsInserted, offset, chunksThisTick: MAX_CHUNKS_PER_TICK });
   } catch (e) {
     // Błąd NIE kończy od razu całego syncu — offset/current_file nie są tu ruszane, więc
@@ -442,8 +473,10 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       `;
       if (isAutomatic && updated?.status === "failed") await logRailSync(sql, "failed", { stage: "tick", error: String(e) });
     } catch { /* baza sama niedostępna — nic więcej nie da się tu zrobić */ }
-    await sql.end();
     return json({ ok: false, error: String(e) }, 500);
+  } finally {
+    await releaseWorkerLock(sql);
+    await sql.end();
   }
 }
 
