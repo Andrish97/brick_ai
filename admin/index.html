@@ -2243,11 +2243,16 @@ function renderRailFileChecklist(s) {
       icon = '✅';
     } else if (!downloading && i === curIdx) {
       icon = '🔄';
-      if (f === RAIL_SYNC_BIG_FILE && s.current_total_bytes) {
+      // current_offset ujemny = sentinel (jeszcze nie rozpakowany z zipa / potwierdzono
+      // brak w feedzie), nie realny bajtowy postęp — pokazujemy MB tylko gdy offset jest
+      // faktyczną pozycją w pliku.
+      if (f === RAIL_SYNC_BIG_FILE && s.current_total_bytes && (s.current_offset || 0) >= 0) {
         const filePct = Math.min(100, Math.max(0, ((s.current_offset || 0) / s.current_total_bytes) * 100));
         const doneMb = ((s.current_offset || 0) / 1024 / 1024).toFixed(1);
         const totalMb = (s.current_total_bytes / 1024 / 1024).toFixed(1);
         extra = ` ${filePct.toFixed(1)}% (${doneMb}/${totalMb} MB)`;
+      } else if (f === RAIL_SYNC_BIG_FILE && (s.current_offset || 0) < 0) {
+        extra = ' (rozpakowywanie…)';
       }
     }
     const dim = !downloading && i === curIdx ? 'var(--text)' : 'var(--muted)';

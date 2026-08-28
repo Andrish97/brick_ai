@@ -295,7 +295,17 @@ async function getBlobRange(sql: SqlClient, runId: string, fileName: string, sta
 // 500ms) dokładają się do rosnącej kolejki, aż suma zasobów przekroczy limit pamięci.
 // Zwykła tabela zamiast pg_try_advisory_lock — RAIL_DB_URL idzie przez Transaction
 // Pooler, gdzie blokady sesyjne nie są bezpieczne.
-const WORKER_LOCK_HOLD_SECONDS = 60;
+//
+// 60s okazało się ZA KRÓTKIE: realny ekstrakt stop_times.txt (wiele małych zapytań do
+// Postgresa podczas dekompresji dużego wpisu) legalnie trwa dłużej niż 60s — blokada
+// wygasała W TRAKCIE, gdy pierwsze wywołanie WCIĄŻ pracowało, więc kolejne wywołanie mogło
+// ją przejąć i zacząć DRUGĄ, równoległą ekstrakcję tego samego pliku — dokładnie ten sam
+// problem z kolejką na blokadach wierszy co opisany wyżej, tylko wywołany przez wygasłą
+// blokadę zamiast przez nadmiarowe klikanie. Potwierdzone w logach: wiele wywołań
+// wystartowanych w ciągu kilku sekund od siebie, każde trwające niemal identyczne ~75s.
+// 180s daje bezpieczny margines nad realnym najgorszym przypadkiem, wciąż daleko poniżej
+// twardego limitu 400s czasu ściany Edge Function.
+const WORKER_LOCK_HOLD_SECONDS = 180;
 
 async function tryAcquireWorkerLock(sql: SqlClient): Promise<boolean> {
   const [row] = await sql<{ id: boolean }[]>`
@@ -598,7 +608,12 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       const nextIdx = ALL_FILES.indexOf(fileName) + 1;
       const nextFile = ALL_FILES[nextIdx] ?? null;
       // -1: następny plik jeszcze nie rozpakowany z zipa (zob. blok current_offset === -1 wyżej).
-      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = ${nextFile ? -1 : 0}, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
+      // current_total_bytes = null: bez tego zostawała stara wartość z WŁAŚNIE
+      // zakończonego pliku, więc panel przez chwilę pokazywał rozmiar/procent NASTĘPNEGO
+      // pliku liczony względem rozmiaru POPRZEDNIEGO — realny, zaobserwowany błąd
+      // wyświetlania ("stop_times.txt 0.0% (-0.0/2.8 MB)", gdzie 2.8 MB było rozmiarem
+      // trips.txt, nie stop_times.txt).
+      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = ${nextFile ? -1 : 0}, current_header = null, current_total_bytes = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
       if (!nextFile) await finishRun(sql, run.id, isAutomatic);
       return json({ ok: true, file: fileName, rowsInserted, nextFile });
     }
