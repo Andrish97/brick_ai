@@ -2329,10 +2329,20 @@ async function resetStuckRailSync() {
     .update({ status: 'failed', finished_at: new Date().toISOString(), error: 'zresetowane ręcznie z panelu' })
     .eq('status', 'running')
     .select('id');
+  // Realny objaw na produkcji: reset wiersza biegu nie pomagał — sync po jednym udanym
+  // kawałku zawieszał się na zawsze na "busy", MIMO resetu. rail_sync_worker_lock (osobna
+  // tabela, zob. migracja 20240127) jest zaprojektowana żeby sama wygasać po
+  // WORKER_LOCK_HOLD_SECONDS, ale ten przycisk nigdy jej nie czyścił wprost — jeśli z
+  // jakiegokolwiek powodu blokada nie wygasła sama, nie było ŻADNEGO ręcznego sposobu jej
+  // zdjąć. "Zresetuj" ma być niezawodnym wyjściem awaryjnym, więc czyści teraz obie tabele.
+  const { error: lockError } = await sb.from('rail_sync_worker_lock')
+    .update({ locked_until: null })
+    .eq('id', true);
+  const combinedError = error || lockError;
   // Jawny, widoczny wynik zamiast cichego "nic nie widać" — łatwo pomylić "nie było czego
   // resetować" z "przycisk nie działa", jeśli ekran wygląda identycznie przed i po.
-  _railSyncResult = error
-    ? { ok: false, error: String(error.message || error) }
+  _railSyncResult = combinedError
+    ? { ok: false, error: String(combinedError.message || combinedError) }
     : { ok: true, reset_count: data?.length ?? 0, note: (data?.length ?? 0) === 0 ? 'Nie było żadnego zawieszonego biegu (status running) do zresetowania.' : undefined };
   await refreshRailSyncStatus();
 }
