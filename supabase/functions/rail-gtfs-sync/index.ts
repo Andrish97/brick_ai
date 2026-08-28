@@ -158,6 +158,39 @@ async function putBlob(sql: SqlClient, runId: string, fileName: string, content:
   `;
 }
 
+const BLOB_WRITE_CHUNK_BYTES = 4 * 1024 * 1024;
+
+// Realny błąd na produkcji: zapis skompresowanego zipa (kilkanaście MB) jako JEDNEGO
+// parametru bytea wysadził WORKER_RESOURCE_LIMIT w "start" — sterownik najwyraźniej
+// koduje duże wartości bytea po stronie klienta (Edge Function) w sposób, który
+// wielokrotnie zwiększa realne zużycie pamięci względem samego rozmiaru pliku. Duże
+// wartości (ten zip, i rozpakowane stop_times.txt — jeszcze większe) idą teraz w kilku
+// mniejszych zapytaniach do tymczasowych wierszy, sklejanych NA KOŃCU PO STRONIE
+// POSTGRESA (string_agg, bez przesyłania danych z powrotem do klienta) w jeden docelowy
+// wiersz — dzięki temu getBlobFull/getBlobRange (odczyt) nie muszą wiedzieć, że zapis w
+// ogóle był dzielony; zweryfikowane lokalnie, że string_agg na bytea skleja bajt-w-bajt
+// poprawnie. Małe pliki (poniżej progu) idą jednym zapytaniem jak dotychczas.
+async function putBlobLarge(sql: SqlClient, runId: string, fileName: string, content: Uint8Array): Promise<void> {
+  if (content.length <= BLOB_WRITE_CHUNK_BYTES) {
+    await putBlob(sql, runId, fileName, content);
+    return;
+  }
+  const tmpPrefix = `~chunk~${fileName}~`; // "~" nie pojawia się w prawdziwych nazwach plików GTFS
+  await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
+  let i = 0;
+  for (let offset = 0; offset < content.length; offset += BLOB_WRITE_CHUNK_BYTES, i++) {
+    const piece = content.subarray(offset, offset + BLOB_WRITE_CHUNK_BYTES);
+    await putBlob(sql, runId, `${tmpPrefix}${String(i).padStart(5, "0")}`, piece);
+  }
+  await sql`
+    insert into rail_sync_blobs (run_id, file_name, content)
+    select ${runId}, ${fileName}, string_agg(content, ''::bytea order by file_name)
+    from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}
+    on conflict (run_id, file_name) do update set content = excluded.content
+  `;
+  await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
+}
+
 async function getBlobFull(sql: SqlClient, runId: string, fileName: string): Promise<Uint8Array | null> {
   const [row] = await sql<{ content: Uint8Array }[]>`
     select content from rail_sync_blobs where run_id = ${runId} and file_name = ${fileName}
@@ -241,7 +274,7 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     // pierwszy tick dla każdego pliku musi go najpierw wydobyć, zanim zacznie parsować.
     // Blob-y po starych/nieudanych biegach nie są już potrzebne.
     await sql`delete from rail_sync_blobs where run_id <> ${run.id}`;
-    await putBlob(sql, run.id, "_source.zip", zipBytes);
+    await putBlobLarge(sql, run.id, "_source.zip", zipBytes);
 
     if (isAutomatic) await logRailSync(sql, "started", { runId: run.id });
     await sql.end();
@@ -273,7 +306,7 @@ async function extractOneFile(sql: SqlClient, runId: string, fileName: string): 
     }
     const text = await entry.getData(new TextWriter());
     const bytes = new TextEncoder().encode(text);
-    await putBlob(sql, runId, fileName, bytes);
+    await putBlobLarge(sql, runId, fileName, bytes);
     return { extracted: true, totalSize: bytes.length };
   } finally {
     await reader.close();
