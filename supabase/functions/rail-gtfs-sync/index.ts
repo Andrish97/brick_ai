@@ -235,23 +235,47 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 // rail_sync_blobs (getBlobRange). Pobieranie zipa jest więc teraz też rozłożone na ticki:
 // jeden Range na jedno wywołanie, offset trzymany w current_offset (current_file =
 // SOURCE_ZIP), tak samo jak każdy inny krok tego syncu.
-async function downloadOneChunk(sql: SqlClient, runId: string, offset: number, knownTotalBytes: number | null): Promise<{ done: boolean; totalBytes: number | null; newOffset: number }> {
-  const rangeEnd = offset + DOWNLOAD_CHUNK_BYTES - 1;
-  const res = await fetchWithTimeout(FEED_URL, { headers: { Range: `bytes=${offset}-${rangeEnd}` } }, FEED_FETCH_TIMEOUT_MS);
+async function fetchRangeOnce(offset: number, rangeEnd: number): Promise<{ buf: Uint8Array; totalBytes: number | null }> {
+  const res = await fetchWithTimeout(FEED_URL, { headers: { Range: `bytes=${offset}-${rangeEnd}` }, cache: "no-store" }, FEED_FETCH_TIMEOUT_MS);
   if (res.status !== 206) {
     throw new Error(`range_not_supported: serwer feedu zwrócił HTTP ${res.status} zamiast 206 Partial Content dla Range bytes=${offset}-${rangeEnd}`);
   }
   const contentRange = res.headers.get("content-range"); // format: "bytes X-Y/TOTAL"
   const totalFromHeader = contentRange ? parseInt(contentRange.split("/")[1] ?? "", 10) : NaN;
-  const totalBytes = Number.isFinite(totalFromHeader) ? totalFromHeader : knownTotalBytes;
-
+  const totalBytes = Number.isFinite(totalFromHeader) ? totalFromHeader : null;
   const buf = new Uint8Array(await res.arrayBuffer());
-  const tmpPrefix = `~chunk~${SOURCE_ZIP}~`;
-  const chunkIndex = Math.floor(offset / DOWNLOAD_CHUNK_BYTES);
-  await putBlob(sql, runId, `${tmpPrefix}${String(chunkIndex).padStart(6, "0")}`, buf);
+  return { buf, totalBytes };
+}
+
+// Realny objaw na produkcji: pierwszy kawałek (offset=0) zawsze się udawał, ale KAŻDY
+// kolejny cichnie na zawsze — sync zostawał 'running' bez końca, current_offset nigdy się
+// nie ruszał, mimo dziesiątek szybkich, "udanych" (HTTP 200) ticków pod rząd. Przyczyna:
+// pusta odpowiedź (buf.length === 0) na nie-ostatni kawałek NIE była traktowana jak błąd —
+// `newOffset = offset + 0 = offset`, `done` zostawał false, więc kod po prostu zapisywał
+// TEN SAM offset w kółko, cicho, bez żadnego wyjątku — niewidoczne zawieszenie zamiast
+// jawnego błędu. Podejrzenie: ponowne użycie połączenia HTTP keep-alive między kolejnymi
+// zapytaniami do tego samego hosta czasem zwraca pusty/skrócony body na Range inny niż od
+// bajtu 0 — jeden szybki retry W TYM SAMYM wywołaniu (nowe połączenie) czasem to leczy
+// samo; jeśli nie, teraz leci jawny, widoczny błąd zamiast cichego zawieszenia.
+async function downloadOneChunk(sql: SqlClient, runId: string, offset: number, knownTotalBytes: number | null): Promise<{ done: boolean; totalBytes: number | null; newOffset: number }> {
+  const rangeEnd = offset + DOWNLOAD_CHUNK_BYTES - 1;
+  let { buf, totalBytes } = await fetchRangeOnce(offset, rangeEnd);
+  if (buf.length === 0) {
+    const retry = await fetchRangeOnce(offset, rangeEnd);
+    buf = retry.buf;
+    totalBytes = retry.totalBytes;
+  }
+  totalBytes = totalBytes ?? knownTotalBytes;
 
   const newOffset = offset + buf.length;
   const done = totalBytes !== null ? newOffset >= totalBytes : buf.length < DOWNLOAD_CHUNK_BYTES;
+  if (buf.length === 0 && !done) {
+    throw new Error(`empty_range_response: serwer zwrócił 0 bajtów (dwukrotnie) dla Range bytes=${offset}-${rangeEnd}, totalBytes=${totalBytes}`);
+  }
+
+  const tmpPrefix = `~chunk~${SOURCE_ZIP}~`;
+  const chunkIndex = Math.floor(offset / DOWNLOAD_CHUNK_BYTES);
+  await putBlob(sql, runId, `${tmpPrefix}${String(chunkIndex).padStart(6, "0")}`, buf);
   if (done) {
     await reassembleChunks(sql, runId, SOURCE_ZIP, tmpPrefix);
     await sql`update rail_sync_runs set current_file = ${SMALL_FILES[0]}, current_offset = -1, current_total_bytes = null, consecutive_errors = 0 where id = ${runId}`;
