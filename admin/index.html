@@ -2386,7 +2386,14 @@ async function syncNow() {
         });
         lastTick = await tickRes.json().catch(() => ({ error: `HTTP ${tickRes.status}` }));
         await refreshRailSyncStatus();
-        if (lastTick?.done || lastTick?.skipped === 'nothing_running' || lastTick?.ok === false) break;
+        // NIE przerywać samo na lastTick?.ok===false — pojedynczy nieudany tick (np.
+        // fetch_timeout do mkuran.pl) jest z założenia tolerowany PO STRONIE SERWERA (do
+        // MAX_CONSECUTIVE_ERRORS pod rząd, offset się nie rusza, następny tick po prostu
+        // spróbuje ten sam kawałek jeszcze raz) — przerywanie tu na pierwszym niepowodzeniu
+        // zmuszało użytkownika do ręcznego klikania po każdym przejściowym błędzie sieci,
+        // co wyglądało jak "przyciski nic nie robią". _railSyncStatus jest już świeże (linia
+        // wyżej) — to serwer, nie ten pojedynczy tick, decyduje czy bieg naprawdę się skończył.
+        if (lastTick?.done || lastTick?.skipped === 'nothing_running' || _railSyncStatus?.status !== 'running') break;
       }
     }
     _railSyncResult = { start: startJson, ticks, last: lastTick };
