@@ -76,7 +76,7 @@ const CORS = {
 // Znacznik wersji dołączany do KAŻDEJ odpowiedzi — jedyny pewny sposób sprawdzenia z
 // panelu, czy faktycznie działający kod pokrywa się z ostatnio wdrożonym commitem, zamiast
 // zgadywać po treści błędu, czy "deploy" naprawdę już objął tę konkretną instancję funkcji.
-const FN_VERSION = "storage-cachebust-v3-vop-marker";
+const FN_VERSION = "storage-cachebust-v4-eof-checkpoints";
 
 function json(data: unknown, status = 200): Response {
   const body = data && typeof data === "object" && !Array.isArray(data) ? { ...data, _fnVersion: FN_VERSION } : data;
@@ -298,17 +298,39 @@ async function handleStart(SB: string, KEY: string): Promise<Response> {
 // procent postępu bieżącego pliku (current_offset / totalSize) — najważniejsze dla
 // stop_times.txt, jedynego pliku na tyle dużego, żeby to miało sens wizualnie.
 async function extractOneFile(SB: string, KEY: string, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
-  const zipBytes = await storageGetFull(SB, KEY, `${runId}/_source.zip`);
+  // Punkty kontrolne [[EOF:n]] — jeśli błąd dalej pojawia się bez ŻADNEGO z tych
+  // znaczników w treści, to dowód, że ta funkcja W OGÓLE się nie wykonuje dla danego
+  // zapytania (problem deployu/routingu), a nie że któryś jej krok faktycznie zawodzi.
+  let zipBytes: Uint8Array;
+  try {
+    zipBytes = await storageGetFull(SB, KEY, `${runId}/_source.zip`);
+  } catch (e) {
+    throw new Error(`[[EOF:1-getFullZip]] ${String(e)}`);
+  }
   const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
   try {
-    const entries = await reader.getEntries();
+    let entries;
+    try {
+      entries = await reader.getEntries();
+    } catch (e) {
+      throw new Error(`[[EOF:2-getEntries]] ${String(e)}`);
+    }
     const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
     if (!entry || entry.directory) {
       if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
       return { extracted: false, totalSize: 0 };
     }
-    const text = await entry.getData(new TextWriter());
-    await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
+    let text: string;
+    try {
+      text = await entry.getData(new TextWriter());
+    } catch (e) {
+      throw new Error(`[[EOF:3-getData]] ${String(e)}`);
+    }
+    try {
+      await storagePutText(SB, KEY, `${runId}/${fileName}`, text);
+    } catch (e) {
+      throw new Error(`[[EOF:4-putText]] ${String(e)}`);
+    }
     // Weryfikacja UPLOAD-u z ponawianiem (zob. verifyObjectPersisted) — realnie
     // zaobserwowane NIEZALEŻNIE od rozmiaru pliku (nawet dla kilkusetkilobajtowego
     // stops.txt, nie tylko ~52MB stop_times.txt): POST zwraca 200 OK, a obiekt przez
@@ -320,10 +342,22 @@ async function extractOneFile(SB: string, KEY: string, runId: string, fileName: 
     // Rozmiar w bajtach (Storage) jest zawsze >= długości stringa w jednostkach UTF-16
     // (text.length) — znaki spoza ASCII tylko DODAJĄ bajty, nigdy nie ubywa — więc to
     // bezpieczny, zawsze-prawdziwy dla poprawnego uploadu warunek.
-    const totalSize = await verifyObjectPersisted(SB, KEY, `${runId}/${fileName}`, text.length);
+    let totalSize: number;
+    try {
+      totalSize = await verifyObjectPersisted(SB, KEY, `${runId}/${fileName}`, text.length);
+    } catch (e) {
+      throw new Error(`[[EOF:5-verify]] ${String(e)}`);
+    }
     return { extracted: true, totalSize };
   } finally {
-    await reader.close();
+    try {
+      await reader.close();
+    } catch (e) {
+      // Nie nadpisuj oryginalnego błędu z bloku try — tylko dopisz do konsoli, jeśli
+      // samo zamknięcie readera też zawiedzie (co i tak nie powinno się zdarzyć dla
+      // czysto pamięciowego Uint8ArrayReader).
+      console.error("[[EOF:6-readerClose]]", String(e));
+    }
   }
 }
 
