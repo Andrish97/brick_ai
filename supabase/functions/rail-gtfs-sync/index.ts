@@ -199,6 +199,30 @@ async function reassembleChunks(sql: SqlClient, runId: string, fileName: string,
   await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
 }
 
+// Realny dowód na produkcji: po wdrożeniu pobierania przez Range, sync zawiesił się na
+// "Sync w toku…" bez końca — jeden fetch() do mkuran.pl bez żadnego limitu czasu potrafi
+// wisieć w nieskończoność (serwer wolny/nie odpowiada), a panel czeka na ticki
+// SEKWENCYJNIE, więc jedno takie zawieszone zapytanie blokuje całą przeglądarkę bez
+// żadnego komunikatu. AbortController z jawnym limitem zamienia "wisi w nieskończoność" w
+// czysty, krótki błąd — kolejny tick i tak spróbuje ten sam zakres jeszcze raz (zob.
+// MAX_CONSECUTIVE_ERRORS w handleTick).
+const FEED_FETCH_TIMEOUT_MS = 25000;
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(`fetch_timeout: brak odpowiedzi z ${url} w ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Realny dowód na produkcji (Supabase Dashboard, wykres pamięci): pojedyncze wywołanie
 // "start" osiągnęło szczytowe zużycie pamięci ~260MB w kilka sekund — MIMO że kod już
 // wtedy czytał odpowiedź HTTP przez ReadableStream.getReader() zamiast .arrayBuffer().
@@ -213,7 +237,7 @@ async function reassembleChunks(sql: SqlClient, runId: string, fileName: string,
 // SOURCE_ZIP), tak samo jak każdy inny krok tego syncu.
 async function downloadOneChunk(sql: SqlClient, runId: string, offset: number, knownTotalBytes: number | null): Promise<{ done: boolean; totalBytes: number | null; newOffset: number }> {
   const rangeEnd = offset + DOWNLOAD_CHUNK_BYTES - 1;
-  const res = await fetch(FEED_URL, { headers: { Range: `bytes=${offset}-${rangeEnd}` } });
+  const res = await fetchWithTimeout(FEED_URL, { headers: { Range: `bytes=${offset}-${rangeEnd}` } }, FEED_FETCH_TIMEOUT_MS);
   if (res.status !== 206) {
     throw new Error(`range_not_supported: serwer feedu zwrócił HTTP ${res.status} zamiast 206 Partial Content dla Range bytes=${offset}-${rangeEnd}`);
   }
@@ -299,7 +323,7 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     return json({ ok: true, skipped: "busy" });
   }
   try {
-    const headRes = await fetch(FEED_URL, { method: "HEAD" });
+    const headRes = await fetchWithTimeout(FEED_URL, { method: "HEAD" }, FEED_FETCH_TIMEOUT_MS);
     const lastModifiedHeader = headRes.headers.get("last-modified");
     const feedLastModified = lastModifiedHeader ? new Date(lastModifiedHeader) : null;
     const contentLengthHeader = headRes.headers.get("content-length");
