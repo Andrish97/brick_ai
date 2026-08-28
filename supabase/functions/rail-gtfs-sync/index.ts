@@ -1,5 +1,5 @@
 import postgres from "npm:postgres@3.4.5";
-import { Reader, ZipReader, TextWriter } from "npm:@zip.js/zip.js@2.8.59";
+import { Reader, Writer, ZipReader } from "npm:@zip.js/zip.js@2.8.59";
 
 // Synchronizacja lokalnej kopii rozkładu kolejowego z darmowego feedu GTFS
 // (https://mkuran.pl/gtfs/polish_trains.zip, zbudowanego z tego samego źródła co
@@ -164,31 +164,17 @@ async function putBlob(sql: SqlClient, runId: string, fileName: string, content:
 
 const BLOB_WRITE_CHUNK_BYTES = 4 * 1024 * 1024;
 
-// Realny błąd na produkcji: zapis skompresowanego zipa (kilkanaście MB) jako JEDNEGO
-// parametru bytea wysadził WORKER_RESOURCE_LIMIT w "start" — sterownik najwyraźniej
-// koduje duże wartości bytea po stronie klienta (Edge Function) w sposób, który
-// wielokrotnie zwiększa realne zużycie pamięci względem samego rozmiaru pliku. Duże
-// wartości (ten zip, i rozpakowane stop_times.txt — jeszcze większe) idą teraz w kilku
-// mniejszych zapytaniach do tymczasowych wierszy, sklejanych NA KOŃCU PO STRONIE
-// POSTGRESA (string_agg, bez przesyłania danych z powrotem do klienta) w jeden docelowy
-// wiersz — dzięki temu getBlobFull/getBlobRange (odczyt) nie muszą wiedzieć, że zapis w
-// ogóle był dzielony; zweryfikowane lokalnie, że string_agg na bytea skleja bajt-w-bajt
-// poprawnie. Małe pliki (poniżej progu) idą jednym zapytaniem jak dotychczas.
-async function putBlobLarge(sql: SqlClient, runId: string, fileName: string, content: Uint8Array): Promise<void> {
-  if (content.length <= BLOB_WRITE_CHUNK_BYTES) {
-    await putBlob(sql, runId, fileName, content);
-    return;
-  }
-  const tmpPrefix = `~chunk~${fileName}~`; // "~" nie pojawia się w prawdziwych nazwach plików GTFS
-  await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
-  let i = 0;
-  for (let offset = 0; offset < content.length; offset += BLOB_WRITE_CHUNK_BYTES, i++) {
-    const piece = content.subarray(offset, offset + BLOB_WRITE_CHUNK_BYTES);
-    await putBlob(sql, runId, `${tmpPrefix}${String(i).padStart(5, "0")}`, piece);
-  }
-  await reassembleChunks(sql, runId, fileName, tmpPrefix);
-}
-
+// Realny błąd na produkcji: zapis dużej wartości bytea (np. skompresowany zip) jako
+// JEDNEGO parametru wysadzał WORKER_RESOURCE_LIMIT — sterownik najwyraźniej koduje duże
+// wartości bytea po stronie klienta (Edge Function) w sposób, który wielokrotnie
+// zwiększa realne zużycie pamięci względem samego rozmiaru pliku. Duże wartości idą więc
+// zawsze w kilku mniejszych zapytaniach do tymczasowych wierszy, sklejanych NA KOŃCU PO
+// STRONIE POSTGRESA (string_agg, bez przesyłania danych z powrotem do klienta) w jeden
+// docelowy wiersz — dzięki temu getBlobFull/getBlobRange (odczyt) nie muszą wiedzieć, że
+// zapis w ogóle był dzielony; zweryfikowane lokalnie, że string_agg na bytea skleja
+// bajt-w-bajt poprawnie. Używane przez downloadOneChunk i PostgresBlobWriter, które same
+// dbają o to, żeby nigdy nie trzymać całej dużej wartości w pamięci na raz — ta funkcja
+// tylko skleja to, co one już zapisały kawałkami.
 async function reassembleChunks(sql: SqlClient, runId: string, fileName: string, tmpPrefix: string): Promise<void> {
   await sql`
     insert into rail_sync_blobs (run_id, file_name, content)
@@ -451,6 +437,77 @@ class PostgresBlobReader extends Reader<never> {
   }
 }
 
+// Realny objaw na produkcji: po naprawie pobierania i czytania samego zipa, sync doszedł
+// do rozpakowania stop_times.txt (jedyny naprawdę duży plik GTFS) i tam UTKNĄŁ — te same
+// objawy co poprzednio (dużo szybkich "busy" bez postępu), czyli dokładnie ta sama klasa
+// błędu, tylko krok dalej: `entry.getData(new TextWriter())` dekompresowało CAŁĄ
+// zawartość stop_times.txt do JEDNEGO stringa w pamięci naraz, zanim cokolwiek trafiło do
+// bazy. zip.js ma symetryczny do Reader interfejs Writer — `writeUint8Array(chunk)`
+// wywoływane PRZEZ BIBLIOTEKĘ wielokrotnie, kawałek po kawałku, w miarę dekompresji —
+// PostgresBlobWriter odkłada każdy kawałek do bazy na bieżąco (ten sam wzorzec co
+// putBlobLarge/downloadOneChunk: tymczasowe wiersze, sklejane na końcu przez Postgres),
+// więc szczytowe zużycie pamięci to jeden kawałek, nie cały rozpakowany plik. Przy okazji
+// pisze surowe bajty wprost, bez zbędnego okrężnego kodowania tekst→bajty (TextWriter
+// dekoduje jako UTF-8 string, który i tak trzeba było z powrotem zakodować).
+class PostgresBlobWriter extends Writer<never> {
+  totalBytesWritten = 0;
+  // Bez tego zip.js zgłasza "Writer not initialized" — tak samo jak przy PostgresBlobReader,
+  // ta klasa nie jest częścią typu Writer<Type> z .d.ts, choć jest realnie sprawdzana w
+  // dist runtime (Stream.init() ustawia to samo domyślnie, ale ten override całkowicie
+  // zastępuje domyślną implementację).
+  initialized = false;
+  private buffered: Uint8Array[] = [];
+  private bufferedLen = 0;
+  private chunkIndex = 0;
+  private readonly tmpPrefix: string;
+  constructor(private sql: SqlClient, private runId: string, private fileName: string) {
+    super();
+    this.tmpPrefix = `~chunk~${fileName}~`;
+  }
+  override async init(): Promise<void> {
+    await this.sql`delete from rail_sync_blobs where run_id = ${this.runId} and file_name like ${this.tmpPrefix + "%"}`;
+    this.initialized = true;
+  }
+  private async flush(): Promise<void> {
+    if (this.bufferedLen === 0) return;
+    const merged = new Uint8Array(this.bufferedLen);
+    let off = 0;
+    for (const piece of this.buffered) {
+      merged.set(piece, off);
+      off += piece.length;
+    }
+    this.buffered = [];
+    this.bufferedLen = 0;
+    await putBlob(this.sql, this.runId, `${this.tmpPrefix}${String(this.chunkIndex).padStart(6, "0")}`, merged);
+    this.chunkIndex++;
+  }
+  override async writeUint8Array(array: Uint8Array): Promise<void> {
+    // Kopia obronna — zip.js może ponownie użyć/nadpisać swój wewnętrzny bufor po
+    // powrocie z tego wywołania, a my trzymamy referencję dłużej (do najbliższego flush).
+    this.buffered.push(new Uint8Array(array));
+    this.bufferedLen += array.length;
+    this.totalBytesWritten += array.length;
+    if (this.bufferedLen >= BLOB_WRITE_CHUNK_BYTES) await this.flush();
+  }
+  override async getData(): Promise<never> {
+    await this.flush();
+    if (this.chunkIndex === 0) {
+      await putBlob(this.sql, this.runId, this.fileName, new Uint8Array(0));
+    } else if (this.chunkIndex === 1) {
+      await this.sql`
+        insert into rail_sync_blobs (run_id, file_name, content)
+        select ${this.runId}, ${this.fileName}, content from rail_sync_blobs
+        where run_id = ${this.runId} and file_name = ${this.tmpPrefix + "000000"}
+        on conflict (run_id, file_name) do update set content = excluded.content
+      `;
+      await this.sql`delete from rail_sync_blobs where run_id = ${this.runId} and file_name = ${this.tmpPrefix + "000000"}`;
+    } else {
+      await reassembleChunks(this.sql, this.runId, this.fileName, this.tmpPrefix);
+    }
+    return undefined as never;
+  }
+}
+
 // Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do rail_sync_blobs —
 // wywoływane raz na tick, zanim ten plik może zostać sparsowany. extracted=false, jeśli
 // pliku nie ma w zipie (dozwolone przez spec dla wszystkiego poza stop_times.txt).
@@ -466,10 +523,9 @@ async function extractOneFile(sql: SqlClient, runId: string, fileName: string): 
       if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
       return { extracted: false, totalSize: 0 };
     }
-    const text = await entry.getData(new TextWriter());
-    const bytes = new TextEncoder().encode(text);
-    await putBlobLarge(sql, runId, fileName, bytes);
-    return { extracted: true, totalSize: bytes.length };
+    const writer = new PostgresBlobWriter(sql, runId, fileName);
+    await entry.getData(writer);
+    return { extracted: true, totalSize: writer.totalBytesWritten };
   } finally {
     await reader.close();
   }
