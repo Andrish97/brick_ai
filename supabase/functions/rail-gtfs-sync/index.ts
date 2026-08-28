@@ -76,7 +76,7 @@ const CORS = {
 // Znacznik wersji dołączany do KAŻDEJ odpowiedzi — jedyny pewny sposób sprawdzenia z
 // panelu, czy faktycznie działający kod pokrywa się z ostatnio wdrożonym commitem, zamiast
 // zgadywać po treści błędu, czy "deploy" naprawdę już objął tę konkretną instancję funkcji.
-const FN_VERSION = "storage-cachebust-v4-eof-checkpoints";
+const FN_VERSION = "storage-cachebust-v5-retry-everywhere";
 
 function json(data: unknown, status = 200): Response {
   const body = data && typeof data === "object" && !Array.isArray(data) ? { ...data, _fnVersion: FN_VERSION } : data;
@@ -166,16 +166,34 @@ function noCacheUrl(SB: string, path: string): string {
   return `${SB}/storage/v1/object/${BUCKET}/${path}?_cb=${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
-async function storageGetFull(SB: string, KEY: string, path: string): Promise<Uint8Array> {
+async function storageGetFullOnce(SB: string, KEY: string, path: string): Promise<Uint8Array> {
   const res = await fetch(noCacheUrl(SB, path), { headers: sbHeaders(KEY, { "Cache-Control": "no-cache" }) });
   if (!res.ok) throw new Error(`storage_get_failed ${path}: HTTP ${res.status} ${await res.text()}`);
   return new Uint8Array(await res.arrayBuffer());
 }
 
-// Zwraca fragment obiektu [start, start+len) oraz całkowity rozmiar pliku (z nagłówka
-// Content-Range odpowiedzi). Jeśli plik jest krótszy niż żądany zakres, zwrócony tekst
-// będzie krótszy — to sygnał końca pliku.
-async function storageGetRange(SB: string, KEY: string, path: string, start: number, len: number): Promise<{ text: string; totalSize: number }> {
+// Ta sama odporność co storageGetRange — _source.zip jest pisany przez JEDNO wywołanie
+// ("start") i czytany przez INNE, PÓŹNIEJSZE wywołanie (pierwszy "tick") — dokładnie ten
+// sam wzorzec odczytu-tuż-po-zapisie-z-innego-requesta, który już okazał się zawodny.
+async function storageGetFull(SB: string, KEY: string, path: string): Promise<Uint8Array> {
+  const delaysMs = [400, 900, 1800];
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt - 1]));
+    try {
+      return await storageGetFullOnce(SB, KEY, path);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw new Error(`[[SGF attemptsRun=${delaysMs.length + 1}]] ${String(lastError)}`);
+}
+
+// Jedna próba odczytu fragmentu obiektu [start, start+len) oraz całkowitego rozmiaru
+// pliku (z nagłówka Content-Range odpowiedzi). Jeśli plik jest krótszy niż żądany zakres,
+// zwrócony tekst będzie krótszy — to sygnał końca pliku. Bez ponawiania — patrz
+// storageGetRange (opakowanie z retry), które powinno być używane wszędzie indziej.
+async function storageGetRangeOnce(SB: string, KEY: string, path: string, start: number, len: number): Promise<{ text: string; totalSize: number }> {
   const res = await fetch(noCacheUrl(SB, path), {
     headers: sbHeaders(KEY, { Range: `bytes=${start}-${start + len - 1}`, "Cache-Control": "no-cache" }),
   });
@@ -186,32 +204,47 @@ async function storageGetRange(SB: string, KEY: string, path: string, start: num
   return { text, totalSize };
 }
 
-// Weryfikacja tuż po uploadzie (storagePutText -> od razu storageGetRange) realnie
-// obserwowana jako zawodna NIEZALEŻNIE od rozmiaru pliku — 404 NoSuchKey łapany nawet
-// dla stops.txt (kilkaset KB), nie tylko dla ~52MB stop_times.txt, więc to nie kwestia
-// wielkości ciała POST, tylko krótkiego opóźnienia między zapisem a tym, kiedy staje się
-// on odczytywalny przez Range GET (Cloudflare stoi przed Supabase Storage — prawdopodobny
-// winowajca to chwilowa niespójność cache'u brzegowego dla świeżo zapisanego obiektu).
-// Kilka prób z odstępem zamiast jednorazowego sprawdzenia — jeśli to faktycznie kwestia
-// propagacji, kolejna próba po chwili powinna już widzieć obiekt.
-async function verifyObjectPersisted(SB: string, KEY: string, path: string, minBytes: number): Promise<number> {
+// Realnie zaobserwowane: odczyt obiektu tuż PO tym, jak inny (poprawny, zweryfikowany)
+// zapis go stworzył potrafi na chwilę dostać 404 NoSuchKey — NIEZALEŻNIE od rozmiaru
+// pliku, i nie tylko bezpośrednio po własnym uploadzie tego samego wywołania: pierwsza
+// wersja tej odporności chroniła TYLKO weryfikację zaraz po uploadzie (zob. historia
+// verifyObjectPersisted), a osobne, PÓŹNIEJSZE odczyty tego samego pliku (np. w
+// następnym "ticku", zwłaszcza gdy w tle równolegle napędza też cron) wciąż trafiały na
+// dokładnie ten sam 404 bez żadnego ponawiania. Retry jest więc teraz WBUDOWANY w samą
+// storageGetRange, używaną wszędzie — jedno miejsce chroniące każdego wołającego,
+// zamiast każdorazowego opakowywania osobno.
+async function storageGetRange(SB: string, KEY: string, path: string, start: number, len: number): Promise<{ text: string; totalSize: number }> {
   const delaysMs = [400, 900, 1800];
   let lastError: unknown;
-  let attemptsRun = 0;
   for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
-    attemptsRun = attempt + 1;
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt - 1]));
     try {
-      const verify = await storageGetRange(SB, KEY, path, 0, 64);
-      if (verify.totalSize >= minBytes) return verify.totalSize;
-      lastError = new Error(`reported size ${verify.totalSize} < expected ${minBytes}`);
+      return await storageGetRangeOnce(SB, KEY, path, start, len);
     } catch (e) {
       lastError = e;
     }
   }
-  // Znacznik [[VOP]] jednoznacznie potwierdza z treści błędu w panelu, że TA funkcja
-  // faktycznie się wykonała (i ile razy) — bez zgadywania po samym kształcie komunikatu.
-  throw new Error(`[[VOP attemptsRun=${attemptsRun}]] verify_upload_failed ${path}: ${String(lastError)}`);
+  throw new Error(`[[SGR attemptsRun=${delaysMs.length + 1}]] ${String(lastError)}`);
+}
+
+// Weryfikacja tuż po uploadzie (storagePutText -> od razu storageGetRange, samo już z
+// ponawianiem) — sprawdza dodatkowo, że zgłoszony rozmiar faktycznie odpowiada temu, co
+// wgraliśmy (nie tylko że obiekt w ogóle istnieje).
+async function verifyObjectPersisted(SB: string, KEY: string, path: string, minBytes: number): Promise<number> {
+  // Sam odczyt (storageGetRange) już ponawia na brak/błąd — tu tylko dodatkowo pilnujemy
+  // osobnego, rzadszego przypadku: obiekt ISTNIEJE, ale zgłoszony rozmiar jest za mały
+  // (np. upload przerwany w połowie) — kilka prób na wypadek, gdyby i TO był chwilowy
+  // stan przejściowy tuż po zapisie.
+  const sizeDelaysMs = [400, 900];
+  for (let attempt = 0; attempt <= sizeDelaysMs.length; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, sizeDelaysMs[attempt - 1]));
+    const verify = await storageGetRange(SB, KEY, path, 0, 64);
+    if (verify.totalSize >= minBytes) return verify.totalSize;
+    if (attempt === sizeDelaysMs.length) {
+      throw new Error(`[[VOP size]] verify_upload_failed ${path}: reported size ${verify.totalSize} < expected ${minBytes}`);
+    }
+  }
+  throw new Error(`[[VOP unreachable]] ${path}`); // nieosiągalne — TS wymaga zwrotu/rzutu na każdej ścieżce
 }
 
 // --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do Storage ---
