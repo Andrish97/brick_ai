@@ -182,6 +182,10 @@ async function putBlobLarge(sql: SqlClient, runId: string, fileName: string, con
     const piece = content.subarray(offset, offset + BLOB_WRITE_CHUNK_BYTES);
     await putBlob(sql, runId, `${tmpPrefix}${String(i).padStart(5, "0")}`, piece);
   }
+  await reassembleChunks(sql, runId, fileName, tmpPrefix);
+}
+
+async function reassembleChunks(sql: SqlClient, runId: string, fileName: string, tmpPrefix: string): Promise<void> {
   await sql`
     insert into rail_sync_blobs (run_id, file_name, content)
     select ${runId}, ${fileName}, string_agg(content, ''::bytea order by file_name)
@@ -189,6 +193,66 @@ async function putBlobLarge(sql: SqlClient, runId: string, fileName: string, con
     on conflict (run_id, file_name) do update set content = excluded.content
   `;
   await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
+}
+
+// Realny błąd na produkcji (WORKER_RESOURCE_LIMIT w "start", potwierdzony na CAŁKIEM
+// świeżym biegu — bez żadnego innego wywołania w tle, więc to nie rywalizacja o blokady):
+// `new Uint8Array(await zipRes.arrayBuffer())` trzyma CAŁY pobrany plik zipa w pamięci
+// naraz, zanim cokolwiek trafi do Postgresa. Zamiast buforować całość, czytamy strumień
+// odpowiedzi HTTP kawałkami i piszemy każdy kawałek do bazy na bieżąco — szczytowe zużycie
+// pamięci to jeden kawałek (BLOB_WRITE_CHUNK_BYTES), nie cały plik, niezależnie od jego
+// rozmiaru.
+async function putBlobStreaming(sql: SqlClient, runId: string, fileName: string, stream: ReadableStream<Uint8Array>): Promise<void> {
+  const tmpPrefix = `~chunk~${fileName}~`;
+  await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
+
+  const reader = stream.getReader();
+  let buffered: Uint8Array[] = [];
+  let bufferedLen = 0;
+  let chunkIndex = 0;
+
+  const flush = async () => {
+    if (bufferedLen === 0) return;
+    const merged = new Uint8Array(bufferedLen);
+    let off = 0;
+    for (const piece of buffered) {
+      merged.set(piece, off);
+      off += piece.length;
+    }
+    buffered = [];
+    bufferedLen = 0;
+    await putBlob(sql, runId, `${tmpPrefix}${String(chunkIndex).padStart(5, "0")}`, merged);
+    chunkIndex++;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.length) {
+      buffered.push(value);
+      bufferedLen += value.length;
+      if (bufferedLen >= BLOB_WRITE_CHUNK_BYTES) await flush();
+    }
+  }
+  await flush();
+
+  if (chunkIndex === 0) {
+    await putBlob(sql, runId, fileName, new Uint8Array(0));
+    return;
+  }
+  if (chunkIndex === 1) {
+    // Dokładnie jeden kawałek — przenieś go wprost pod docelową nazwę, bez SQL-owego
+    // sklejania jednego elementu ze sobą.
+    await sql`
+      insert into rail_sync_blobs (run_id, file_name, content)
+      select ${runId}, ${fileName}, content from rail_sync_blobs
+      where run_id = ${runId} and file_name = ${tmpPrefix + "00000"}
+      on conflict (run_id, file_name) do update set content = excluded.content
+    `;
+    await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name = ${tmpPrefix + "00000"}`;
+    return;
+  }
+  await reassembleChunks(sql, runId, fileName, tmpPrefix);
 }
 
 async function getBlobFull(sql: SqlClient, runId: string, fileName: string): Promise<Uint8Array | null> {
@@ -290,7 +354,7 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
 
     const zipRes = await fetch(FEED_URL);
     if (!zipRes.ok) throw new Error(`feed_fetch_failed: HTTP ${zipRes.status}`);
-    const zipBytes = new Uint8Array(await zipRes.arrayBuffer());
+    if (!zipRes.body) throw new Error("feed_fetch_failed: brak strumienia odpowiedzi");
 
     const [run] = await sql<{ id: string }[]>`
       insert into rail_sync_runs (status, current_file, current_offset, feed_last_modified)
@@ -301,7 +365,7 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     // pierwszy tick dla każdego pliku musi go najpierw wydobyć, zanim zacznie parsować.
     // Blob-y po starych/nieudanych biegach nie są już potrzebne.
     await sql`delete from rail_sync_blobs where run_id <> ${run.id}`;
-    await putBlobLarge(sql, run.id, "_source.zip", zipBytes);
+    await putBlobStreaming(sql, run.id, "_source.zip", zipRes.body);
 
     if (isAutomatic) await logRailSync(sql, "started", { runId: run.id });
     return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
