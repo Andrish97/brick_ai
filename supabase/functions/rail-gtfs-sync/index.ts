@@ -73,8 +73,14 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
+// Znacznik wersji dołączany do KAŻDEJ odpowiedzi — jedyny pewny sposób sprawdzenia z
+// panelu, czy faktycznie działający kod pokrywa się z ostatnio wdrożonym commitem, zamiast
+// zgadywać po treści błędu, czy "deploy" naprawdę już objął tę konkretną instancję funkcji.
+const FN_VERSION = "storage-cachebust-v2";
+
 function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), { status, headers: { ...CORS, "Content-Type": "application/json" } });
+  const body = data && typeof data === "object" && !Array.isArray(data) ? { ...data, _fnVersion: FN_VERSION } : data;
+  return new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 }
 
 function sbHeaders(key: string, extra: Record<string, string> = {}) {
