@@ -2204,6 +2204,8 @@ const RAIL_SYNC_BIG_FILE = 'stop_times.txt';
 const RAIL_SYNC_SMALL_WEIGHT = 10; // % paska na wszystkie małe pliki razem
 const RAIL_SYNC_BIG_WEIGHT = 100 - RAIL_SYNC_SMALL_WEIGHT;
 
+const RAIL_SYNC_ALL_FILES = [...RAIL_SYNC_SMALL_FILES, RAIL_SYNC_BIG_FILE];
+
 function railSyncPercent(s) {
   if (!s) return 0;
   if (s.status === 'success') return 100;
@@ -2215,6 +2217,30 @@ function railSyncPercent(s) {
   }
   const idx = RAIL_SYNC_SMALL_FILES.indexOf(s.current_file);
   return idx === -1 ? 0 : (idx / RAIL_SYNC_SMALL_FILES.length) * RAIL_SYNC_SMALL_WEIGHT;
+}
+
+// Checklista plików obok samego paska % — dokładnie ta sama informacja o postępie
+// (pozycja current_file na liście + current_offset/current_total_bytes dla dużego pliku),
+// tylko rozbita po plikach zamiast jednej zsumowanej liczby.
+function renderRailFileChecklist(s) {
+  if (!s || s.status !== 'running' || !s.current_file) return '';
+  const curIdx = RAIL_SYNC_ALL_FILES.indexOf(s.current_file);
+  const items = RAIL_SYNC_ALL_FILES.map((f, i) => {
+    let icon = '⏳';
+    let extra = '';
+    if (i < curIdx) {
+      icon = '✅';
+    } else if (i === curIdx) {
+      icon = '🔄';
+      if (f === RAIL_SYNC_BIG_FILE && s.current_total_bytes) {
+        const filePct = Math.min(100, Math.max(0, ((s.current_offset || 0) / s.current_total_bytes) * 100));
+        extra = ` ${filePct.toFixed(0)}%`;
+      }
+    }
+    const dim = i === curIdx ? 'var(--text)' : 'var(--muted)';
+    return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:4px;background:var(--bg);border:1px solid var(--border);font-size:11px;color:${dim}">${icon} ${escHtml(f)}${extra}</span>`;
+  });
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${items.join('')}</div>`;
 }
 
 function renderRailSyncStatus() {
@@ -2238,6 +2264,7 @@ function renderRailSyncStatus() {
         ${elapsed !== null ? ` · od ${elapsed}s` : ''}
         ${s.finished_at ? ` · zakończono: ${new Date(s.finished_at).toLocaleString('pl-PL')}` : ''}
         ${barHtml}
+        ${renderRailFileChecklist(s)}
         ${s.error ? `<div style="color:var(--danger);margin-top:4px">${escHtml(s.error)}</div>` : ''}
       </div>`
     : `<p style="color:var(--muted);font-size:13px">Brak jeszcze żadnej synchronizacji.</p>`;
@@ -2674,6 +2701,7 @@ const LOG_TYPE_STYLE = {
   endpoint_error:          { label: 'Endpoint błąd',  cls: 'badge-red'    },
   directions_error:        { label: 'Directions błąd', cls: 'badge-red'   },
   raw_webhook:              { label: 'Raw webhook',   cls: 'badge-yellow' },
+  rail_sync:                { label: 'Sync GTFS',     cls: 'badge-yellow' },
 };
 
 async function renderLogs() {
@@ -2800,6 +2828,7 @@ function renderLogsContent() {
               endpoint_error: 'assistant-tools: nieobsłużony wyjątek podczas wykonywania akcji',
               directions_error: 'Google Directions API zwróciło błąd lub status inny niż OK — pełny status/treść odpowiedzi',
               raw_webhook:  'surowy payload z Zadarmy przed jakimkolwiek przetworzeniem',
+              rail_sync:    'automatyczna (cron) synchronizacja rozkładu GTFS — start/koniec/błąd; kliknięcia z panelu mają własny podgląd i tu nie trafiają',
             }[key] || '';
             return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
               <span class="badge ${s.cls}">${escHtml(s.label)}</span>

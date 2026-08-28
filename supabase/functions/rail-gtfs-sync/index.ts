@@ -6,7 +6,7 @@ import { ZipReader, Uint8ArrayReader, TextWriter } from "npm:@zip.js/zip.js@2.8.
 // nasze API PKP PLK — zob. supabase/migrations/20240118000000_rail_gtfs.sql).
 //
 // Dwie akcje, wywoływane przez pg_cron (nie GitHub Actions — Actions w tym repo jest
-// wyłącznie do deployu):
+// wyłącznie do deployu) albo ręcznie z panelu admina:
 //   "start" (raz dziennie) — sprawdza Last-Modified feedu, jeśli zmieniony: pobiera cały
 //     zip (skompresowany, bez rozpakowywania) i odkłada go w całości do tabeli
 //     rail_sync_blobs, zakłada nowy wiersz rail_sync_runs.
@@ -19,14 +19,23 @@ import { ZipReader, Uint8ArrayReader, TextWriter } from "npm:@zip.js/zip.js@2.8.
 //     ostatnim kawałku ostatniego pliku: wywołuje Etap B (czysty SQL, funkcja
 //     rail_gtfs_transform w bazie — patrz migracja) i "mark and sweep" starych wierszy.
 //
-// Plik między krokami trzymany jest wprost w Postgresie (tabela rail_sync_blobs,
-// migracja 20240125000000), nie w Supabase Storage — Storage (osobny serwis za
-// Cloudflare) okazał się mieć realną, powtarzalną niespójność odczytu-tuż-po-zapisie
-// (potwierdzone: nawet kilka prawdziwych prób odczytu z odstępem i wymuszonym pominięciem
-// cache'a dalej dawało 404 na obiekt, który listing bucketu pokazywał jako istniejący/
-// nieistniejący niespójnie z tym, co zwracał konkretny odczyt) — zwykłe zapytanie SQL do
-// tej samej bazy, z którą ta funkcja i tak już rozmawia do wszystkich innych operacji,
-// tej klasy problemów strukturalnie nie ma.
+// Plik między krokami trzymany jest wprost w Postgresie (tabela rail_sync_blobs), nie w
+// Supabase Storage — Storage okazało się mieć realną, powtarzalną niespójność odczytu-
+// -tuż-po-zapisie; zwykłe zapytanie SQL do tej samej bazy, z którą ta funkcja i tak już
+// rozmawia do wszystkich innych operacji, tej klasy problemów strukturalnie nie ma.
+//
+// Powód dzielenia pracy na małe kroki w ogóle: twardy limit 2s czasu CPU na jedno
+// wywołanie Supabase Edge Function — nie da się tego obejść, tylko obejść PRACĄ, robiąc
+// mało na raz. Rozpakowanie WSZYSTKICH plików naraz albo sparsowanie całego stop_times.txt
+// (kilkadziesiąt MB) w jednym wywołaniu przekracza ten limit.
+//
+// Kto woła: pg_cron (nagłówek Authorization z INTERNAL_SECRET z Vault) albo zalogowany
+// admin z panelu (JWT Supabase). Rozróżnienie tego (isAutomatic w Deno.serve niżej) steruje
+// WYŁĄCZNIE tym, czy przebieg zostawia ślad w ogólnej tabeli `logs` (zakładka "Logi" w
+// panelu) — cron nie ma nikogo "przed ekranem", więc to jedyny sposób sprawdzenia po
+// fakcie, czy się odbył i jak poszedł. Kliknięcia z panelu mają już własny, żywy podgląd
+// postępu w tej samej karcie (percent + checklist plików), więc dublowanie ich w Logi
+// byłoby czystym szumem.
 
 const FEED_URL = "https://mkuran.pl/gtfs/polish_trains.zip";
 const SMALL_FILES = ["stops.txt", "routes.txt", "calendar.txt", "calendar_dates.txt", "trips.txt"];
@@ -37,8 +46,7 @@ const ALL_FILES = [...SMALL_FILES, BIG_FILE];
 const STOP_TIMES_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rząd dopiero uznajemy sync za faktycznie zepsuty
 // Kilka kawałków w JEDNYM ticku zamiast jednego — realnie przyspiesza cały sync. 3 kawałki
-// x 8MB to bezpieczny margines pod limit 2s CPU (ekstrapolacja z realnego testu: 4MB/~53k
-// wierszy działało bez problemu).
+// x 8MB to bezpieczny margines pod limit 2s CPU.
 const MAX_CHUNKS_PER_TICK = 3;
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
@@ -168,15 +176,19 @@ async function getBlobRange(sql: SqlClient, runId: string, fileName: string, sta
   return row ? { bytes: row.chunk, totalSize: row.total } : null;
 }
 
+// Jedyny log tego mechanizmu, i tylko dla przebiegów automatycznych — zob. komentarz na
+// górze pliku. Jeden typ w tabeli `logs` ("rail_sync"), rozróżniany polem data.event.
+async function logRailSync(sql: SqlClient, event: "started" | "finished" | "failed", data: Record<string, unknown>): Promise<void> {
+  try {
+    // sql.json(...), NIE ręczny JSON.stringify(...)::jsonb — ten drugi podwójnie koduje
+    // wynik (jsonb string opakowujący cały tekst JSON zamiast właściwego obiektu),
+    // złapane lokalnym testem przed wdrożeniem.
+    await sql`insert into logs (type, data) values ('rail_sync', ${sql.json({ event, ...data })})`;
+  } catch { /* logowanie nie może wywrócić samego syncu */ }
+}
+
 // --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do bazy ---
-//
-// Rozpakowywanie WSZYSTKICH 6 plików GTFS w jednym wywołaniu — a zwłaszcza stop_times.txt,
-// ~52MB tekstu po dekompresji — potrafi przekroczyć limit zasobów pojedynczego Edge
-// Function (obserwowane realnie: WORKER_RESOURCE_LIMIT). "start" więc TYLKO przenosi
-// bajty (pobiera skompresowany zip, odkłada go w całości jako _source.zip) — żadnej
-// dekompresji tutaj. Samo rozpakowanie, PLIK PO PLIKU, jedno wywołanie na jeden plik,
-// dzieje się dopiero w handleTick (zob. extractOneFile).
-async function handleStart(): Promise<Response> {
+async function handleStart(isAutomatic: boolean): Promise<Response> {
   const sql = getSql();
   try {
     const headRes = await fetch(FEED_URL, { method: "HEAD" });
@@ -231,9 +243,11 @@ async function handleStart(): Promise<Response> {
     await sql`delete from rail_sync_blobs where run_id <> ${run.id}`;
     await putBlob(sql, run.id, "_source.zip", zipBytes);
 
+    if (isAutomatic) await logRailSync(sql, "started", { runId: run.id });
     await sql.end();
     return json({ ok: true, runId: run.id, feedLastModified: feedLastModified?.toISOString() ?? null });
   } catch (e) {
+    if (isAutomatic) await logRailSync(sql, "failed", { stage: "start", error: String(e) });
     await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = ${String(e)} where status = 'running'`.catch(() => {});
     await sql.end();
     return json({ ok: false, error: String(e) }, 500);
@@ -268,7 +282,7 @@ async function extractOneFile(sql: SqlClient, runId: string, fileName: string): 
 
 // --- Etap A (ciąg dalszy) + Etap B: "tick" — jeden krok postępu, zawsze bezpieczny do przerwania ---
 
-async function handleTick(): Promise<Response> {
+async function handleTick(isAutomatic: boolean): Promise<Response> {
   const sql = getSql();
   try {
     const [run] = await sql<{
@@ -318,7 +332,7 @@ async function handleTick(): Promise<Response> {
       const nextFile = ALL_FILES[nextIdx] ?? null;
       // -1: następny plik jeszcze nie rozpakowany z zipa (zob. blok current_offset === -1 wyżej).
       await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = ${nextFile ? -1 : 0}, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
-      if (!nextFile) await finishRun(sql, run.id);
+      if (!nextFile) await finishRun(sql, run.id, isAutomatic);
       await sql.end();
       return json({ ok: true, file: fileName, rowsInserted, nextFile });
     }
@@ -367,7 +381,7 @@ async function handleTick(): Promise<Response> {
 
       if (reachedEnd) {
         await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows} where id = ${run.id}`;
-        await finishRun(sql, run.id);
+        await finishRun(sql, run.id, isAutomatic);
         await sql.end();
         return json({ ok: true, file: fileName, rowsInserted, done: true, chunksThisTick: chunkNum + 1 });
       }
@@ -381,15 +395,19 @@ async function handleTick(): Promise<Response> {
     // Błąd NIE kończy od razu całego syncu — offset/current_file nie są tu ruszane, więc
     // kolejny tick po prostu spróbuje ten sam kawałek jeszcze raz. Dopiero po
     // MAX_CONSECUTIVE_ERRORS pod rząd uznajemy to za faktycznie zepsute, nie przejściowe.
+    // RETURNING mówi od razu, czy TA aktualizacja przekroczyła próg — bez osobnego
+    // zapytania sprawdzającego z góry.
     try {
-      await sql`
+      const [updated] = await sql<{ status: string }[]>`
         update rail_sync_runs
         set consecutive_errors = consecutive_errors + 1,
             error = ${String(e)},
             status = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then 'failed' else status end,
             finished_at = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then now() else finished_at end
         where status = 'running'
+        returning status
       `;
+      if (isAutomatic && updated?.status === "failed") await logRailSync(sql, "failed", { stage: "tick", error: String(e) });
     } catch { /* baza sama niedostępna — nic więcej nie da się tu zrobić */ }
     await sql.end();
     return json({ ok: false, error: String(e) }, 500);
@@ -399,9 +417,13 @@ async function handleTick(): Promise<Response> {
 // Etap B: transformacja raw -> docelowe + rail_connections + mark-and-sweep, w całości
 // jako jedna funkcja Postgres (zob. migracja) — wywołana raz, po ostatnim kawałku
 // ostatniego pliku. Zero pracy JS/CPU po stronie Edge Function dla tego kroku.
-async function finishRun(sql: SqlClient, runId: string): Promise<void> {
+async function finishRun(sql: SqlClient, runId: string, isAutomatic: boolean): Promise<void> {
   await sql`select rail_gtfs_transform(${runId}::uuid)`;
   await sql`update rail_sync_runs set status = 'success', finished_at = now() where id = ${runId}`;
+  if (isAutomatic) {
+    const [row] = await sql<{ rows_processed: number }[]>`select rows_processed from rail_sync_runs where id = ${runId}`;
+    await logRailSync(sql, "finished", { runId, rowsProcessed: row?.rows_processed ?? null });
+  }
 }
 
 function getSql() {
@@ -438,10 +460,14 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Unauthorized" }, 401);
   }
 
+  // isInternal = wywołane przez pg_cron (bez kogoś "przed ekranem") = warte logowania w
+  // panelu; isAdmin = kliknięcie w panelu, gdzie postęp jest już widoczny na żywo.
+  const isAutomatic = isInternal;
+
   let body: { action?: string } = {};
   try { body = await req.json(); } catch { /* brak body — traktuj jak brak akcji */ }
 
-  if (body.action === "start") return await handleStart();
-  if (body.action === "tick") return await handleTick();
+  if (body.action === "start") return await handleStart(isAutomatic);
+  if (body.action === "tick") return await handleTick(isAutomatic);
   return json({ error: "unknown action, expected 'start' or 'tick'" }, 400);
 });
