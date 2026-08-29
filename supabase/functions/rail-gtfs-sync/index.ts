@@ -1,5 +1,5 @@
 import postgres from "npm:postgres@3.4.5";
-import { Reader, Writer, ZipReader } from "npm:@zip.js/zip.js@2.8.59";
+import { Entry, Reader, Writer, ZipReader } from "npm:@zip.js/zip.js@2.8.59";
 
 // Synchronizacja lokalnej kopii rozkładu kolejowego z darmowego feedu GTFS
 // (https://mkuran.pl/gtfs/polish_trains.zip, zbudowanego z tego samego źródła co
@@ -532,6 +532,70 @@ class PostgresBlobWriter extends Writer<never> {
   }
 }
 
+// Nawet z useWebWorkers: false, entry.getData() zip.js przekroczyło twardy limit 2s CPU
+// dla stop_times.txt (realny dowód: Supabase Metrics, Max CPU Time 2311ms, przy Max
+// Execution Time i pamięci w normie) — potwierdzone bezwarunkowym logowaniem krokowym
+// (zob. logRailSyncDebug), że proces zawsze dochodzi do extract_entry_found i ginie W
+// TRAKCIE entry.getData(), zanim zdąży zapisać extract_getData_done. Lokalny pomiar
+// wyizolował przyczynę: sama dekompresja (jedno wywołanie natywnego DecompressionStream
+// na cały wpis) to ~300-500ms realnej pracy CPU nawet dla ~49MB wyjścia — to NIE
+// dekompresja jest kosztowna, tylko wewnętrzna maszyneria zip.js, która czyta/pisze przez
+// nasz Reader/Writer w małych ~64KB kawałkach (setki wywołań, każde z własnym narzutem
+// JS/promise). Obejście: pomijamy entry.getData() dla dużego pliku całkowicie — czytamy
+// zip.js-em tylko metadane (getEntries()), a samą ekstrakcję robimy ręcznie, jednym dużym
+// odczytem skompresowanych bajtów wpisu i jednym wywołaniem dekompresji, zamiast setek
+// małych. Odczyty/zapisy Postgresa trwają wtedy dłużej w czasie ściany (I/O, sekundy), ale
+// to NIE liczy się do budżetu CPU Edge Function — dokładnie ta sama zasada, na której już
+// stoi cała reszta tego pliku (pobieranie przez Range, parsowanie kawałkami).
+const LOCAL_FILE_HEADER_SIZE = 30;
+const LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+
+async function extractBigFileFast(sql: SqlClient, runId: string, entry: Entry): Promise<number> {
+  if (entry.offset === undefined || entry.compressedSize === undefined) {
+    throw new Error(`entry_missing_offset_or_size: ${entry.filename}`);
+  }
+  if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
+    throw new Error(`unsupported_compression_method: ${entry.compressionMethod}`);
+  }
+  const header = await getBlobRange(sql, runId, SOURCE_ZIP, entry.offset, LOCAL_FILE_HEADER_SIZE);
+  if (!header) throw new Error(`source_zip_missing run=${runId}`);
+  const dv = new DataView(header.bytes.buffer, header.bytes.byteOffset, header.bytes.byteLength);
+  const signature = dv.getUint32(0, true);
+  if (signature !== LOCAL_FILE_HEADER_SIGNATURE) throw new Error(`bad_local_header_signature: 0x${signature.toString(16)}`);
+  const filenameLength = dv.getUint16(26, true);
+  const extraFieldLength = dv.getUint16(28, true);
+  const dataOffset = entry.offset + LOCAL_FILE_HEADER_SIZE + filenameLength + extraFieldLength;
+
+  const compressedRange = await getBlobRange(sql, runId, SOURCE_ZIP, dataOffset, entry.compressedSize);
+  if (!compressedRange) throw new Error(`source_zip_missing run=${runId}`);
+
+  const writer = new PostgresBlobWriter(sql, runId, BIG_FILE);
+  await writer.init();
+
+  if (entry.compressionMethod === 0) {
+    await writer.writeUint8Array(compressedRange.bytes);
+  } else {
+    const ds = new DecompressionStream("deflate-raw");
+    const dsWriter = ds.writable.getWriter();
+    // Zapis i odczyt strumienia muszą iść równolegle (nie await write() przed czytaniem) —
+    // DecompressionStream buforuje wewnętrznie ograniczoną ilość danych i zablokowałby się,
+    // gdyby nikt jednocześnie nie odbierał wyjścia.
+    const writeDone = (async () => {
+      await dsWriter.write(compressedRange.bytes);
+      await dsWriter.close();
+    })();
+    const dsReader = ds.readable.getReader();
+    while (true) {
+      const { done, value } = await dsReader.read();
+      if (done) break;
+      await writer.writeUint8Array(value);
+    }
+    await writeDone;
+  }
+  await writer.getData();
+  return writer.totalBytesWritten;
+}
+
 // Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do rail_sync_blobs —
 // wywoływane raz na tick, zanim ten plik może zostać sparsowany. extracted=false, jeśli
 // pliku nie ma w zipie (dozwolone przez spec dla wszystkiego poza stop_times.txt).
@@ -539,15 +603,6 @@ class PostgresBlobWriter extends Writer<never> {
 // totalSize) — najważniejsze dla stop_times.txt, jedynego pliku na tyle dużego, żeby to
 // miało sens wizualnie.
 async function extractOneFile(sql: SqlClient, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
-  // useWebWorkers: false — realny dowód z Supabase Metrics: MAX CPU TIME 2265ms, tuż nad
-  // twardym limitem 2000ms CPU na jedno wywołanie (podczas gdy MAX EXECUTION TIME — czas
-  // ściany, licząc oczekiwanie — to tylko ~11s, więc to nie zawieszenie ani nie problem z
-  // pamięcią, tylko realny czas CPU dekompresji). zip.js domyślnie PRÓBUJE odpalić
-  // dekompresję w Web Workerze (useWebWorkers: true domyślnie) — w tym jednowątkowym,
-  // piaskownicowym środowisku Edge Function to niepotrzebne (i tak nic nie zrównolegla) i
-  // niepewne, ile faktycznie kosztuje/jak jest rozliczane. Wyłączenie trzyma dekompresję w
-  // tym samym kontekście wykonania, na natywnym DecompressionStream (useCompressionStream
-  // zostaje domyślnie włączone).
   const reader = new ZipReader(new PostgresBlobReader(sql, runId, SOURCE_ZIP), { useWebWorkers: false });
   try {
     const entries = await reader.getEntries();
@@ -564,10 +619,12 @@ async function extractOneFile(sql: SqlClient, runId: string, fileName: string): 
         compressedSize: entry.compressedSize,
         uncompressedSize: entry.uncompressedSize,
       });
+      const totalSize = await extractBigFileFast(sql, runId, entry);
+      await logRailSyncDebug(sql, "extract_getData_done", { runId, fileName, totalSize });
+      return { extracted: true, totalSize };
     }
     const writer = new PostgresBlobWriter(sql, runId, fileName);
     await entry.getData(writer, { useWebWorkers: false });
-    if (fileName === BIG_FILE) await logRailSyncDebug(sql, "extract_getData_done", { runId, fileName, totalSize: writer.totalBytesWritten });
     return { extracted: true, totalSize: writer.totalBytesWritten };
   } finally {
     await reader.close();
