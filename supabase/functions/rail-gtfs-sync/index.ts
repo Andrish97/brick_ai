@@ -551,6 +551,11 @@ const LOCAL_FILE_HEADER_SIZE = 30;
 const LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
 
 async function extractBigFileFast(sql: SqlClient, runId: string, entry: Entry): Promise<number> {
+  // TYMCZASOWE (zob. logRailSyncDebug): drugi fix (ten plik) też ginie w tym samym miejscu
+  // co pierwszy (zawsze do extract_entry_found, nigdy dalej) — więc coś W ŚRODKU tej
+  // funkcji utyka, nie tylko sama dekompresja zip.js. Znacznikowanie czasu każdego kroku,
+  // żeby zobaczyć KTÓRY konkretnie odczyt/zapis się wiesza, zamiast zgadywać dalej.
+  const t0 = Date.now();
   if (entry.offset === undefined || entry.compressedSize === undefined) {
     throw new Error(`entry_missing_offset_or_size: ${entry.filename}`);
   }
@@ -559,6 +564,7 @@ async function extractBigFileFast(sql: SqlClient, runId: string, entry: Entry): 
   }
   const header = await getBlobRange(sql, runId, SOURCE_ZIP, entry.offset, LOCAL_FILE_HEADER_SIZE);
   if (!header) throw new Error(`source_zip_missing run=${runId}`);
+  await logRailSyncDebug(sql, "fast_header_read", { runId, elapsedMs: Date.now() - t0 });
   const dv = new DataView(header.bytes.buffer, header.bytes.byteOffset, header.bytes.byteLength);
   const signature = dv.getUint32(0, true);
   if (signature !== LOCAL_FILE_HEADER_SIGNATURE) throw new Error(`bad_local_header_signature: 0x${signature.toString(16)}`);
@@ -568,9 +574,11 @@ async function extractBigFileFast(sql: SqlClient, runId: string, entry: Entry): 
 
   const compressedRange = await getBlobRange(sql, runId, SOURCE_ZIP, dataOffset, entry.compressedSize);
   if (!compressedRange) throw new Error(`source_zip_missing run=${runId}`);
+  await logRailSyncDebug(sql, "fast_compressed_read", { runId, elapsedMs: Date.now() - t0, bytesRead: compressedRange.bytes.length });
 
   const writer = new PostgresBlobWriter(sql, runId, BIG_FILE);
   await writer.init();
+  await logRailSyncDebug(sql, "fast_writer_init", { runId, elapsedMs: Date.now() - t0 });
 
   if (entry.compressionMethod === 0) {
     await writer.writeUint8Array(compressedRange.bytes);
@@ -585,14 +593,18 @@ async function extractBigFileFast(sql: SqlClient, runId: string, entry: Entry): 
       await dsWriter.close();
     })();
     const dsReader = ds.readable.getReader();
+    let readLoops = 0;
     while (true) {
       const { done, value } = await dsReader.read();
       if (done) break;
+      readLoops++;
       await writer.writeUint8Array(value);
     }
     await writeDone;
+    await logRailSyncDebug(sql, "fast_decompress_done", { runId, elapsedMs: Date.now() - t0, readLoops, bytesWritten: writer.totalBytesWritten });
   }
   await writer.getData();
+  await logRailSyncDebug(sql, "fast_writer_finalized", { runId, elapsedMs: Date.now() - t0, totalBytesWritten: writer.totalBytesWritten });
   return writer.totalBytesWritten;
 }
 
