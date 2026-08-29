@@ -2283,6 +2283,7 @@ function renderRailSyncStatus() {
         ${s.finished_at ? ` · zakończono: ${new Date(s.finished_at).toLocaleString('pl-PL')}` : ''}
         ${barHtml}
         ${renderRailFileChecklist(s)}
+        ${running && (s.consecutive_errors ?? 0) > 0 ? `<div style="color:var(--danger);margin-top:4px">błędów pod rząd: ${s.consecutive_errors}</div>` : ''}
         ${s.error ? `<div style="color:var(--danger);margin-top:4px">${escHtml(s.error)}</div>` : ''}
       </div>`
     : `<p style="color:var(--muted);font-size:13px">Brak jeszcze żadnej synchronizacji.</p>`;

@@ -332,6 +332,20 @@ async function logRailSync(sql: SqlClient, event: "started" | "finished" | "fail
   } catch { /* logowanie nie może wywrócić samego syncu */ }
 }
 
+// TYMCZASOWE, do usunięcia po zdiagnozowaniu: stop_times.txt (BIG_FILE) utyka od godzin
+// na current_offset = -1 mimo że CPU i pamięć wg Metrics są w normie po fixie
+// useWebWorkers, i mimo że rail_sync_runs.error NIGDY się dla niego nie wypełnia — co
+// wskazuje na PRZERWANIE izolatu przez platformę w trakcie ekstrakcji (kill omija
+// catch/finally, więc nic nie zdąży zapisać błędu ani zwolnić blokady), a nie na zwykły
+// zgłoszony wyjątek. Bezwarunkowe (NIE tylko isAutomatic) logi krok-po-kroku wokół
+// ekstrakcji dużego pliku pokażą, gdzie dokładnie proces się urywa — dopóki nie widać
+// "extract_getData_done", coś między poprzednim krokiem a nim zabija wywołanie.
+async function logRailSyncDebug(sql: SqlClient, step: string, data: Record<string, unknown> = {}): Promise<void> {
+  try {
+    await sql`insert into logs (type, data) values ('rail_sync_debug', ${sql.json({ step, ...data })})`;
+  } catch { /* logowanie nie może wywrócić samego syncu */ }
+}
+
 // --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do bazy ---
 async function handleStart(isAutomatic: boolean): Promise<Response> {
   const sql = getSql();
@@ -537,13 +551,23 @@ async function extractOneFile(sql: SqlClient, runId: string, fileName: string): 
   const reader = new ZipReader(new PostgresBlobReader(sql, runId, SOURCE_ZIP), { useWebWorkers: false });
   try {
     const entries = await reader.getEntries();
+    if (fileName === BIG_FILE) await logRailSyncDebug(sql, "extract_entries_listed", { runId, entryCount: entries.length });
     const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
     if (!entry || entry.directory) {
       if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
       return { extracted: false, totalSize: 0 };
     }
+    if (fileName === BIG_FILE) {
+      await logRailSyncDebug(sql, "extract_entry_found", {
+        runId,
+        fileName,
+        compressedSize: entry.compressedSize,
+        uncompressedSize: entry.uncompressedSize,
+      });
+    }
     const writer = new PostgresBlobWriter(sql, runId, fileName);
     await entry.getData(writer, { useWebWorkers: false });
+    if (fileName === BIG_FILE) await logRailSyncDebug(sql, "extract_getData_done", { runId, fileName, totalSize: writer.totalBytesWritten });
     return { extracted: true, totalSize: writer.totalBytesWritten };
   } finally {
     await reader.close();
@@ -564,6 +588,9 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
     }[]>`select id, current_file, current_offset, current_header, current_total_bytes from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
     if (!run) { return json({ ok: true, skipped: "nothing_running" }); }
     if (!run.current_file) { return json({ ok: true, skipped: "no_current_file" }); }
+    if (run.current_file === BIG_FILE) {
+      await logRailSyncDebug(sql, "tick_enter", { runId: run.id, currentOffset: run.current_offset });
+    }
 
     // current_file === SOURCE_ZIP: sam zip jeszcze się pobiera, kawałek po kawałku przez
     // Range (zob. downloadOneChunk) — dopiero po zakończeniu current_file przechodzi na
@@ -586,6 +613,7 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
     // następnego ticku) — trzyma dekompresję jednego pliku w osobnym, lekkim wywołaniu,
     // zamiast robić to dla wszystkich 6 plików naraz.
     if (run.current_offset === -1) {
+      if (fileName === BIG_FILE) await logRailSyncDebug(sql, "extract_call_start", { runId: run.id, fileName });
       const { extracted, totalSize } = await extractOneFile(sql, run.id, fileName);
       // -2: potwierdzone PRZY EKSTRAKCJI, że pliku nie było w zipie (dozwolone przez spec
       // GTFS dla wszystkiego poza stop_times.txt). Odróżnione od 0 ("wyodrębniony,
