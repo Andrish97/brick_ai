@@ -505,6 +505,7 @@ let _webhooksCache = [];
 let logFilterType = 'all';
 let logSortCol = 'created_at';
 let logSortDir = 'desc';
+let logViewMode = 'compact'; // 'compact' (skrócone + rozwijanie) | 'full' (pełna treść od razu)
 
 // ══════════════════════════════════════════════════════
 //  CONFIG
@@ -658,6 +659,50 @@ function escHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function showJsonModal(obj) {
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:12px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0';
+  pre.textContent = JSON.stringify(obj, null, 2);
+  const body = document.createElement('div');
+  body.style.padding = '0 24px 20px';
+  body.appendChild(pre);
+
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'uni-overlay';
+    const modalEl = document.createElement('div');
+    modalEl.className = 'uni-modal';
+    modalEl.style.width = '600px';
+    modalEl.setAttribute('role', 'dialog');
+    modalEl.setAttribute('aria-modal', 'true');
+    modalEl.innerHTML = `
+      <div class="uni-head" style="margin-bottom:12px">
+        <div class="uni-title">Szczegóły</div>
+        <button class="uni-close" type="button" aria-label="Zamknij">✕</button>
+      </div>
+    `;
+    modalEl.appendChild(body);
+    const foot = document.createElement('div');
+    foot.className = 'uni-foot';
+    foot.innerHTML = '<button class="btn btn-primary" type="button" data-action="ok">Zamknij</button>';
+    modalEl.appendChild(foot);
+    overlay.appendChild(modalEl);
+
+    let done = false;
+    const finish = () => { if (done) return; done = true; overlay.remove(); document.removeEventListener('keydown', onKey, true); resolve(); };
+    const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); finish(); } };
+    overlay.addEventListener('click', e => { if (e.target === overlay) finish(); });
+    foot.querySelector('[data-action="ok"]').addEventListener('click', finish);
+    modalEl.querySelector('.uni-close').addEventListener('click', finish);
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+  });
+}
+
+function showJsonFromRow(el) {
+  showJsonModal(JSON.parse(el.dataset.json));
 }
 
 async function getSession() {
@@ -2764,14 +2809,21 @@ function renderLogsContent() {
 
   const rows = filtered.map(l => {
     const style = LOG_TYPE_STYLE[l.type] || { label: l.type, cls: 'badge-yellow' };
-    const jsonStr = escHtml(JSON.stringify(l.data || {}, null, 2));
+    const dataCell = logViewMode === 'full'
+      ? `<pre style="font-family:monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;margin:0;user-select:text;cursor:text">${escHtml(JSON.stringify(l.data || {}, null, 2))}</pre>`
+      : (() => {
+          const preview = JSON.stringify(l.data || {}).slice(0, 120);
+          const jsonAttr = escHtml(JSON.stringify(l.data || {}));
+          return `<span style="font-family:monospace;font-size:11px;cursor:pointer;color:var(--accent2)"
+              data-json='${jsonAttr}'
+              onclick="showJsonFromRow(this)"
+            >${escHtml(preview)}${preview.length >= 120 ? '…' : ''}</span>`;
+        })();
     return `
       <tr>
         <td style="white-space:nowrap;vertical-align:top">${fmtDate(l.created_at)}</td>
         <td style="white-space:nowrap;vertical-align:top"><span class="badge ${style.cls}">${escHtml(style.label)}</span></td>
-        <td>
-          <pre style="font-family:monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;margin:0;user-select:text;cursor:text">${jsonStr}</pre>
-        </td>
+        <td>${dataCell}</td>
       </tr>
     `;
   }).join('');
@@ -2779,13 +2831,17 @@ function renderLogsContent() {
   document.getElementById('content').innerHTML = `
     <div class="page-header">
       <h1>Logi</h1>
-      <p>Ostatnie 200 zdarzeń systemowych + 100 raw webhooków — kliknij wiersz, aby zobaczyć szczegóły</p>
+      <p>Ostatnie 200 zdarzeń systemowych + 100 raw webhooków${logViewMode === 'full' ? '' : ' — kliknij wiersz, aby zobaczyć szczegóły'}</p>
     </div>
     <div class="section-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
-        <div style="display:flex;align-items:center;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <h2 style="font-size:14px;margin:0">Wszystkie zdarzenia</h2>
           <div style="width:200px">${uiSelectHtml('log-filter', types.map(t => ({ value: t, label: t === 'all' ? 'Wszystkie typy' : (LOG_TYPE_STYLE[t]?.label || t) })), { value: logFilterType })}</div>
+          <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+            <button class="btn ${logViewMode === 'compact' ? 'btn-primary' : 'btn-ghost'} btn-sm" style="border-radius:0" onclick="applyLogsViewMode('compact')">Skrócone logi</button>
+            <button class="btn ${logViewMode === 'full' ? 'btn-primary' : 'btn-ghost'} btn-sm" style="border-radius:0" onclick="applyLogsViewMode('full')">Pełne logi</button>
+          </div>
         </div>
         <button class="btn btn-danger btn-sm" onclick="clearAllLogs()">🗑 Wyczyść wszystko</button>
       </div>
@@ -2851,6 +2907,11 @@ function renderLogsContent() {
 
 function applyLogsFilter(type) {
   logFilterType = type;
+  renderLogsContent();
+}
+
+function applyLogsViewMode(mode) {
+  logViewMode = mode;
   renderLogsContent();
 }
 
