@@ -911,7 +911,10 @@ async function tryPlanTrainJourneyLocal(
   url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string,
 ): Promise<CsaResult | null> {
   try {
-    if (!(await hasFreshLocalData(url, key))) return null;
+    if (!(await hasFreshLocalData(url, key))) {
+      log("rail_local_skip", { reason: "no_fresh_local_data" });
+      return null;
+    }
 
     const fromResolved = resolveStationPoint(fromArg, user);
     const toResolved = resolveStationPoint(toArg, user);
@@ -921,14 +924,28 @@ async function tryPlanTrainJourneyLocal(
       resolveSingleStationLocal(url, key, fromResolved.query),
       resolveSingleStationLocal(url, key, toResolved.query),
     ]);
-    if (!fromLookup.ok || !toLookup.ok) return null;
+    if (!fromLookup.ok || !toLookup.ok) {
+      log("rail_local_skip", {
+        reason: "station_not_resolved_locally",
+        from: fromResolved.query, to: toResolved.query,
+        fromBody: fromLookup.ok ? undefined : fromLookup.body,
+        toBody: toLookup.ok ? undefined : toLookup.body,
+      });
+      return null;
+    }
 
     const date = dateArg || todayDateStr();
     const isToday = date === todayDateStr();
     const startSeconds = isToday ? (warsawNow().getHours() * 3600 + warsawNow().getMinutes() * 60) : 0;
 
     const result = await runCsaJourney(url, key, fromLookup.station, toLookup.station, date, startSeconds);
-    if (!result) return null;
+    if (!result) {
+      log("rail_local_skip", {
+        reason: "csa_found_nothing",
+        from: fromLookup.station.name, to: toLookup.station.name, date, startSeconds,
+      });
+      return null;
+    }
 
     if (isNearTermDate(date)) {
       const verified = await verifyFirstLegLive(result.legs[0], date);
