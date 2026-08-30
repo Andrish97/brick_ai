@@ -346,18 +346,6 @@ async function logRailSync(sql: SqlClient, event: "started" | "finished" | "fail
   } catch { /* logowanie nie może wywrócić samego syncu */ }
 }
 
-// Bezwarunkowe (NIE tylko isAutomatic) logi krok-po-kroku, głównie wokół ekstrakcji
-// stop_times.txt — to właśnie te logi (rodzaj "extract_entry_found" bez nigdy
-// następującego po nim kroku końcowego) ujawniły prawdziwą przyczynę wielogodzinnego
-// utykania: koszt hex-transferu dużych bytea przez postgres.js, nie kill izolatu ani sama
-// dekompresja — zob. duży komentarz przy extractBigFileChunk. Zostawione jako stały,
-// tani sposób na dalszą widoczność tej ścieżki, nie tylko na czas diagnozy.
-async function logRailSyncDebug(sql: SqlClient, step: string, data: Record<string, unknown> = {}): Promise<void> {
-  try {
-    await sql`insert into logs (type, data) values ('rail_sync_debug', ${sql.json({ step, ...data })})`;
-  } catch { /* logowanie nie może wywrócić samego syncu */ }
-}
-
 // --- Etap A: "start" — pobierz surowy zip (bez rozpakowywania!) i odłóż do bazy ---
 async function handleStart(isAutomatic: boolean): Promise<Response> {
   const sql = getSql();
@@ -600,10 +588,6 @@ async function extractBigFileChunk(
   runId: string,
   bytesWrittenSoFar: number,
 ): Promise<{ done: boolean; bytesWritten: number; totalSize: number }> {
-  // Tymczasowe (na razie) logowanie: ta ścieżka (fetch bezpośrednio z feedu zamiast z
-  // Postgresa) jeszcze nigdy nie działała na prawdziwej produkcji — dwie poprzednie próby
-  // naprawy okazały się błędne mimo lokalnych testów, więc zakładam nic bez potwierdzenia.
-  const t0 = Date.now();
   const entry = await findBigFileEntry(sql, runId);
   const offset = entry.offset!;
   const compressedSize = entry.compressedSize!;
@@ -628,7 +612,6 @@ async function extractBigFileChunk(
   if (compressed.length !== compressedSize) {
     throw new Error(`compressed_range_short: got ${compressed.length}, expected ${compressedSize}`);
   }
-  const tFetch = Date.now() - t0;
 
   let decompressed: Uint8Array;
   if (entry.compressionMethod === 0) {
@@ -660,7 +643,6 @@ async function extractBigFileChunk(
   if (decompressed.length !== uncompressedSize) {
     throw new Error(`decompressed_size_mismatch: got ${decompressed.length}, expected ${uncompressedSize}`);
   }
-  const tDecompress = Date.now() - t0 - tFetch;
 
   const chunkEnd = Math.min(bytesWrittenSoFar + BIG_FILE_EXTRACT_CHUNK_BYTES, decompressed.length);
   const slice = decompressed.subarray(bytesWrittenSoFar, chunkEnd);
@@ -677,10 +659,6 @@ async function extractBigFileChunk(
 
   const done = chunkEnd >= decompressed.length;
   if (done) await reassembleChunks(sql, runId, BIG_FILE, tmpPrefix);
-  await logRailSyncDebug(sql, "extract_chunk_progress", {
-    runId, bytesWritten: chunkEnd, totalSize: uncompressedSize, done,
-    elapsedMs: Date.now() - t0, tFetchMs: tFetch, tDecompressMs: tDecompress,
-  });
   return { done, bytesWritten: chunkEnd, totalSize: uncompressedSize };
 }
 
