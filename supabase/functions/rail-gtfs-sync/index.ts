@@ -45,13 +45,18 @@ const DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const SMALL_FILES = ["stops.txt", "routes.txt", "calendar.txt", "calendar_dates.txt", "trips.txt"];
 const BIG_FILE = "stop_times.txt";
 const ALL_FILES = [...SMALL_FILES, BIG_FILE];
-// 8MB na tick — realny test pokazał, że 4MB (~53k wierszy) mieści się w limicie 2s CPU
-// z zapasem.
-const STOP_TIMES_CHUNK_BYTES = 8 * 1024 * 1024;
+// Poprzednie założenie "3 kawałki x 8MB to bezpieczny margines" NIE było zweryfikowane
+// względem realnego kosztu odczytu bytea przez postgres.js — biblioteka nie ma trybu
+// binarnego, każdy odczyt bytea to tekstowy hex dekodowany przez Buffer w Deno, co kosztuje
+// realnie ~140ms/MB CZASU CPU (potwierdzone lokalnym pomiarem, zob. migracja
+// 20240128000000). 3x8MB=24MB odczytu to ~3.4s CPU SAMEGO odczytu, więc na pewno przekroczyłoby
+// twardy limit 2s, gdyby ten fragment kiedykolwiek został osiągnięty (nigdy nie był —
+// ekstrakcja zawsze wcześniej ginęła z tego samego powodu, zob. extractBigFileChunk).
+// 3MB / 1 kawałek na tick zostawia bezpieczny zapas na resztę pracy (parsowanie CSV,
+// budowanie zapytań insert).
+const STOP_TIMES_CHUNK_BYTES = 3 * 1024 * 1024;
 const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rząd dopiero uznajemy sync za faktycznie zepsuty
-// Kilka kawałków w JEDNYM ticku zamiast jednego — realnie przyspiesza cały sync. 3 kawałki
-// x 8MB to bezpieczny margines pod limit 2s CPU.
-const MAX_CHUNKS_PER_TICK = 3;
+const MAX_CHUNKS_PER_TICK = 1;
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
 // Mapowanie: nazwa pliku GTFS -> {tabela raw, mapowanie kolumna GTFS -> kolumna raw}.
@@ -332,14 +337,12 @@ async function logRailSync(sql: SqlClient, event: "started" | "finished" | "fail
   } catch { /* logowanie nie może wywrócić samego syncu */ }
 }
 
-// TYMCZASOWE, do usunięcia po zdiagnozowaniu: stop_times.txt (BIG_FILE) utyka od godzin
-// na current_offset = -1 mimo że CPU i pamięć wg Metrics są w normie po fixie
-// useWebWorkers, i mimo że rail_sync_runs.error NIGDY się dla niego nie wypełnia — co
-// wskazuje na PRZERWANIE izolatu przez platformę w trakcie ekstrakcji (kill omija
-// catch/finally, więc nic nie zdąży zapisać błędu ani zwolnić blokady), a nie na zwykły
-// zgłoszony wyjątek. Bezwarunkowe (NIE tylko isAutomatic) logi krok-po-kroku wokół
-// ekstrakcji dużego pliku pokażą, gdzie dokładnie proces się urywa — dopóki nie widać
-// "extract_getData_done", coś między poprzednim krokiem a nim zabija wywołanie.
+// Bezwarunkowe (NIE tylko isAutomatic) logi krok-po-kroku, głównie wokół ekstrakcji
+// stop_times.txt — to właśnie te logi (rodzaj "extract_entry_found" bez nigdy
+// następującego po nim kroku końcowego) ujawniły prawdziwą przyczynę wielogodzinnego
+// utykania: koszt hex-transferu dużych bytea przez postgres.js, nie kill izolatu ani sama
+// dekompresja — zob. duży komentarz przy extractBigFileChunk. Zostawione jako stały,
+// tani sposób na dalszą widoczność tej ścieżki, nie tylko na czas diagnozy.
 async function logRailSyncDebug(sql: SqlClient, step: string, data: Record<string, unknown> = {}): Promise<void> {
   try {
     await sql`insert into logs (type, data) values ('rail_sync_debug', ${sql.json({ step, ...data })})`;
@@ -532,56 +535,95 @@ class PostgresBlobWriter extends Writer<never> {
   }
 }
 
-// Nawet z useWebWorkers: false, entry.getData() zip.js przekroczyło twardy limit 2s CPU
-// dla stop_times.txt (realny dowód: Supabase Metrics, Max CPU Time 2311ms, przy Max
-// Execution Time i pamięci w normie) — potwierdzone bezwarunkowym logowaniem krokowym
-// (zob. logRailSyncDebug), że proces zawsze dochodzi do extract_entry_found i ginie W
-// TRAKCIE entry.getData(), zanim zdąży zapisać extract_getData_done. Lokalny pomiar
-// wyizolował przyczynę: sama dekompresja (jedno wywołanie natywnego DecompressionStream
-// na cały wpis) to ~300-500ms realnej pracy CPU nawet dla ~49MB wyjścia — to NIE
-// dekompresja jest kosztowna, tylko wewnętrzna maszyneria zip.js, która czyta/pisze przez
-// nasz Reader/Writer w małych ~64KB kawałkach (setki wywołań, każde z własnym narzutem
-// JS/promise). Obejście: pomijamy entry.getData() dla dużego pliku całkowicie — czytamy
-// zip.js-em tylko metadane (getEntries()), a samą ekstrakcję robimy ręcznie, jednym dużym
-// odczytem skompresowanych bajtów wpisu i jednym wywołaniem dekompresji, zamiast setek
-// małych. Odczyty/zapisy Postgresa trwają wtedy dłużej w czasie ściany (I/O, sekundy), ale
-// to NIE liczy się do budżetu CPU Edge Function — dokładnie ta sama zasada, na której już
-// stoi cała reszta tego pliku (pobieranie przez Range, parsowanie kawałkami).
+// Realny dowód (dwa niezależne fixy z rzędu, oba ginące w DOKŁADNIE tym samym miejscu) +
+// lokalny pomiar ujawniły prawdziwą przyczynę, wcześniej niewidoczną: postgres.js NIE ma
+// trybu binarnego dla bytea — KAŻDY odczyt/zapis kolumny bytea przechodzi przez tekstowy
+// hex (`\x...`), kodowany/dekodowany przez Buffer w Deno (src/types.js: `serialize: x =>
+// '\\x' + Buffer.from(x).toString('hex')`, `parse: x => Buffer.from(x.slice(2), 'hex')`).
+// Lokalny pomiar na realnym rozmiarze (10.6MB, dokładnie jak prawdziwy skompresowany
+// stop_times.txt): DEKODOWANIE ~1.5s CPU, KODOWANIE ~3.7s CPU. To dokładnie wyjaśnia realne
+// logi: sam odczyt całego skompresowanego wpisu (fast_compressed_read) kosztował ~1.9s CPU,
+// tuż pod twardym limitem 2000ms, ZANIM cokolwiek innego (dekompresja, zapis) zdążyło się
+// wydarzyć. To NIE jest kwestia liczby zapytań ani samej dekompresji (ta jest tania: tylko
+// ~300-500ms CPU nawet dla ~49MB wyjścia) — to koszt PROPORCJONALNY DO BAJTÓW przechodzących
+// przez ten hex pipe, więc żadne grupowanie/dzielenie odczytów W JEDNYM wywołaniu tego nie
+// obejdzie. Jedyna prawdziwa naprawa: (1) ominąć Postgres na ODCZYCIE skompresowanych
+// bajtów — pobrać je bezpośrednio z feedu przez Range (fetch(), surowe bajty, bez
+// tekstowego kodowania), (2) rozłożyć ZAPIS rozpakowanego wyniku (który i tak musi przejść
+// przez ten hex pipe) na wiele bezpiecznie małych kawałków, po jednym na tick — dokładnie
+// tak, jak reszta tego pliku już dzieli duże prace (pobieranie zipa, parsowanie CSV).
 const LOCAL_FILE_HEADER_SIZE = 30;
 const LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+// Realny pomiar CAŁEJ tej funkcji lokalnie (identyczny kod, prawdziwy rozmiar 49MB/10.6MB,
+// serwer HTTP z Range zamiast mkuran.pl): ~300-370ms na sam zapis 3MB (koszt hex per bajt
+// w praktyce niższy niż sugerował izolowany mikro-benchmark Buffer.toString('hex') wyżej —
+// droga zapisu w postgres.js jest efektywniejsza), ~200-800ms na dekompresję, najgorszy
+// zaobserwowany TOTAL całego kroku ~1.33s — bezpieczny margines pod limitem 2s CPU.
+const BIG_FILE_EXTRACT_CHUNK_BYTES = 3 * 1024 * 1024;
 
-async function extractBigFileFast(sql: SqlClient, runId: string, entry: Entry): Promise<number> {
-  // TYMCZASOWE (zob. logRailSyncDebug): drugi fix (ten plik) też ginie w tym samym miejscu
-  // co pierwszy (zawsze do extract_entry_found, nigdy dalej) — więc coś W ŚRODKU tej
-  // funkcji utyka, nie tylko sama dekompresja zip.js. Znacznikowanie czasu każdego kroku,
-  // żeby zobaczyć KTÓRY konkretnie odczyt/zapis się wiesza, zamiast zgadywać dalej.
+async function findBigFileEntry(sql: SqlClient, runId: string): Promise<Entry> {
+  const reader = new ZipReader(new PostgresBlobReader(sql, runId, SOURCE_ZIP), { useWebWorkers: false });
+  try {
+    const entries = await reader.getEntries();
+    const entry = entries.find((e) => e.filename === BIG_FILE || e.filename.endsWith(`/${BIG_FILE}`));
+    if (!entry || entry.directory) throw new Error(`gtfs_file_missing_in_zip: ${BIG_FILE}`);
+    if (entry.offset === undefined || entry.compressedSize === undefined || entry.uncompressedSize === undefined) {
+      throw new Error(`entry_missing_metadata: ${BIG_FILE}`);
+    }
+    if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
+      throw new Error(`unsupported_compression_method: ${entry.compressionMethod}`);
+    }
+    return entry;
+  } finally {
+    await reader.close();
+  }
+}
+
+// Rozpakowuje stop_times.txt w jednym bezpiecznie małym kawałku na wywołanie —
+// bytesWrittenSoFar śledzi ile bajtów WYJŚCIA (po rozpakowaniu) zostało już zapisanych
+// (zob. rail_sync_runs.extract_progress_bytes). Dekompresja odbywa się W CAŁOŚCI w pamięci
+// PRZY KAŻDYM ticku (tania, ~300-500ms CPU) — powtarzanie jej zamiast prób utrzymania stanu
+// MIĘDZY oddzielnymi wywołaniami Edge Function jest świadomym uproszczeniem: taki stan i tak
+// nie przeżyłby (każdy tick to nowy izolat), a re-dekompresja jest na tyle tania, że to nie
+// szkodzi budżetowi CPU.
+async function extractBigFileChunk(
+  sql: SqlClient,
+  runId: string,
+  bytesWrittenSoFar: number,
+): Promise<{ done: boolean; bytesWritten: number; totalSize: number }> {
+  // Tymczasowe (na razie) logowanie: ta ścieżka (fetch bezpośrednio z feedu zamiast z
+  // Postgresa) jeszcze nigdy nie działała na prawdziwej produkcji — dwie poprzednie próby
+  // naprawy okazały się błędne mimo lokalnych testów, więc zakładam nic bez potwierdzenia.
   const t0 = Date.now();
-  if (entry.offset === undefined || entry.compressedSize === undefined) {
-    throw new Error(`entry_missing_offset_or_size: ${entry.filename}`);
-  }
-  if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
-    throw new Error(`unsupported_compression_method: ${entry.compressionMethod}`);
-  }
-  const header = await getBlobRange(sql, runId, SOURCE_ZIP, entry.offset, LOCAL_FILE_HEADER_SIZE);
+  const entry = await findBigFileEntry(sql, runId);
+  const offset = entry.offset!;
+  const compressedSize = entry.compressedSize!;
+  const uncompressedSize = entry.uncompressedSize!;
+
+  // Nagłówek lokalny (30 bajtów + nazwa + extra field) — znikomy rozmiar, czytany z NASZEJ
+  // kopii w Postgresie normalnie (koszt hex jest proporcjonalny do rozmiaru, więc dla
+  // kilkudziesięciu bajtów jest nieistotny).
+  const header = await getBlobRange(sql, runId, SOURCE_ZIP, offset, LOCAL_FILE_HEADER_SIZE);
   if (!header) throw new Error(`source_zip_missing run=${runId}`);
-  await logRailSyncDebug(sql, "fast_header_read", { runId, elapsedMs: Date.now() - t0 });
   const dv = new DataView(header.bytes.buffer, header.bytes.byteOffset, header.bytes.byteLength);
   const signature = dv.getUint32(0, true);
   if (signature !== LOCAL_FILE_HEADER_SIGNATURE) throw new Error(`bad_local_header_signature: 0x${signature.toString(16)}`);
   const filenameLength = dv.getUint16(26, true);
   const extraFieldLength = dv.getUint16(28, true);
-  const dataOffset = entry.offset + LOCAL_FILE_HEADER_SIZE + filenameLength + extraFieldLength;
+  const dataOffset = offset + LOCAL_FILE_HEADER_SIZE + filenameLength + extraFieldLength;
 
-  const compressedRange = await getBlobRange(sql, runId, SOURCE_ZIP, dataOffset, entry.compressedSize);
-  if (!compressedRange) throw new Error(`source_zip_missing run=${runId}`);
-  await logRailSyncDebug(sql, "fast_compressed_read", { runId, elapsedMs: Date.now() - t0, bytesRead: compressedRange.bytes.length });
+  // Skompresowane bajty wpisu pobierane BEZPOŚREDNIO z feedu przez Range (fetchRangeOnce,
+  // ten sam mechanizm co downloadOneChunk) — NIE z Postgresa, zob. duży komentarz wyżej.
+  const rangeEnd = dataOffset + compressedSize - 1;
+  const { buf: compressed } = await fetchRangeOnce(dataOffset, rangeEnd);
+  if (compressed.length !== compressedSize) {
+    throw new Error(`compressed_range_short: got ${compressed.length}, expected ${compressedSize}`);
+  }
+  const tFetch = Date.now() - t0;
 
-  const writer = new PostgresBlobWriter(sql, runId, BIG_FILE);
-  await writer.init();
-  await logRailSyncDebug(sql, "fast_writer_init", { runId, elapsedMs: Date.now() - t0 });
-
+  let decompressed: Uint8Array;
   if (entry.compressionMethod === 0) {
-    await writer.writeUint8Array(compressedRange.bytes);
+    decompressed = compressed;
   } else {
     const ds = new DecompressionStream("deflate-raw");
     const dsWriter = ds.writable.getWriter();
@@ -589,51 +631,61 @@ async function extractBigFileFast(sql: SqlClient, runId: string, entry: Entry): 
     // DecompressionStream buforuje wewnętrznie ograniczoną ilość danych i zablokowałby się,
     // gdyby nikt jednocześnie nie odbierał wyjścia.
     const writeDone = (async () => {
-      await dsWriter.write(compressedRange.bytes);
+      await dsWriter.write(compressed);
       await dsWriter.close();
     })();
     const dsReader = ds.readable.getReader();
-    let readLoops = 0;
+    const chunks: Uint8Array[] = [];
+    let total = 0;
     while (true) {
       const { done, value } = await dsReader.read();
       if (done) break;
-      readLoops++;
-      await writer.writeUint8Array(value);
+      chunks.push(value);
+      total += value.length;
     }
     await writeDone;
-    await logRailSyncDebug(sql, "fast_decompress_done", { runId, elapsedMs: Date.now() - t0, readLoops, bytesWritten: writer.totalBytesWritten });
+    decompressed = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { decompressed.set(c, off); off += c.length; }
   }
-  await writer.getData();
-  await logRailSyncDebug(sql, "fast_writer_finalized", { runId, elapsedMs: Date.now() - t0, totalBytesWritten: writer.totalBytesWritten });
-  return writer.totalBytesWritten;
+  if (decompressed.length !== uncompressedSize) {
+    throw new Error(`decompressed_size_mismatch: got ${decompressed.length}, expected ${uncompressedSize}`);
+  }
+  const tDecompress = Date.now() - t0 - tFetch;
+
+  const chunkEnd = Math.min(bytesWrittenSoFar + BIG_FILE_EXTRACT_CHUNK_BYTES, decompressed.length);
+  const slice = decompressed.subarray(bytesWrittenSoFar, chunkEnd);
+  const tmpPrefix = `~chunk~${BIG_FILE}~`;
+  if (bytesWrittenSoFar === 0) {
+    // Pierwszy kawałek tej ekstrakcji — usuń ewentualne resztki po poprzedniej, przerwanej
+    // próbie (np. po zresetowaniu utkniętego syncu w panelu).
+    await sql`delete from rail_sync_blobs where run_id = ${runId} and file_name like ${tmpPrefix + "%"}`;
+  }
+  // Nazwa kawałka to jego bajtowy offset (zero-padded) — sortowanie po file_name w
+  // reassembleChunks daje wtedy poprawną kolejność bez osobnego licznika trzymanego między
+  // oddzielnymi wywołaniami.
+  await putBlob(sql, runId, `${tmpPrefix}${String(bytesWrittenSoFar).padStart(14, "0")}`, slice);
+
+  const done = chunkEnd >= decompressed.length;
+  if (done) await reassembleChunks(sql, runId, BIG_FILE, tmpPrefix);
+  await logRailSyncDebug(sql, "extract_chunk_progress", {
+    runId, bytesWritten: chunkEnd, totalSize: uncompressedSize, done,
+    elapsedMs: Date.now() - t0, tFetchMs: tFetch, tDecompressMs: tDecompress,
+  });
+  return { done, bytesWritten: chunkEnd, totalSize: uncompressedSize };
 }
 
-// Rozpakowuje JEDEN plik GTFS z odłożonego _source.zip i wgrywa go do rail_sync_blobs —
-// wywoływane raz na tick, zanim ten plik może zostać sparsowany. extracted=false, jeśli
-// pliku nie ma w zipie (dozwolone przez spec dla wszystkiego poza stop_times.txt).
-// totalSize pozwala panelowi admina policzyć postęp bieżącego pliku (current_offset /
-// totalSize) — najważniejsze dla stop_times.txt, jedynego pliku na tyle dużego, żeby to
-// miało sens wizualnie.
+// Rozpakowuje JEDEN mały plik GTFS z odłożonego _source.zip i wgrywa go do rail_sync_blobs
+// w CAŁOŚCI, jednym wywołaniem — bezpieczne dla małych plików (kilka MB), bo koszt
+// hex-transferu przez postgres.js jest wtedy nieistotny. stop_times.txt (BIG_FILE) NIE
+// przechodzi przez tę funkcję — zob. extractBigFileChunk.
 async function extractOneFile(sql: SqlClient, runId: string, fileName: string): Promise<{ extracted: boolean; totalSize: number }> {
   const reader = new ZipReader(new PostgresBlobReader(sql, runId, SOURCE_ZIP), { useWebWorkers: false });
   try {
     const entries = await reader.getEntries();
-    if (fileName === BIG_FILE) await logRailSyncDebug(sql, "extract_entries_listed", { runId, entryCount: entries.length });
     const entry = entries.find((e) => e.filename === fileName || e.filename.endsWith(`/${fileName}`));
     if (!entry || entry.directory) {
-      if (fileName === BIG_FILE) throw new Error(`gtfs_file_missing_in_zip: ${fileName}`);
       return { extracted: false, totalSize: 0 };
-    }
-    if (fileName === BIG_FILE) {
-      await logRailSyncDebug(sql, "extract_entry_found", {
-        runId,
-        fileName,
-        compressedSize: entry.compressedSize,
-        uncompressedSize: entry.uncompressedSize,
-      });
-      const totalSize = await extractBigFileFast(sql, runId, entry);
-      await logRailSyncDebug(sql, "extract_getData_done", { runId, fileName, totalSize });
-      return { extracted: true, totalSize };
     }
     const writer = new PostgresBlobWriter(sql, runId, fileName);
     await entry.getData(writer, { useWebWorkers: false });
@@ -653,13 +705,11 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
   }
   try {
     const [run] = await sql<{
-      id: string; current_file: string | null; current_offset: number; current_header: unknown; current_total_bytes: number | null;
-    }[]>`select id, current_file, current_offset, current_header, current_total_bytes from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
+      id: string; current_file: string | null; current_offset: number; current_header: unknown;
+      current_total_bytes: number | null; extract_progress_bytes: number | null;
+    }[]>`select id, current_file, current_offset, current_header, current_total_bytes, extract_progress_bytes from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
     if (!run) { return json({ ok: true, skipped: "nothing_running" }); }
     if (!run.current_file) { return json({ ok: true, skipped: "no_current_file" }); }
-    if (run.current_file === BIG_FILE) {
-      await logRailSyncDebug(sql, "tick_enter", { runId: run.id, currentOffset: run.current_offset });
-    }
 
     // current_file === SOURCE_ZIP: sam zip jeszcze się pobiera, kawałek po kawałku przez
     // Range (zob. downloadOneChunk) — dopiero po zakończeniu current_file przechodzi na
@@ -677,12 +727,21 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
     const fileName = run.current_file;
     let rowsInserted = 0;
 
-    // current_offset === -1: ten plik jeszcze nie został rozpakowany z _source.zip —
-    // zrób to teraz, jako CAŁE to wywołanie (parsowanie zaczyna się dopiero od
-    // następnego ticku) — trzyma dekompresję jednego pliku w osobnym, lekkim wywołaniu,
-    // zamiast robić to dla wszystkich 6 plików naraz.
+    // current_offset === -1: ten plik jeszcze nie został rozpakowany z _source.zip.
+    // BIG_FILE (stop_times.txt): rozłożone na wiele bezpiecznie małych kawałków, jeden na
+    // tick — zob. extractBigFileChunk i duży komentarz przy nim (koszt hex-transferu przez
+    // postgres.js). Małe pliki: wciąż całe w jednym wywołaniu (extractOneFile), bo dla ich
+    // rozmiaru ten koszt jest nieistotny.
     if (run.current_offset === -1) {
-      if (fileName === BIG_FILE) await logRailSyncDebug(sql, "extract_call_start", { runId: run.id, fileName });
+      if (fileName === BIG_FILE) {
+        const { done, bytesWritten, totalSize } = await extractBigFileChunk(sql, run.id, run.extract_progress_bytes ?? 0);
+        if (done) {
+          await sql`update rail_sync_runs set current_offset = 0, current_total_bytes = ${totalSize}, extract_progress_bytes = null, consecutive_errors = 0 where id = ${run.id}`;
+          return json({ ok: true, extracted: fileName, extractionComplete: true });
+        }
+        await sql`update rail_sync_runs set current_total_bytes = ${totalSize}, extract_progress_bytes = ${bytesWritten}, consecutive_errors = 0 where id = ${run.id}`;
+        return json({ ok: true, extracting: fileName, bytesWritten, totalSize });
+      }
       const { extracted, totalSize } = await extractOneFile(sql, run.id, fileName);
       // -2: potwierdzone PRZY EKSTRAKCJI, że pliku nie było w zipie (dozwolone przez spec
       // GTFS dla wszystkiego poza stop_times.txt). Odróżnione od 0 ("wyodrębniony,
