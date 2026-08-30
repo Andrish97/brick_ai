@@ -888,6 +888,19 @@ function getSql() {
   return postgres(dbUrl, {
     prepare: false,
     max: 1,
+    // Realny błąd na produkcji: "canceling statement due to statement timeout" w
+    // rail_gtfs_transform() przy prawdziwej skali (~600k wierszy), MIMO że po fixie
+    // (window function zamiast skorelowanego podzapytania — zob. migracja 20240129)
+    // cała transformacja lokalnie trwa ~48s. Wniosek: jakiś statement_timeout ustawiony na
+    // tym połączeniu (rola/pooler, nie sam kod tej funkcji) jest krótszy niż potrzeba —
+    // ustawiamy go tutaj jawnie, na poziomie połączenia (parametr startowy sesji Postgres,
+    // NIE `SET` wewnątrz funkcji PL/pgSQL — to działa inaczej niż udokumentowane
+    // ograniczenie roli `authenticated` przez PostgREST, zob. komentarz w admin/index.html:
+    // tu łączymy się bezpośrednio, bez pośrednictwa PostgREST). 5 minut — bezpieczny zapas
+    // nad zmierzonym ~48s, wciąż pod twardym limitem ~400s czasu ściany Edge Function.
+    connection: {
+      statement_timeout: 300000,
+    },
     // Realny, znaleziony i zweryfikowany lokalnie bug: postgres.js domyślnie zwraca kolumny
     // bigint (current_offset, current_total_bytes — zob. migracje) jako JS STRING, nie
     // number, żeby uniknąć cichej utraty precyzji poza Number.MAX_SAFE_INTEGER. Nasze
