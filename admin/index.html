@@ -2284,6 +2284,18 @@ function renderRailFileChecklist(s) {
   return `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${zipItem}${items.join('')}</div>`;
 }
 
+const RAIL_SYNC_TRANSFORM_STEPS = ['stops', 'routes', 'calendar', 'calendar_dates', 'trips', 'stop_times', 'connections', 'cleanup'];
+const RAIL_SYNC_TRANSFORM_STEP_LABEL = {
+  stops: 'przystanki', routes: 'linie', calendar: 'kalendarz', calendar_dates: 'wyjątki kalendarza',
+  trips: 'kursy', stop_times: 'rozkłady przystanków', connections: 'połączenia (CSA)', cleanup: 'sprzątanie starych danych',
+};
+function renderTransformStepBadge(s) {
+  if (!s.transform_step) return '';
+  const idx = RAIL_SYNC_TRANSFORM_STEPS.indexOf(s.transform_step);
+  const label = RAIL_SYNC_TRANSFORM_STEP_LABEL[s.transform_step] || s.transform_step;
+  return `<div style="margin-top:6px;font-size:11px;color:var(--muted)">Etap B (budowanie finalnych tabel): krok ${idx + 1}/${RAIL_SYNC_TRANSFORM_STEPS.length} — ${escHtml(label)}</div>`;
+}
+
 function renderRailSyncStatus() {
   const s = _railSyncStatus;
   const running = s?.status === 'running';
@@ -2306,6 +2318,7 @@ function renderRailSyncStatus() {
         ${s.finished_at ? ` · zakończono: ${new Date(s.finished_at).toLocaleString('pl-PL')}` : ''}
         ${barHtml}
         ${renderRailFileChecklist(s)}
+        ${running ? renderTransformStepBadge(s) : ''}
         ${running && (s.consecutive_errors ?? 0) > 0 ? `<div style="color:var(--danger);margin-top:4px">błędów pod rząd: ${s.consecutive_errors}</div>` : ''}
         ${s.error ? `<div style="color:var(--danger);margin-top:4px">${escHtml(s.error)}</div>` : ''}
       </div>`

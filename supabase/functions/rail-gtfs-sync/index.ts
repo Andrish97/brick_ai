@@ -59,6 +59,15 @@ const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rz
 const MAX_CHUNKS_PER_TICK = 1;
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
+// Etap B (transformacja raw -> docelowe + rail_connections + mark-and-sweep) rozbity na
+// osobne kroki, po jednym na tick — zob. duży komentarz przy handleTransformStep. Kolejność
+// ma znaczenie (FK: routes/calendar przed trips, trips przed stop_times, stop_times przed
+// connections).
+const TRANSFORM_STEPS = [
+  "stops", "routes", "calendar", "calendar_dates", "trips", "stop_times", "connections", "cleanup",
+] as const;
+type TransformStep = typeof TRANSFORM_STEPS[number];
+
 // Mapowanie: nazwa pliku GTFS -> {tabela raw, mapowanie kolumna GTFS -> kolumna raw}.
 // Tylko pola faktycznie potrzebne CSA i istniejącym formatterom — reszta kolumn GTFS jest
 // ignorowana, jeśli w ogóle obecna w danym eksporcie.
@@ -706,10 +715,15 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
   try {
     const [run] = await sql<{
       id: string; current_file: string | null; current_offset: number; current_header: unknown;
-      current_total_bytes: number | null; extract_progress_bytes: number | null;
-    }[]>`select id, current_file, current_offset, current_header, current_total_bytes, extract_progress_bytes from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
+      current_total_bytes: number | null; extract_progress_bytes: number | null; transform_step: string | null;
+    }[]>`select id, current_file, current_offset, current_header, current_total_bytes, extract_progress_bytes, transform_step from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
     if (!run) { return json({ ok: true, skipped: "nothing_running" }); }
-    if (!run.current_file) { return json({ ok: true, skipped: "no_current_file" }); }
+    if (!run.current_file) {
+      // Wszystkie pliki rozpakowane i sparsowane — jeśli Etap B jeszcze trwa
+      // (transform_step ustawiony), zrób następny jego krok; inaczej nic do zrobienia.
+      if (run.transform_step) return await handleTransformStep(sql, run.id, run.transform_step as TransformStep, isAutomatic);
+      return json({ ok: true, skipped: "no_current_file" });
+    }
 
     // current_file === SOURCE_ZIP: sam zip jeszcze się pobiera, kawałek po kawałku przez
     // Range (zob. downloadOneChunk) — dopiero po zakończeniu current_file przechodzi na
@@ -778,8 +792,10 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       // pliku liczony względem rozmiaru POPRZEDNIEGO — realny, zaobserwowany błąd
       // wyświetlania ("stop_times.txt 0.0% (-0.0/2.8 MB)", gdzie 2.8 MB było rozmiarem
       // trips.txt, nie stop_times.txt).
-      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = ${nextFile ? -1 : 0}, current_header = null, current_total_bytes = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted} where id = ${run.id}`;
-      if (!nextFile) await finishRun(sql, run.id, isAutomatic);
+      // transform_step = TRANSFORM_STEPS[0]: uruchamia się TYLKO gdyby ALL_FILES kiedyś
+      // kończył się na małym pliku zamiast BIG_FILE — dziś nieosiągalne (BIG_FILE zawsze
+      // ostatni), zostawione jako defensywny fallback zgodny z resztą kodu.
+      await sql`update rail_sync_runs set current_file = ${nextFile}, current_offset = ${nextFile ? -1 : 0}, current_header = null, current_total_bytes = null, consecutive_errors = 0, rows_processed = rows_processed + ${rowsInserted}, transform_step = ${nextFile ? null : TRANSFORM_STEPS[0]} where id = ${run.id}`;
       return json({ ok: true, file: fileName, rowsInserted, nextFile });
     }
 
@@ -826,9 +842,12 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       offset += consumedBytes;
 
       if (reachedEnd) {
-        await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows} where id = ${run.id}`;
-        await finishRun(sql, run.id, isAutomatic);
-        return json({ ok: true, file: fileName, rowsInserted, done: true, chunksThisTick: chunkNum + 1 });
+        // NIE "done: true" tutaj — parsowanie się skończyło, ale Etap B (transform_step)
+        // dopiero zaczyna, jeszcze kilka(naście) ticków przed prawdziwym końcem całego
+        // syncu. "done" oznaczałoby dla panelu (syncNow()) koniec CAŁEGO syncu i przerwałoby
+        // pętlę ticków, zanim transformacja w ogóle ruszy — zob. handleTransformStep.
+        await sql`update rail_sync_runs set current_file = null, current_offset = 0, current_header = null, consecutive_errors = 0, rows_processed = rows_processed + ${chunkRows}, transform_step = ${TRANSFORM_STEPS[0]} where id = ${run.id}`;
+        return json({ ok: true, file: fileName, rowsInserted, parsingDone: true, chunksThisTick: chunkNum + 1 });
       }
 
       // sql.json(...), NIE ręczny JSON.stringify(...)::jsonb — ten drugi podwójnie koduje
@@ -863,16 +882,44 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
   }
 }
 
-// Etap B: transformacja raw -> docelowe + rail_connections + mark-and-sweep, w całości
-// jako jedna funkcja Postgres (zob. migracja) — wywołana raz, po ostatnim kawałku
-// ostatniego pliku. Zero pracy JS/CPU po stronie Edge Function dla tego kroku.
-async function finishRun(sql: SqlClient, runId: string, isAutomatic: boolean): Promise<void> {
-  await sql`select rail_gtfs_transform(${runId}::uuid)`;
-  await sql`update rail_sync_runs set status = 'success', finished_at = now() where id = ${runId}`;
+// Etap B: transformacja raw -> docelowe + rail_connections + mark-and-sweep. Realny dowód
+// z produkcji: nawet po naprawieniu rail_connections (funkcja okna zamiast skorelowanego
+// podzapytania) i po jawnym wydłużeniu statement_timeout do 5 minut, cała transformacja w
+// JEDNYM wywołaniu i tak przekroczyła limit (~295s, tuż pod nowym 5-minutowym sufitem) —
+// prawdziwa baza produkcyjna jest wolniejsza niż środowisko testowe, a i tak nie ma sensu
+// podkręcać limitu wyżej niż twardy sufit czasu ściany Edge Function (~400s). Jedyna
+// prawdziwa naprawa: ten sam wzorzec co reszta tego pliku (pobieranie, ekstrakcja,
+// parsowanie) — rozbić na osobne kroki, po jednym na tick, stan w
+// rail_sync_runs.transform_step (zob. TRANSFORM_STEPS). Każdy krok to osobna, samodzielna
+// funkcja Postgres (zob. migracja) — zero pracy JS/CPU po stronie Edge Function, tylko
+// jedno zapytanie na tick.
+async function runTransformStep(sql: SqlClient, runId: string, step: TransformStep): Promise<void> {
+  switch (step) {
+    case "stops": await sql`select rail_gtfs_transform_stops(${runId}::uuid)`; return;
+    case "routes": await sql`select rail_gtfs_transform_routes(${runId}::uuid)`; return;
+    case "calendar": await sql`select rail_gtfs_transform_calendar(${runId}::uuid)`; return;
+    case "calendar_dates": await sql`select rail_gtfs_transform_calendar_dates(${runId}::uuid)`; return;
+    case "trips": await sql`select rail_gtfs_transform_trips(${runId}::uuid)`; return;
+    case "stop_times": await sql`select rail_gtfs_transform_stop_times(${runId}::uuid)`; return;
+    case "connections": await sql`select rail_gtfs_transform_connections(${runId}::uuid)`; return;
+    case "cleanup": await sql`select rail_gtfs_transform_cleanup(${runId}::uuid)`; return;
+  }
+}
+
+async function handleTransformStep(sql: SqlClient, runId: string, step: TransformStep, isAutomatic: boolean): Promise<Response> {
+  await runTransformStep(sql, runId, step);
+  const nextStep = TRANSFORM_STEPS[TRANSFORM_STEPS.indexOf(step) + 1] ?? null;
+  if (nextStep) {
+    await sql`update rail_sync_runs set transform_step = ${nextStep}, consecutive_errors = 0 where id = ${runId}`;
+    return json({ ok: true, transformStep: step, nextTransformStep: nextStep });
+  }
+  // Ostatni krok (cleanup) właśnie się skończył — cały sync faktycznie gotowy dopiero teraz.
+  await sql`update rail_sync_runs set status = 'success', transform_step = null, finished_at = now() where id = ${runId}`;
   if (isAutomatic) {
     const [row] = await sql<{ rows_processed: number }[]>`select rows_processed from rail_sync_runs where id = ${runId}`;
     await logRailSync(sql, "finished", { runId, rowsProcessed: row?.rows_processed ?? null });
   }
+  return json({ ok: true, transformStep: step, done: true });
 }
 
 function getSql() {
