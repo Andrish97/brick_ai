@@ -48,6 +48,29 @@ function pickBestStationMatch(candidates: RailStation[], query: string): RailSta
 export async function resolveSingleStationLocal(url: string, key: string, query: string): Promise<StationLookup> {
   const q = query.trim();
   if (!q) return { ok: false, body: { error: "station_not_found", query: q } };
+  try {
+    // Realny błąd znaleziony na produkcji: dopasowanie dokładne było szukane WYŁĄCZNIE
+    // wewnątrz jednego zapytania ILIKE '%q%' LIMIT 20, bez ORDER BY — dla miast z wieloma
+    // stacjami podrzędnymi zawierającymi tę samą nazwę jako podciąg (np. Katowice: Ligota,
+    // Piotrowice, Szopienice, Zawodzie, Brynów...), Postgres bez porządkowania zwraca
+    // wiersze w praktycznie dowolnej kolejności — sama stacja "Katowice" mogła się w ogóle
+    // nie zmieścić w pierwszych 20 wynikach, mimo że istniała w bazie. Zweryfikowane
+    // lokalnie: dokładnie ten scenariusz odtworzony (20 podstacji + "Katowice" wstawione
+    // jako ostatnie) dawał identyczny objaw — "Katowice" całkowicie nieobecne w wyniku.
+    // Naprawa: osobne, ukierunkowane zapytanie o dopasowanie dokładne (ilike BEZ gwiazdek —
+    // to w PostgREST oznacza pełne dopasowanie, nie podciąg) PRZED szerokim skanem
+    // podciągów, więc duża liczba podstacji nigdy nie może wypchnąć właściwego wyniku.
+    // Zapytanie już wymusza dokładną (bez rozróżniania wielkości liter) zgodność nazwy, więc
+    // KAŻDY zwrócony wiersz ma dokładnie szukaną nazwę — różnią się co najwyżej peronem/
+    // stop_id (osobne wiersze GTFS dla tego samego fizycznego przystanku), nie znaczeniem.
+    // pickBestStationMatch nie pasuje tutaj (rozstrzyga MIĘDZY różnymi nazwami, nie
+    // WEWNĄTRZ identycznych) — pierwszy wiersz jest równie dobrym punktem zaczepienia jak
+    // każdy inny.
+    const exactRows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.${encodeURIComponent(q)}&select=id,name&limit=5`);
+    if (exactRows.length) return { ok: true, station: exactRows[0] };
+  } catch {
+    return { ok: false, body: { error: "local_lookup_failed", query: q } };
+  }
   let rows: RailStation[];
   try {
     rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name&limit=20`);
