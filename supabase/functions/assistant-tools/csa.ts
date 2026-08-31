@@ -26,6 +26,21 @@ async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
   return res.json();
 }
 
+// RPC (POST) zamiast GET z filtrem w URL — realny błąd na produkcji: lista aktywnych
+// service_id danego dnia (setki UUID-ów) w URL-owym filtrze "in.(...)" tworzyła zapytanie
+// rzędu ~20KB, co zawodziło (potwierdzone diagnostyką: pierwsze zapytanie o rail_connections
+// zawsze rzucało wyjątek, zero okien kiedykolwiek zeskanowanych). Ciało zapytania POST nie
+// ma tego ograniczenia.
+async function sbRpc<T>(url: string, key: string, fn: string, args: Record<string, unknown>): Promise<T[]> {
+  const res = await fetch(`${url}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) throw new Error(`rail_db_rpc_failed ${fn}: HTTP ${res.status}`);
+  return res.json();
+}
+
 // Ta sama logika ujednoznaczniania co resolveSingleStation w index.ts (dokładne
 // dopasowanie nazwy, potem przyrostek Główny/Główna/Główne) — świadomie zduplikowana
 // tutaj (patrz komentarz na górze pliku), nie zaimportowana.
@@ -160,6 +175,7 @@ export type CsaDiagnostics = {
   windowsScanned: number;
   connectionsScannedTotal: number;
   stationsReached: number; // ile stacji dostało policzony czas dotarcia (bez samego origin)
+  connectionsFetchError?: string; // realny błąd zapytania o rail_connections, jeśli je przerwał (zob. pętla okien)
 };
 
 // Skanuje rail_connections w rosnących oknach czasowych, licząc najwcześniejszy
@@ -183,12 +199,10 @@ export async function runCsaJourney(
   const serviceIds = await activeServiceIds(url, key, date);
   if (!serviceIds || !serviceIds.size) return { result: null, diagnostics: emptyDiagnostics };
   const serviceIdList = [...serviceIds];
-  const serviceFilter = inList(serviceIdList);
-  if (!serviceFilter) return { result: null, diagnostics: { ...emptyDiagnostics, activeServiceCount: serviceIdList.length } };
 
   const diagnostics: CsaDiagnostics = {
     activeServiceCount: serviceIdList.length,
-    serviceIdsInFilter: Math.min(serviceIdList.length, IN_LIST_LIMIT),
+    serviceIdsInFilter: serviceIdList.length, // RPC (ciało POST) — bez obcinania, zob. sbRpc
     windowsScanned: 0,
     connectionsScannedTotal: 0,
     stationsReached: 0,
@@ -208,13 +222,13 @@ export async function runCsaJourney(
 
     let connections: Connection[];
     try {
-      connections = await sbGet<Connection>(
-        url, key,
-        `rail_connections?service_id=in.(${serviceFilter})&dep_seconds=gte.${windowStart}&dep_seconds=lt.${windowEnd}` +
-          `&order=dep_seconds.asc&limit=5000&select=trip_id,service_id,from_stop_id,to_stop_id,dep_seconds,arr_seconds`,
-      );
-    } catch {
-      return { result: null, diagnostics };
+      connections = await sbRpc<Connection>(url, key, "rail_connections_in_window", {
+        p_service_ids: serviceIdList,
+        p_dep_from: windowStart,
+        p_dep_to: windowEnd,
+      });
+    } catch (e) {
+      return { result: null, diagnostics: { ...diagnostics, connectionsFetchError: String(e) } };
     }
     diagnostics.windowsScanned++;
     diagnostics.connectionsScannedTotal += connections.length;
