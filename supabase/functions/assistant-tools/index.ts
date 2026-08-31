@@ -911,6 +911,11 @@ async function tryPlanTrainJourneyLocal(
   url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string,
 ): Promise<CsaResult | null> {
   try {
+    // Log wejścia bezwarunkowo (nie tylko przy niepowodzeniu) — realny test (Katowice ->
+    // Zamość) zwrócił "live" bez ŻADNEGO z pozostałych logów rail_local_skip poniżej, co
+    // przez eliminację wskazuje na TĘ gałąź (jedyną wcześniej bez logowania) — ale bez
+    // zobaczenia surowych argumentów od Gemini nie da się tego potwierdzić na pewno.
+    log("rail_local_entry", { fromArg, toArg, dateArg });
     if (!(await hasFreshLocalData(url, key))) {
       log("rail_local_skip", { reason: "no_fresh_local_data" });
       return null;
@@ -918,7 +923,13 @@ async function tryPlanTrainJourneyLocal(
 
     const fromResolved = resolveStationPoint(fromArg, user);
     const toResolved = resolveStationPoint(toArg, user);
-    if (!fromResolved.query || !toResolved.query) return null; // spadnij na żywą — ona da właściwy komunikat no_preferred_station
+    if (!fromResolved.query || !toResolved.query) {
+      log("rail_local_skip", {
+        reason: "no_preferred_station",
+        fromArg, toArg, fromMissing: fromResolved.missing, toMissing: toResolved.missing,
+      });
+      return null; // spadnij na żywą — ona da właściwy komunikat no_preferred_station
+    }
 
     const [fromLookup, toLookup] = await Promise.all([
       resolveSingleStationLocal(url, key, fromResolved.query),

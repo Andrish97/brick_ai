@@ -2113,6 +2113,7 @@ function renderJourneyTestResult() {
         : `<div style="font-size:12px;color:var(--muted);margin-top:8px;font-style:italic">Brak odpowiedzi tekstowej — model mógł nie wywołać plan_train_journey wcale (spróbuj przeformułować pytanie).</div>`;
   const skipLabel = {
     no_fresh_local_data: 'brak świeżego, udanego syncu lokalnych danych',
+    no_preferred_station: 'brak zapytania o stację (np. "dom"/"praca" bez ustawionego profilu)',
     station_not_resolved_locally: 'stacja nierozpoznana/niejednoznaczna w lokalnych danych',
     csa_found_nothing: 'CSA nie znalazło żadnego połączenia w przeszukiwanym oknie',
   };
@@ -2165,7 +2166,7 @@ async function runJourneyTest() {
   try {
     const { data: logRows } = await sb.from('logs')
       .select('type,data,created_at')
-      .in('type', ['plan_train_journey_path', 'rail_local_mismatch', 'rail_local_error', 'rail_local_skip'])
+      .in('type', ['plan_train_journey_path', 'rail_local_mismatch', 'rail_local_error', 'rail_local_skip', 'rail_local_entry'])
       .gte('created_at', startedAt)
       .order('created_at', { ascending: true })
       .limit(5);
