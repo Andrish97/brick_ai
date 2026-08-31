@@ -189,6 +189,9 @@ export type CsaDiagnostics = {
   connectionsScannedTotal: number;
   stationsReached: number; // ile stacji dostało policzony czas dotarcia (bez samego origin)
   connectionsFetchError?: string; // realny błąd zapytania o rail_connections, jeśli je przerwał (zob. pętla okien)
+  fromGroupSize?: number; // ile stop_id wchodzi w grupę stacji startowej (zob. RailStationGroup)
+  toGroupSize?: number;
+  reachedStationNames?: string[]; // nazwy stacji faktycznie osiągniętych, gdy cel nie — pokazuje, GDZIE poszukiwanie realnie dotarło
 };
 
 // Skanuje rail_connections w rosnących oknach czasowych, licząc najwcześniejszy
@@ -219,6 +222,8 @@ export async function runCsaJourney(
     windowsScanned: 0,
     connectionsScannedTotal: 0,
     stationsReached: 0,
+    fromGroupSize: from.ids.length,
+    toGroupSize: to.ids.length,
   };
 
   // "Stacja" to grupa stop_id (różne perony/tory dzielące tę samą nazwę) — dowolny z nich
@@ -278,7 +283,19 @@ export async function runCsaJourney(
   const reachedToId = to.ids
     .filter((id) => earliestArrival.has(id))
     .sort((a, b) => earliestArrival.get(a)! - earliestArrival.get(b)!)[0];
-  if (!reachedToId) return { result: null, diagnostics };
+  if (!reachedToId) {
+    // Nazwy stacji, do których poszukiwanie faktycznie dotarło (poza samym origin) — jeśli
+    // cel nigdy się nie pojawił, to pokazuje WPROST, gdzie realnie sięgnęło (garstka bliskich
+    // stacji na jednym kursie? cała okolica? zupełnie inny region?), zamiast samej liczby.
+    const reachedIds = [...earliestArrival.keys()].filter((id) => !fromIds.has(id)).slice(0, 15);
+    if (reachedIds.length) {
+      try {
+        const nameRows = await sbGet<RailStation>(url, key, `rail_stops?id=in.(${inList(reachedIds)})&select=id,name`);
+        diagnostics.reachedStationNames = nameRows.map((r) => r.name);
+      } catch { /* diagnostyka opcjonalna — nie blokuj samego wyniku */ }
+    }
+    return { result: null, diagnostics };
+  }
 
   // Odtwórz ścieżkę wstecz przez incoming, potem odwróć.
   const chain: Connection[] = [];
