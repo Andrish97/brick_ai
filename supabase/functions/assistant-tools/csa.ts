@@ -317,10 +317,17 @@ export async function runCsaJourney(
         { p_stop_ids: from.ids, p_date: date, p_dep_from: startSeconds, p_dep_to: windowEndAll },
       );
       diagnostics.distinctDeparturesFromOrigin = debugDepartures.length;
-      diagnostics.departureSample = debugDepartures.slice(0, 20).map((d) => ({
+      const toSample = (d: typeof debugDepartures[number]) => ({
         depSeconds: d.dep_seconds, toStopId: d.to_stop_id,
         serviceVariants: d.distinct_service_variants, activeToday: d.any_active_today,
-      }));
+      });
+      // Posortowane rosnąco po dep_seconds — same pierwsze 20 to zawsze to samo pasmo
+      // sprzed świtu (zob. komentarz wyżej). OSTATNIE 10 pokazuje, jak daleko w czasie
+      // zapytanie FAKTYCZNIE dotarło zanim uderzyło w LIMIT — to jest tu najważniejsze.
+      diagnostics.departureSample = [
+        ...debugDepartures.slice(0, 10).map(toSample),
+        ...debugDepartures.slice(-10).map(toSample),
+      ];
     } catch { /* diagnostyka opcjonalna — nie blokuj samego wyniku */ }
     return { result: null, diagnostics };
   }
