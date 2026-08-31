@@ -192,6 +192,11 @@ export type CsaDiagnostics = {
   fromGroupSize?: number; // ile stop_id wchodzi w grupę stacji startowej (zob. RailStationGroup)
   toGroupSize?: number;
   reachedStationNames?: string[]; // nazwy stacji faktycznie osiągniętych, gdy cel nie — pokazuje, GDZIE poszukiwanie realnie dotarło
+  // Odjazdy z origin BEZ filtra service_id, w tym samym przeszukiwanym oknie czasowym —
+  // odróżnia "danych po prostu nie ma" (problem z syncem/parsowaniem) od "dane są, ale ich
+  // service_id nie trafił do aktywnego zbioru na ten dzień" (błąd kalendarza).
+  unfilteredDeparturesFromOrigin?: number;
+  unfilteredSample?: { trip_id: string; service_id: string; dep_seconds: number; serviceActive: boolean }[];
 };
 
 // Skanuje rail_connections w rosnących oknach czasowych, licząc najwcześniejszy
@@ -294,6 +299,16 @@ export async function runCsaJourney(
         diagnostics.reachedStationNames = nameRows.map((r) => r.name);
       } catch { /* diagnostyka opcjonalna — nie blokuj samego wyniku */ }
     }
+    try {
+      const windowEndAll = startSeconds + MAX_WINDOWS * WINDOW_SECONDS;
+      const unfiltered = await sbGet<{ trip_id: string; service_id: string; dep_seconds: number }>(
+        url, key,
+        `rail_connections?from_stop_id=in.(${inList(from.ids)})&dep_seconds=gte.${startSeconds}&dep_seconds=lt.${windowEndAll}` +
+          `&select=trip_id,service_id,dep_seconds&order=dep_seconds.asc&limit=50`,
+      );
+      diagnostics.unfilteredDeparturesFromOrigin = unfiltered.length;
+      diagnostics.unfilteredSample = unfiltered.slice(0, 10).map((c) => ({ ...c, serviceActive: serviceIds.has(c.service_id) }));
+    } catch { /* diagnostyka opcjonalna — nie blokuj samego wyniku */ }
     return { result: null, diagnostics };
   }
 
