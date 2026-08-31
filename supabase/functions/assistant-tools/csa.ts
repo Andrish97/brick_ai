@@ -192,11 +192,13 @@ export type CsaDiagnostics = {
   fromGroupSize?: number; // ile stop_id wchodzi w grupę stacji startowej (zob. RailStationGroup)
   toGroupSize?: number;
   reachedStationNames?: string[]; // nazwy stacji faktycznie osiągniętych, gdy cel nie — pokazuje, GDZIE poszukiwanie realnie dotarło
-  // Odjazdy z origin BEZ filtra service_id, w tym samym przeszukiwanym oknie czasowym —
-  // odróżnia "danych po prostu nie ma" (problem z syncem/parsowaniem) od "dane są, ale ich
-  // service_id nie trafił do aktywnego zbioru na ten dzień" (błąd kalendarza).
-  unfilteredDeparturesFromOrigin?: number;
-  unfilteredSample?: { trip_id: string; service_id: string; dep_seconds: number; serviceActive: boolean }[];
+  // Rzeczywiste, ZDEDUPLIKOWANE (po dep_seconds+cel) odjazdy z origin w tym samym
+  // przeszukiwanym oknie, z autorytatywną flagą aktywności na tę datę policzoną w SQL
+  // (zob. rail_debug_departures) — odróżnia "danych po prostu nie ma" (problem z
+  // syncem/parsowaniem) od "dane są, ale ich service_id nie trafił do aktywnego zbioru na
+  // ten dzień" (błąd kalendarza).
+  distinctDeparturesFromOrigin?: number;
+  departureSample?: { depSeconds: number; toStopId: string; serviceVariants: number; activeToday: boolean }[];
 };
 
 // Skanuje rail_connections w rosnących oknach czasowych, licząc najwcześniejszy
@@ -300,14 +302,25 @@ export async function runCsaJourney(
       } catch { /* diagnostyka opcjonalna — nie blokuj samego wyniku */ }
     }
     try {
+      // Pierwsza wersja tej diagnostyki (prosty SELECT bez agregacji) utykała na kursach
+      // sprzed świtu — ten feed nie ma calendar.txt, więc KAŻDY dzień działania kursu to
+      // osobny wiersz rail_calendar/service_id, a "LIMIT 50 ORDER BY dep_seconds" wyczerpywał
+      // się na dziesiątkach wariantów TEGO SAMEGO porannego kursu, zanim doszedł do
+      // czegokolwiek później niż ~4:15. rail_debug_departures (RPC, zob. migracja) grupuje
+      // po (dep_seconds, to_stop_id), więc pokazuje każdy FIZYCZNY kurs raz, z flagą "czy
+      // KTÓRYKOLWIEK jego wariant service_id jest aktywny na ten dzień" policzoną w SQL tą
+      // samą logiką co activeServiceIds() — sięga więc realnie przez cały dzień, nie tylko
+      // pierwsze kilkadziesiąt zdublowanych wierszy.
       const windowEndAll = startSeconds + MAX_WINDOWS * WINDOW_SECONDS;
-      const unfiltered = await sbGet<{ trip_id: string; service_id: string; dep_seconds: number }>(
-        url, key,
-        `rail_connections?from_stop_id=in.(${inList(from.ids)})&dep_seconds=gte.${startSeconds}&dep_seconds=lt.${windowEndAll}` +
-          `&select=trip_id,service_id,dep_seconds&order=dep_seconds.asc&limit=50`,
+      const debugDepartures = await sbRpc<{ dep_seconds: number; to_stop_id: string; distinct_service_variants: number; any_active_today: boolean }>(
+        url, key, "rail_debug_departures",
+        { p_stop_ids: from.ids, p_date: date, p_dep_from: startSeconds, p_dep_to: windowEndAll },
       );
-      diagnostics.unfilteredDeparturesFromOrigin = unfiltered.length;
-      diagnostics.unfilteredSample = unfiltered.slice(0, 10).map((c) => ({ ...c, serviceActive: serviceIds.has(c.service_id) }));
+      diagnostics.distinctDeparturesFromOrigin = debugDepartures.length;
+      diagnostics.departureSample = debugDepartures.slice(0, 20).map((d) => ({
+        depSeconds: d.dep_seconds, toStopId: d.to_stop_id,
+        serviceVariants: d.distinct_service_variants, activeToday: d.any_active_today,
+      }));
     } catch { /* diagnostyka opcjonalna — nie blokuj samego wyniku */ }
     return { result: null, diagnostics };
   }
