@@ -16,7 +16,16 @@
 // między plikami zamiast ryzykownego współdzielenia modułów między funkcjami.
 
 type RailStation = { id: string; name: string };
-type StationLookup = { ok: true; station: RailStation } | { ok: false; body: Record<string, unknown> };
+// Realny błąd na produkcji: "Katowice" jako NAZWA odpowiada dwóm różnym wierszom
+// rail_stops (osobne stop_id dla różnych peronów/torów — normalne w GTFS), a rzeczywiste
+// odjazdy w rail_connections są zapisane pod TYLKO JEDNYM z tych stop_id. Traktowanie
+// rozwiązanej stacji jako pojedynczego, arbitralnie wybranego stop_id (dawne zachowanie)
+// znajdowało "Katowice" poprawnie, ale CSA i tak nie widziało żadnych odjazdów (0 z 5913
+// przeskanowanych połączeń dawało się wsiąść), bo trafiało akurat na stop_id bez żadnych
+// zapisanych kursów. Poprawka: stacja to GRUPA wszystkich stop_id dzielących tę samą nazwę
+// — CSA trakuje dowolny z nich jako poprawny punkt startowy/docelowy.
+type RailStationGroup = { name: string; ids: string[] };
+type StationLookup = { ok: true; station: RailStationGroup } | { ok: false; body: Record<string, unknown> };
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
   const res = await fetch(`${url}/rest/v1/${path}`, {
@@ -77,26 +86,30 @@ export async function resolveSingleStationLocal(url: string, key: string, query:
     // podciągów, więc duża liczba podstacji nigdy nie może wypchnąć właściwego wyniku.
     // Zapytanie już wymusza dokładną (bez rozróżniania wielkości liter) zgodność nazwy, więc
     // KAŻDY zwrócony wiersz ma dokładnie szukaną nazwę — różnią się co najwyżej peronem/
-    // stop_id (osobne wiersze GTFS dla tego samego fizycznego przystanku), nie znaczeniem.
-    // pickBestStationMatch nie pasuje tutaj (rozstrzyga MIĘDZY różnymi nazwami, nie
-    // WEWNĄTRZ identycznych) — pierwszy wiersz jest równie dobrym punktem zaczepienia jak
-    // każdy inny.
-    const exactRows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.${encodeURIComponent(q)}&select=id,name&limit=5`);
-    if (exactRows.length) return { ok: true, station: exactRows[0] };
+    // stop_id (osobne wiersze GTFS dla tego samego fizycznego przystanku). Zbieramy WSZYSTKIE
+    // takie stop_id w jedną grupę (zob. komentarz przy RailStationGroup) zamiast wybierać
+    // arbitralnie jeden.
+    const exactRows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.${encodeURIComponent(q)}&select=id,name&limit=50`);
+    if (exactRows.length) return { ok: true, station: { name: exactRows[0].name, ids: exactRows.map((r) => r.id) } };
   } catch {
     return { ok: false, body: { error: "local_lookup_failed", query: q } };
   }
   let rows: RailStation[];
   try {
-    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name&limit=20`);
+    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name&limit=100`);
   } catch {
     return { ok: false, body: { error: "local_lookup_failed", query: q } };
   }
   if (!rows.length) return { ok: false, body: { error: "station_not_found", query: q } };
-  if (rows.length === 1) return { ok: true, station: rows[0] };
-  const best = pickBestStationMatch(rows, q);
-  if (best) return { ok: true, station: best };
-  return { ok: false, body: { error: "ambiguous_station", query: q, candidates: rows.slice(0, 5).map((s) => s.name) } };
+  // Rozstrzyganie MIĘDZY różnymi nazwami po zdeduplikowanych nazwach — na surowych wierszach
+  // "Katowice Ligota" liczone 4x jako 4 kandydatów łamałoby np. sprawdzenie exact.length===1
+  // w pickBestStationMatch, mimo że to jedna, jednoznaczna nazwa (realny, powiązany błąd).
+  const uniqueNames = [...new Set(rows.map((r) => r.name))];
+  const groupIds = (name: string) => rows.filter((r) => r.name === name).map((r) => r.id);
+  if (uniqueNames.length === 1) return { ok: true, station: { name: uniqueNames[0], ids: groupIds(uniqueNames[0]) } };
+  const best = pickBestStationMatch(uniqueNames.map((name) => ({ id: name, name })), q);
+  if (best) return { ok: true, station: { name: best.name, ids: groupIds(best.name) } };
+  return { ok: false, body: { error: "ambiguous_station", query: q, candidates: uniqueNames.slice(0, 5) } };
 }
 
 // Fallback #1 z planu: brak udanego syncu, albo ostatni sukces starszy niż maxAgeHours
@@ -191,7 +204,7 @@ export type CsaDiagnostics = {
 // więcej — realne ryzyko dla krajowego rozkładu, nigdy wcześniej nie zmierzone).
 export async function runCsaJourney(
   url: string, key: string,
-  from: RailStation, to: RailStation, date: string, startSeconds: number,
+  from: RailStationGroup, to: RailStationGroup, date: string, startSeconds: number,
 ): Promise<{ result: CsaResult | null; diagnostics: CsaDiagnostics }> {
   const emptyDiagnostics: CsaDiagnostics = {
     activeServiceCount: 0, serviceIdsInFilter: 0, windowsScanned: 0, connectionsScannedTotal: 0, stationsReached: 0,
@@ -208,8 +221,12 @@ export async function runCsaJourney(
     stationsReached: 0,
   };
 
-  const earliestArrival = new Map<string, number>([[from.id, startSeconds]]);
-  const arrivedViaTrip = new Map<string, string>([[from.id, "__origin__"]]);
+  // "Stacja" to grupa stop_id (różne perony/tory dzielące tę samą nazwę) — dowolny z nich
+  // jest poprawnym punktem startu/celu, zob. komentarz przy RailStationGroup.
+  const fromIds = new Set(from.ids);
+  const toIds = new Set(to.ids);
+  const earliestArrival = new Map<string, number>(from.ids.map((id) => [id, startSeconds]));
+  const arrivedViaTrip = new Map<string, string>(from.ids.map((id) => [id, "__origin__"]));
   const incoming = new Map<string, Connection>();
 
   let windowStart = startSeconds;
@@ -217,8 +234,9 @@ export async function runCsaJourney(
 
   for (let w = 0; w < MAX_WINDOWS; w++) {
     const windowEnd = windowStart + WINDOW_SECONDS;
-    const targetArrival = earliestArrival.get(to.id);
-    if (targetArrival !== undefined && windowStart > targetArrival) break;
+    const targetArrivals = to.ids.map((id) => earliestArrival.get(id)).filter((v): v is number => v !== undefined);
+    const bestTargetArrival = targetArrivals.length ? Math.min(...targetArrivals) : undefined;
+    if (bestTargetArrival !== undefined && windowStart > bestTargetArrival) break;
 
     let connections: Connection[];
     try {
@@ -237,7 +255,7 @@ export async function runCsaJourney(
       const arrAtFrom = earliestArrival.get(c.from_stop_id);
       if (arrAtFrom === undefined) continue;
       const sameTrip = arrivedViaTrip.get(c.from_stop_id) === c.trip_id;
-      const boardable = c.from_stop_id === from.id
+      const boardable = fromIds.has(c.from_stop_id)
         ? c.dep_seconds >= arrAtFrom
         : (sameTrip ? c.dep_seconds >= arrAtFrom : c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS);
       if (!boardable) continue;
@@ -247,21 +265,25 @@ export async function runCsaJourney(
         earliestArrival.set(c.to_stop_id, c.arr_seconds);
         arrivedViaTrip.set(c.to_stop_id, c.trip_id);
         incoming.set(c.to_stop_id, c);
-        if (c.to_stop_id === to.id) found = true;
+        if (toIds.has(c.to_stop_id)) found = true;
       }
     }
 
     if (found) break;
     windowStart = windowEnd;
   }
-  diagnostics.stationsReached = earliestArrival.size - 1;
+  diagnostics.stationsReached = Math.max(0, earliestArrival.size - from.ids.length);
 
-  if (!earliestArrival.has(to.id)) return { result: null, diagnostics };
+  // Spośród ewentualnie wielu peronów celu wybierz ten z najwcześniejszym dotarciem.
+  const reachedToId = to.ids
+    .filter((id) => earliestArrival.has(id))
+    .sort((a, b) => earliestArrival.get(a)! - earliestArrival.get(b)!)[0];
+  if (!reachedToId) return { result: null, diagnostics };
 
   // Odtwórz ścieżkę wstecz przez incoming, potem odwróć.
   const chain: Connection[] = [];
-  let cursor = to.id;
-  while (cursor !== from.id) {
+  let cursor = reachedToId;
+  while (!fromIds.has(cursor)) {
     const c = incoming.get(cursor);
     if (!c) return { result: null, diagnostics }; // bezpiecznik — nie powinno się zdarzyć, skoro earliestArrival ma wpis
     chain.push(c);
