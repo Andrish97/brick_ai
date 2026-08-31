@@ -154,20 +154,45 @@ function secondsToHHMM(totalSeconds: number): string {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
+export type CsaDiagnostics = {
+  activeServiceCount: number;
+  serviceIdsInFilter: number; // ograniczone przez IN_LIST_LIMIT — jeśli < activeServiceCount, część dnia jest CICHO pomijana
+  windowsScanned: number;
+  connectionsScannedTotal: number;
+  stationsReached: number; // ile stacji dostało policzony czas dotarcia (bez samego origin)
+};
+
 // Skanuje rail_connections w rosnących oknach czasowych, licząc najwcześniejszy
 // możliwy czas dotarcia do każdej stacji (standardowy CSA) — z buforem przesiadkowym
 // TRANSFER_BUFFER_SECONDS, chyba że kolejne połączenie to ten sam trip_id (kontynuacja
 // jazdy, nie przesiadka). Wczesne zatrzymanie: gdy początek kolejnego okna przekracza
 // już znaleziony czas dotarcia do celu, żadne późniejsze połączenie nie może go
 // poprawić — dalsze okna są pomijane.
+//
+// Zwraca diagnostics ZAWSZE (nie tylko przy sukcesie) — jedyny sposób odróżnienia "trasa
+// faktycznie nie istnieje w danych" od "coś po drodze cicho ucięło wynik" (np.
+// IN_LIST_LIMIT=500 obcinający listę aktywnych service_id danego dnia, jeśli jest ich
+// więcej — realne ryzyko dla krajowego rozkładu, nigdy wcześniej nie zmierzone).
 export async function runCsaJourney(
   url: string, key: string,
   from: RailStation, to: RailStation, date: string, startSeconds: number,
-): Promise<CsaResult | null> {
+): Promise<{ result: CsaResult | null; diagnostics: CsaDiagnostics }> {
+  const emptyDiagnostics: CsaDiagnostics = {
+    activeServiceCount: 0, serviceIdsInFilter: 0, windowsScanned: 0, connectionsScannedTotal: 0, stationsReached: 0,
+  };
   const serviceIds = await activeServiceIds(url, key, date);
-  if (!serviceIds || !serviceIds.size) return null;
-  const serviceFilter = inList([...serviceIds]);
-  if (!serviceFilter) return null;
+  if (!serviceIds || !serviceIds.size) return { result: null, diagnostics: emptyDiagnostics };
+  const serviceIdList = [...serviceIds];
+  const serviceFilter = inList(serviceIdList);
+  if (!serviceFilter) return { result: null, diagnostics: { ...emptyDiagnostics, activeServiceCount: serviceIdList.length } };
+
+  const diagnostics: CsaDiagnostics = {
+    activeServiceCount: serviceIdList.length,
+    serviceIdsInFilter: Math.min(serviceIdList.length, IN_LIST_LIMIT),
+    windowsScanned: 0,
+    connectionsScannedTotal: 0,
+    stationsReached: 0,
+  };
 
   const earliestArrival = new Map<string, number>([[from.id, startSeconds]]);
   const arrivedViaTrip = new Map<string, string>([[from.id, "__origin__"]]);
@@ -189,8 +214,10 @@ export async function runCsaJourney(
           `&order=dep_seconds.asc&limit=5000&select=trip_id,service_id,from_stop_id,to_stop_id,dep_seconds,arr_seconds`,
       );
     } catch {
-      return null;
+      return { result: null, diagnostics };
     }
+    diagnostics.windowsScanned++;
+    diagnostics.connectionsScannedTotal += connections.length;
 
     for (const c of connections) {
       const arrAtFrom = earliestArrival.get(c.from_stop_id);
@@ -213,20 +240,21 @@ export async function runCsaJourney(
     if (found) break;
     windowStart = windowEnd;
   }
+  diagnostics.stationsReached = earliestArrival.size - 1;
 
-  if (!earliestArrival.has(to.id)) return null;
+  if (!earliestArrival.has(to.id)) return { result: null, diagnostics };
 
   // Odtwórz ścieżkę wstecz przez incoming, potem odwróć.
   const chain: Connection[] = [];
   let cursor = to.id;
   while (cursor !== from.id) {
     const c = incoming.get(cursor);
-    if (!c) return null; // bezpiecznik — nie powinno się zdarzyć, skoro earliestArrival ma wpis
+    if (!c) return { result: null, diagnostics }; // bezpiecznik — nie powinno się zdarzyć, skoro earliestArrival ma wpis
     chain.push(c);
     cursor = c.from_stop_id;
   }
   chain.reverse();
-  if (!chain.length) return null;
+  if (!chain.length) return { result: null, diagnostics };
 
   // Zgrupuj kolejne połączenia tego samego trip_id w jedną "nogę" (kurs), reszta to przesiadki.
   const legsRaw: { tripId: string; from: string; to: string; depSeconds: number; arrSeconds: number }[] = [];
@@ -252,7 +280,7 @@ export async function runCsaJourney(
       sbGet<{ id: string; short_name: string | null; route_id: string }>(url, key, `rail_trips?id=in.(${inList(tripIds)})&select=id,short_name,route_id`),
     ]);
   } catch {
-    return null;
+    return { result: null, diagnostics };
   }
   const stopName = new Map(stopRows.map((s) => [s.id, s.name]));
   const tripInfo = new Map(tripRows.map((t) => [t.id, t]));
@@ -277,5 +305,5 @@ export async function runCsaJourney(
     };
   });
 
-  return { direct: legs.length === 1, legs };
+  return { result: { direct: legs.length === 1, legs }, diagnostics };
 }

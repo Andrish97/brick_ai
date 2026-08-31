@@ -949,11 +949,12 @@ async function tryPlanTrainJourneyLocal(
     const isToday = date === todayDateStr();
     const startSeconds = isToday ? (warsawNow().getHours() * 3600 + warsawNow().getMinutes() * 60) : 0;
 
-    const result = await runCsaJourney(url, key, fromLookup.station, toLookup.station, date, startSeconds);
+    const { result, diagnostics } = await runCsaJourney(url, key, fromLookup.station, toLookup.station, date, startSeconds);
     if (!result) {
       log("rail_local_skip", {
         reason: "csa_found_nothing",
         from: fromLookup.station.name, to: toLookup.station.name, date, startSeconds,
+        ...diagnostics,
       });
       return null;
     }
