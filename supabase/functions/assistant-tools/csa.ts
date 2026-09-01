@@ -15,7 +15,7 @@
 // (index.ts importuje Z tego pliku), zgodnie z tolerowaną w tym repo małą duplikacją
 // między plikami zamiast ryzykownego współdzielenia modułów między funkcjami.
 
-type RailStation = { id: string; name: string };
+type RailStation = { id: string; name: string; lat?: number | null; lon?: number | null };
 // Realny błąd na produkcji: "Katowice" jako NAZWA odpowiada dwóm różnym wierszom
 // rail_stops (osobne stop_id dla różnych peronów/torów — normalne w GTFS), a rzeczywiste
 // odjazdy w rail_connections są zapisane pod TYLKO JEDNYM z tych stop_id. Traktowanie
@@ -24,7 +24,11 @@ type RailStation = { id: string; name: string };
 // przeskanowanych połączeń dawało się wsiąść), bo trafiało akurat na stop_id bez żadnych
 // zapisanych kursów. Poprawka: stacja to GRUPA wszystkich stop_id dzielących tę samą nazwę
 // — CSA trakuje dowolny z nich jako poprawny punkt startowy/docelowy.
-type RailStationGroup = { name: string; ids: string[] };
+// lat/lon: centroid grupy (średnia współrzędnych peronów tej nazwy, zob.
+// resolveStationGroupSmart) -- opcjonalny, używany do filtrowania geograficznego w
+// runCsaJourney (zob. komentarz przy p_max_detour_km); brak (stacja bez współrzędnych w
+// danych) po prostu wyłącza to filtrowanie dla tego wyszukiwania, nie blokuje go.
+type RailStationGroup = { name: string; ids: string[]; lat?: number; lon?: number };
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
   const res = await fetch(`${url}/rest/v1/${path}`, {
@@ -134,7 +138,7 @@ export async function resolveStationGroupSmart(
   if (!q) return { ok: false, body: { error: "station_not_found", query: q } };
   let rows: RailStation[];
   try {
-    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name&limit=200`);
+    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name,lat,lon&limit=200`);
   } catch {
     return { ok: false, body: { error: "local_lookup_failed", query: q } };
   }
@@ -142,11 +146,22 @@ export async function resolveStationGroupSmart(
 
   const uniqueNames = [...new Set(rows.map((r) => r.name))];
   const groupIds = (name: string) => rows.filter((r) => r.name === name).map((r) => r.id);
+  // Centroid (średnia lat/lon) grupy peronów danej nazwy -- do filtrowania geograficznego
+  // w runCsaJourney (zob. p_dest_lat/p_max_detour_km); pomijamy wiersze bez współrzędnych.
+  const centroid = (name: string): { lat?: number; lon?: number } => {
+    const withCoords = rows.filter((r) => r.name === name && r.lat != null && r.lon != null);
+    if (!withCoords.length) return {};
+    return {
+      lat: withCoords.reduce((s, r) => s + r.lat!, 0) / withCoords.length,
+      lon: withCoords.reduce((s, r) => s + r.lon!, 0) / withCoords.length,
+    };
+  };
+  const buildGroup = (name: string): RailStationGroup => ({ name, ids: groupIds(name), ...centroid(name) });
 
   // Szybka ścieżka: jedna odrębna nazwa wśród kandydatów -> użyj jej wprost, bez
   // wywołania AI (pokrywa np. "Wrocław Kuźniki": jedno trafienie, koniec).
   if (uniqueNames.length === 1) {
-    return { ok: true, station: { name: uniqueNames[0], ids: groupIds(uniqueNames[0]) }, resolvedVia: "single_candidate" };
+    return { ok: true, station: buildGroup(uniqueNames[0]), resolvedVia: "single_candidate" };
   }
 
   if (geminiKey) {
@@ -154,16 +169,16 @@ export async function resolveStationGroupSmart(
     const normalizedPick = aiPick?.trim();
     const matched = normalizedPick ? uniqueNames.find((n) => n.trim().toLowerCase() === normalizedPick.toLowerCase()) : undefined;
     if (matched) {
-      return { ok: true, station: { name: matched, ids: groupIds(matched) }, resolvedVia: "ai", aiRawPick: aiPick };
+      return { ok: true, station: buildGroup(matched), resolvedVia: "ai", aiRawPick: aiPick };
     }
     const fallbackName = await pickCandidateByConnectivity(url, key, uniqueNames, rows);
-    return { ok: true, station: { name: fallbackName, ids: groupIds(fallbackName) }, resolvedVia: "ai_fallback_connectivity", aiRawPick: aiPick };
+    return { ok: true, station: buildGroup(fallbackName), resolvedVia: "ai_fallback_connectivity", aiRawPick: aiPick };
   }
 
   // Brak klucza Gemini w środowisku assistant-tools -- ten sam bezpiecznik po liczbie
   // połączeń, bez próby wywołania AI.
   const fallbackName = await pickCandidateByConnectivity(url, key, uniqueNames, rows);
-  return { ok: true, station: { name: fallbackName, ids: groupIds(fallbackName) }, resolvedVia: "ai_fallback_connectivity" };
+  return { ok: true, station: buildGroup(fallbackName), resolvedVia: "ai_fallback_connectivity" };
 }
 
 // Fallback #1 z planu: brak udanego syncu, albo ostatni sukces starszy niż maxAgeHours
@@ -240,6 +255,26 @@ const TOTAL_SCAN_SECONDS = 50 * 3600;
 // szukać sensu nie ma, bo to już będzie po prostu NASTĘPNY dzień z WŁASNYM service_id
 // (zob. pętla dayOffset w runCsaJourney).
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
+
+// Filtrowanie geograficzne (odpowiedź na realne pytanie: "jak Kolejo wyszukuje tak
+// szybko?") — nasz CSA bez tego "zalewał" całą sieć na oślep (732 osiągalne stacje po 25
+// zapytaniach, w tym Rzepin/Czyżew — setki km w złą stronę względem Zamościa), zupełnie
+// nie wiedząc, w którą stronę jest cel. Realne planery ograniczają eksplorację
+// geograficznie/kierunkowo. Klasyczny test "elipsy": stacja S jest dopuszczalna do dalszej
+// eksploracji tylko jeśli dystans(origin,S) + dystans(S,cel) <= dystans(origin,cel) × zapas
+// — dopuszcza rozsądne objazdy (realne trasy kolejowe nie są linią prostą), odrzuca kursy
+// jadące w oczywiście złym kierunku. Filtrowane w SQL (rail_stops.lat/lon), nie w JS — nie
+// trzeba dociągać współrzędnych rosnącego frontieru osobnymi zapytaniami.
+const MAX_DETOUR_FACTOR = 1.6;
+
+// Przybliżona odległość w km (płaska aproksymacja, wystarczająca dla obszaru Polski,
+// ~znacznie prostsza niż pełny haversine) — tylko do wyliczenia zapasu detour, nie do
+// precyzyjnych obliczeń.
+function approxKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const dLat = (lat1 - lat2) * 111.0;
+  const dLon = (lon1 - lon2) * 111.0 * Math.cos((((lat1 + lat2) / 2) * Math.PI) / 180);
+  return Math.sqrt(dLat * dLat + dLon * dLon);
+}
 const IN_LIST_LIMIT = 500; // praktyczny limit długości URL dla filtra in.() w PostgREST
 
 function inList(ids: string[]): string {
@@ -349,6 +384,17 @@ export async function runCsaJourney(
     toGroupSize: to.ids.length,
   };
 
+  // Filtr elipsy geograficznej (zob. komentarz przy MAX_DETOUR_FACTOR) -- tylko gdy OBIE
+  // stacje mają znane współrzędne; inaczej RPC dostaje same null-e i po prostu nie filtruje
+  // (bezpieczny fallback do dawnego zachowania, nie blokuje wyszukiwania).
+  const geoParams = (from.lat !== undefined && from.lon !== undefined && to.lat !== undefined && to.lon !== undefined)
+    ? {
+      p_origin_lat: from.lat, p_origin_lon: from.lon,
+      p_dest_lat: to.lat, p_dest_lon: to.lon,
+      p_max_detour_km: approxKm(from.lat, from.lon, to.lat, to.lon) * MAX_DETOUR_FACTOR,
+    }
+    : {};
+
   // "Stacja" to grupa stop_id (różne perony/tory dzielące tę samą nazwę) — dowolny z nich
   // jest poprawnym punktem startu/celu, zob. komentarz przy RailStationGroup.
   const fromIds = new Set(from.ids);
@@ -449,6 +495,7 @@ export async function runCsaJourney(
             p_dep_from: localStart,
             p_dep_to: localEnd,
             p_from_stop_ids: frontierSnapshot,
+            ...geoParams,
           });
         } catch (e) {
           return { result: null, diagnostics: { ...diagnostics, connectionsFetchError: String(e) } };
