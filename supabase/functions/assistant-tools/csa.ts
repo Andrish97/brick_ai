@@ -146,22 +146,23 @@ type Connection = {
 // dalsze nogi trasy daleko poza okno pierwszego odjazdu.
 const TRANSFER_BUFFER_SECONDS = 30 * 60;
 const MAX_TRANSFER_WAIT_SECONDS = 4 * 3600;
-// Całkowity zasięg skanowania musi pomieścić najgorszy realny przypadek: okno startowe
-// (do 4h) + do 3 przesiadek × do 4h oczekiwania każda + same przejazdy — stąd ~20h,
-// WIĘCEJ niż poprzednie 12h (2h×6), nie mniej.
+// Całkowity zasięg skanowania: BŁĘDNIE liczony wcześniej jako okno startowe (4h) + do 3
+// przesiadek × do 4h OCZEKIWANIA każda = ~20h — to pomijało, że 4h to limit samej
+// PRZESIADKI (oczekiwania), nie długości odcinka jazdy. Sam odcinek (pociąg między
+// kolejnymi przesiadkami) może jechać wiele godzin niezależnie od tego limitu — przy 3
+// przesiadkach i długich odcinkach realny łączny czas podróży może sięgać ~50h. Stąd
+// WINDOW_SECONDS(2h) × MAX_WINDOWS(25) = 50h, nie 20h.
 //
 // REALNY BŁĄD z produkcji (pierwszy test po wdrożeniu tego kroku, Katowice->Zamość):
-// próba z WINDOW_SECONDS=4h (5 okien) dała connectionsScannedTotal DOKŁADNIE 5000 —
-// równe twardemu LIMIT w rail_connections_in_window (zob. migracja), który nie filtruje
-// po stacji, tylko zwraca CAŁY krajowy rozkład w oknie dla ~667 aktywnych service_id.
-// Podwojenie okna z 2h na 4h najwyraźniej po raz pierwszy realnie w ten limit uderzyło,
-// obcinając dane (sortowanie po dep_seconds ASC ucina PÓŹNIEJszą część okna) zanim CSA
-// zdążyło zobaczyć właściwe połączenia z Katowic. Naprawa: węższe okna (2h, jak w
-// poprzedniej, znanej działającej wersji) ale WIĘCEJ ich (10 zamiast 6), żeby zachować
-// ten sam ~20h łączny zasięg wymagany przez plan — mniej ryzyka ucięcia pojedynczego
-// zapytania, ten sam całkowity zasięg czasowy.
+// próba z WINDOW_SECONDS=4h dała connectionsScannedTotal DOKŁADNIE 5000 — równe twardemu
+// LIMIT w rail_connections_in_window (zob. migracja), który nie filtruje po stacji, tylko
+// zwraca CAŁY krajowy rozkład w oknie dla ~667 aktywnych service_id. Podwojenie okna z 2h
+// na 4h najwyraźniej po raz pierwszy realnie w ten limit uderzyło, obcinając dane
+// (sortowanie po dep_seconds ASC ucina PÓŹNIEJszą część okna) zanim CSA zdążyło zobaczyć
+// właściwe połączenia z Katowic. Naprawa: węższe okna (2h, jak w poprzedniej, znanej
+// działającej wersji) — mniej ryzyka ucięcia pojedynczego zapytania niż przy 4h.
 const WINDOW_SECONDS = 2 * 3600;
-const MAX_WINDOWS = 10;
+const MAX_WINDOWS = 25; // 50h łącznego zasięgu
 const IN_LIST_LIMIT = 500; // praktyczny limit długości URL dla filtra in.() w PostgREST
 
 function inList(ids: string[]): string {
