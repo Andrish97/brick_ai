@@ -162,11 +162,29 @@ const MAX_TRANSFER_WAIT_SECONDS = 4 * 3600;
 // właściwe połączenia z Katowic. Naprawa: węższe okna (2h, jak w poprzedniej, znanej
 // działającej wersji) — mniej ryzyka ucięcia pojedynczego zapytania niż przy 4h.
 const WINDOW_SECONDS = 2 * 3600;
-const MAX_WINDOWS = 25; // 50h łącznego zasięgu
+const MAX_WINDOWS = 25; // twardy limit LICZBY zapytań RPC (niezależnie od liczby dni), zob. komentarz w runCsaJourney
+// Łączny zasięg CZASOWY (absolutny, od originWindowStart) — 50h, bo 4h to limit samej
+// przesiadki (oczekiwania), nie długości odcinka jazdy między przesiadkami (ten może trwać
+// wiele godzin niezależnie od tego limitu).
+const TOTAL_SCAN_SECONDS = 50 * 3600;
+// Ten feed nie ma calendar.txt — KAŻDY dzień działania kursu to OSOBNY service_id
+// (zob. activeServiceIds). dep_seconds/arr_seconds w rail_connections są parsowane WPROST
+// z GTFS HH:MM:SS (bez modulo 24h) — kurs przechodzący północ ma np. arr_seconds=27:15,
+// ale WCIĄŻ pod service_id dnia POPRZEDNIEGO ("extended time", standardowa konwencja
+// GTFS). Realistycznie taki "extended" zasięg rzadko przekracza ~28-30h lokalnie — dalej
+// szukać sensu nie ma, bo to już będzie po prostu NASTĘPNY dzień z WŁASNYM service_id
+// (zob. pętla dayOffset w runCsaJourney).
+const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
 const IN_LIST_LIMIT = 500; // praktyczny limit długości URL dla filtra in.() w PostgREST
 
 function inList(ids: string[]): string {
   return ids.slice(0, IN_LIST_LIMIT).map((id) => `"${id}"`).join(",");
+}
+
+function addDaysToDateStr(dateStr: string, days: number): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
 // Aktywne service_id na dany dzień: dzień tygodnia z rail_calendar (w zakresie
@@ -250,13 +268,15 @@ export async function runCsaJourney(
   const emptyDiagnostics: CsaDiagnostics = {
     activeServiceCount: 0, serviceIdsInFilter: 0, windowsScanned: 0, connectionsScannedTotal: 0, stationsReached: 0,
   };
-  const serviceIds = await activeServiceIds(url, key, date);
-  if (!serviceIds || !serviceIds.size) return { result: null, diagnostics: emptyDiagnostics };
-  const serviceIdList = [...serviceIds];
+  // Dzień 0 (data podróży) musi mieć aktywne service_id, inaczej nie ma czego szukać —
+  // KOLEJNE dni (zob. pętla dayOffset niżej) mogą wypaść puste bez przerywania całego
+  // wyszukiwania (np. dzień świąteczny bez kursów, ale dzień po nim już z kursami).
+  const day0ServiceIds = await activeServiceIds(url, key, date);
+  if (!day0ServiceIds || !day0ServiceIds.size) return { result: null, diagnostics: emptyDiagnostics };
 
   const diagnostics: CsaDiagnostics = {
-    activeServiceCount: serviceIdList.length,
-    serviceIdsInFilter: serviceIdList.length, // RPC (ciało POST) — bez obcinania, zob. sbRpc
+    activeServiceCount: day0ServiceIds.size,
+    serviceIdsInFilter: day0ServiceIds.size, // RPC (ciało POST) — bez obcinania, zob. sbRpc
     windowsScanned: 0,
     connectionsScannedTotal: 0,
     stationsReached: 0,
@@ -272,56 +292,84 @@ export async function runCsaJourney(
   const arrivedViaTrip = new Map<string, string>(from.ids.map((id) => [id, "__origin__"]));
   const incoming = new Map<string, Connection>();
 
-  let windowStart = originWindowStart;
   let found = false;
   const windowConnectionCounts: number[] = [];
+  const maxDayOffset = Math.floor((originWindowStart + TOTAL_SCAN_SECONDS) / 86400);
 
-  for (let w = 0; w < MAX_WINDOWS; w++) {
-    const windowEnd = windowStart + WINDOW_SECONDS;
-    const targetArrivals = to.ids.map((id) => earliestArrival.get(id)).filter((v): v is number => v !== undefined);
-    const bestTargetArrival = targetArrivals.length ? Math.min(...targetArrivals) : undefined;
-    if (bestTargetArrival !== undefined && windowStart > bestTargetArrival) break;
-
-    let connections: Connection[];
-    try {
-      connections = await sbRpc<Connection>(url, key, "rail_connections_in_window", {
-        p_service_ids: serviceIdList,
-        p_dep_from: windowStart,
-        p_dep_to: windowEnd,
-      });
-    } catch (e) {
-      return { result: null, diagnostics: { ...diagnostics, connectionsFetchError: String(e) } };
+  // Zewnętrzna pętla PO DNIACH KALENDARZOWYCH (dayOffset=0 to data podróży), wewnętrzna —
+  // po 2h oknach WEWNĄTRZ danego dnia (sekundy LOKALNE dla service_id tego dnia, 0..30h
+  // żeby objąć "extended time" kursy przechodzące północ). Bez tego rozbicia szerszy
+  // zasięg 50h byłby bezużyteczny: samo poszerzenie liczbowego okna na service_id DNIA 0
+  // nigdy nie znajdzie kursu, który zaczyna się DOPIERO następnego dnia (świeży poranny
+  // pociąg ma WŁASNY, inny service_id) — dokładnie to przeoczenie w poprzedniej wersji.
+  dayLoop:
+  for (let dayOffset = 0; dayOffset <= maxDayOffset; dayOffset++) {
+    let daySvcIds: Set<string> | null;
+    if (dayOffset === 0) {
+      daySvcIds = day0ServiceIds;
+    } else {
+      daySvcIds = await activeServiceIds(url, key, addDaysToDateStr(date, dayOffset));
     }
-    diagnostics.windowsScanned++;
-    diagnostics.connectionsScannedTotal += connections.length;
-    windowConnectionCounts.push(connections.length);
+    if (!daySvcIds || !daySvcIds.size) continue; // ten dzień bez aktywnych kursów — nie przerywaj całego skanu
+    const daySvcList = [...daySvcIds];
+    const dayAbsBase = dayOffset * 86400;
 
-    for (const c of connections) {
-      const arrAtFrom = earliestArrival.get(c.from_stop_id);
-      if (arrAtFrom === undefined) continue;
-      const sameTrip = arrivedViaTrip.get(c.from_stop_id) === c.trip_id;
-      // Boarding na stacji STARTOWEJ: tylko w oknie originWindowStart..originWindowEnd
-      // (pierwszy odjazd). Kontynuacja tego samego kursu (sameTrip): bez dodatkowego
-      // bufora — to nie przesiadka. Boarding na PRZESIADCE: osobna reguła 30min-4h,
-      // niezależna od okna startowego (może przesunąć dalsze nogi daleko poza nie).
-      const boardable = fromIds.has(c.from_stop_id)
-        ? (c.dep_seconds >= arrAtFrom && c.dep_seconds < originWindowEnd)
-        : (sameTrip
-          ? c.dep_seconds >= arrAtFrom
-          : (c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS && c.dep_seconds <= arrAtFrom + MAX_TRANSFER_WAIT_SECONDS));
-      if (!boardable) continue;
+    let localStart = dayOffset === 0 ? originWindowStart : 0;
+    while (localStart < EXTENDED_DAY_CEILING_SECONDS) {
+      const absStart = dayAbsBase + localStart;
+      if (absStart >= originWindowStart + TOTAL_SCAN_SECONDS) break dayLoop;
+      if (diagnostics.windowsScanned >= MAX_WINDOWS) break dayLoop; // twardy limit liczby zapytań RPC
 
-      const known = earliestArrival.get(c.to_stop_id);
-      if (known === undefined || c.arr_seconds < known) {
-        earliestArrival.set(c.to_stop_id, c.arr_seconds);
-        arrivedViaTrip.set(c.to_stop_id, c.trip_id);
-        incoming.set(c.to_stop_id, c);
-        if (toIds.has(c.to_stop_id)) found = true;
+      const targetArrivals = to.ids.map((id) => earliestArrival.get(id)).filter((v): v is number => v !== undefined);
+      const bestTargetArrival = targetArrivals.length ? Math.min(...targetArrivals) : undefined;
+      if (bestTargetArrival !== undefined && absStart > bestTargetArrival) break dayLoop;
+
+      const localEnd = localStart + WINDOW_SECONDS;
+      let connections: Connection[];
+      try {
+        connections = await sbRpc<Connection>(url, key, "rail_connections_in_window", {
+          p_service_ids: daySvcList,
+          p_dep_from: localStart,
+          p_dep_to: localEnd,
+        });
+      } catch (e) {
+        return { result: null, diagnostics: { ...diagnostics, connectionsFetchError: String(e) } };
       }
-    }
+      diagnostics.windowsScanned++;
+      diagnostics.connectionsScannedTotal += connections.length;
+      windowConnectionCounts.push(connections.length);
 
-    if (found) break;
-    windowStart = windowEnd;
+      for (const raw of connections) {
+        // RPC zwraca sekundy LOKALNE dla dayOffset (0 = data podróży) — przeliczamy na
+        // ABSOLUTNE (względem originWindowStart dnia 0), żeby earliestArrival i reguły
+        // przesiadek porównywały się poprawnie MIĘDZY dniami.
+        const c: Connection = { ...raw, dep_seconds: raw.dep_seconds + dayAbsBase, arr_seconds: raw.arr_seconds + dayAbsBase };
+        const arrAtFrom = earliestArrival.get(c.from_stop_id);
+        if (arrAtFrom === undefined) continue;
+        const sameTrip = arrivedViaTrip.get(c.from_stop_id) === c.trip_id;
+        // Boarding na stacji STARTOWEJ: tylko w oknie originWindowStart..originWindowEnd
+        // (pierwszy odjazd). Kontynuacja tego samego kursu (sameTrip): bez dodatkowego
+        // bufora — to nie przesiadka. Boarding na PRZESIADCE: osobna reguła 30min-4h,
+        // niezależna od okna startowego (może przesunąć dalsze nogi daleko poza nie).
+        const boardable = fromIds.has(c.from_stop_id)
+          ? (c.dep_seconds >= arrAtFrom && c.dep_seconds < originWindowEnd)
+          : (sameTrip
+            ? c.dep_seconds >= arrAtFrom
+            : (c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS && c.dep_seconds <= arrAtFrom + MAX_TRANSFER_WAIT_SECONDS));
+        if (!boardable) continue;
+
+        const known = earliestArrival.get(c.to_stop_id);
+        if (known === undefined || c.arr_seconds < known) {
+          earliestArrival.set(c.to_stop_id, c.arr_seconds);
+          arrivedViaTrip.set(c.to_stop_id, c.trip_id);
+          incoming.set(c.to_stop_id, c);
+          if (toIds.has(c.to_stop_id)) found = true;
+        }
+      }
+
+      if (found) break dayLoop;
+      localStart = localEnd;
+    }
   }
   diagnostics.stationsReached = Math.max(0, earliestArrival.size - from.ids.length);
   diagnostics.windowConnectionCounts = windowConnectionCounts;
@@ -351,10 +399,13 @@ export async function runCsaJourney(
       // KTÓRYKOLWIEK jego wariant service_id jest aktywny na ten dzień" policzoną w SQL tą
       // samą logiką co activeServiceIds() — sięga więc realnie przez cały dzień, nie tylko
       // pierwsze kilkadziesiąt zdublowanych wierszy.
-      const windowEndAll = originWindowStart + MAX_WINDOWS * WINDOW_SECONDS;
+      // rail_debug_departures liczy aktywność dla JEDNEJ daty (p_date) — ma więc sens tylko
+      // w zasięgu lokalnych sekund dnia 0 (do EXTENDED_DAY_CEILING_SECONDS), nie całego
+      // wielodniowego skanu (zob. pętla dayOffset wyżej) — to tylko diagnostyka pomocnicza
+      // dla origin, nie pełny obraz.
       const debugDepartures = await sbRpc<{ dep_seconds: number; to_stop_id: string; distinct_service_variants: number; any_active_today: boolean }>(
         url, key, "rail_debug_departures",
-        { p_stop_ids: from.ids, p_date: date, p_dep_from: originWindowStart, p_dep_to: windowEndAll },
+        { p_stop_ids: from.ids, p_date: date, p_dep_from: originWindowStart, p_dep_to: EXTENDED_DAY_CEILING_SECONDS },
       );
       diagnostics.distinctDeparturesFromOrigin = debugDepartures.length;
       const toSample = (d: typeof debugDepartures[number]) => ({
