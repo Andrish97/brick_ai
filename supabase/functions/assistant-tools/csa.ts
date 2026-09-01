@@ -25,7 +25,6 @@ type RailStation = { id: string; name: string };
 // zapisanych kursów. Poprawka: stacja to GRUPA wszystkich stop_id dzielących tę samą nazwę
 // — CSA trakuje dowolny z nich jako poprawny punkt startowy/docelowy.
 type RailStationGroup = { name: string; ids: string[] };
-type StationLookup = { ok: true; station: RailStationGroup } | { ok: false; body: Record<string, unknown> };
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
   const res = await fetch(`${url}/rest/v1/${path}`, {
@@ -50,66 +49,121 @@ async function sbRpc<T>(url: string, key: string, fn: string, args: Record<strin
   return res.json();
 }
 
-// Ta sama logika ujednoznaczniania co resolveSingleStation w index.ts (dokładne
-// dopasowanie nazwy, potem przyrostek Główny/Główna/Główne) — świadomie zduplikowana
-// tutaj (patrz komentarz na górze pliku), nie zaimportowana.
-function pickBestStationMatch(candidates: RailStation[], query: string): RailStation | null {
-  if (candidates.length === 1) return candidates[0];
-  if (candidates.length === 0) return null;
-  const normalizedQuery = query.trim().toLowerCase();
-  const exact = candidates.filter((s) => s.name.trim().toLowerCase() === normalizedQuery);
-  if (exact.length === 1) return exact[0];
-  const mainSuffix = /^(glowny|glowna|glowne|główny|główna|główne)$/i;
-  const main = candidates.filter((s) => {
-    const name = s.name.trim().toLowerCase();
-    if (!name.startsWith(normalizedQuery)) return false;
-    return mainSuffix.test(name.slice(normalizedQuery.length).trim());
-  });
-  if (main.length === 1) return main[0];
-  return null;
+// Ta sama odpowiedź co dawne StationLookup, plus informacja diagnostyczna JAK stacja została
+// rozstrzygnięta — pomocne w logach (zob. rail_local_entry/skip w index.ts) przy
+// weryfikacji, czy AI faktycznie trafia w "Katowice Główny", czy ląduje w bezpieczniku.
+export type SmartStationLookup =
+  | { ok: true; station: RailStationGroup; resolvedVia: "single_candidate" | "ai" | "ai_fallback_connectivity"; aiRawPick?: string | null }
+  | { ok: false; body: Record<string, unknown> };
+
+// Jedno, lekkie wywołanie Gemini (bez narzędzi, sam tekst) do wyboru "sensownej" stacji
+// spośród kilku kandydatek o TEJ SAMEJ nazwie-podciągu — celowo osobne od głównej pętli
+// rozmowy w zadarma-sms-webhook (ten plik jest samodzielny, zob. komentarz na górze).
+async function askGeminiForStationPick(geminiKey: string, query: string, candidateNames: string[]): Promise<string | null> {
+  const prompt = `Użytkownik szuka stacji kolejowej w Polsce: "${query}".
+Kandydaci (dokładne nazwy stacji istniejące w bazie rozkładu PKP): ${candidateNames.map((n) => `"${n}"`).join(", ")}.
+
+Zasada wyboru:
+- Jeśli zapytanie użytkownika już wprost wskazuje KONKRETNĄ stację (np. dzielnicę/część
+  miasta, jak "Wrocław Kuźniki"), wybierz DOKŁADNIE TĘ, literalnie.
+- W przeciwnym razie (zapytanie to ogólna nazwa miasta) wybierz NAJWIĘKSZĄ/GŁÓWNĄ stację
+  tego miasta — zwykle tę z dopiskiem "Główny"/"Główna"/"Dworzec Główny", obsługującą
+  najwięcej połączeń dalekobieżnych, NIE małe przystanki lokalne/podmiejskie.
+
+Odpowiedz WYŁĄCZNIE dokładną nazwą jednego kandydata z powyższej listy, bez cudzysłowów,
+bez żadnego dodatkowego tekstu ani wyjaśnienia.`;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 64, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+      },
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const parts: Array<{ text?: string }> = data.candidates?.[0]?.content?.parts ?? [];
+    const text = parts.map((p) => p.text ?? "").join("").trim();
+    return text || null;
+  } catch {
+    return null;
+  }
 }
 
-export async function resolveSingleStationLocal(url: string, key: string, query: string): Promise<StationLookup> {
+// Bezpiecznik: kandydat z NAJWIĘKSZĄ liczbą zapisanych odjazdów w rail_connections —
+// tanie, czysto danowe przybliżenie "największej/głównej stacji", używane gdy AI
+// zawiedzie (błąd sieci/klucza) albo jego odpowiedź nie zgadza się z żadnym kandydatem
+// (halucynacja) — zob. migracja rail_station_candidate_stats.
+async function pickCandidateByConnectivity(
+  url: string, key: string, uniqueNames: string[], rows: RailStation[],
+): Promise<string> {
+  const groupIds = (name: string) => rows.filter((r) => r.name === name).map((r) => r.id);
+  try {
+    const allIds = rows.map((r) => r.id);
+    const stats = await sbRpc<{ stop_id: string; departure_count: number }>(
+      url, key, "rail_station_candidate_stats", { p_stop_ids: allIds },
+    );
+    const countByStopId = new Map(stats.map((s) => [s.stop_id, s.departure_count]));
+    let bestName = uniqueNames[0];
+    let bestCount = -1;
+    for (const name of uniqueNames) {
+      const total = groupIds(name).reduce((sum, id) => sum + (countByStopId.get(id) ?? 0), 0);
+      if (total > bestCount) { bestCount = total; bestName = name; }
+    }
+    return bestName;
+  } catch {
+    return uniqueNames[0]; // ostateczny bezpiecznik — zapytanie o statystyki też zawiodło
+  }
+}
+
+// Wybór stacji, gdy zapytanie to NAZWA MIASTA obejmująca kilka realnych stacji (np.
+// "Katowice" -> "Katowice", "Katowice Główny", "Katowice Ligota", ...): zamiast
+// heurystyki string-matchingu (dawne resolveSingleStationLocal — patrz komentarz przy
+// exactRows wyżej, realny błąd: dokładne dopasowanie "Katowice" krótkie spięcie zwracało
+// małą, podrzędną stację, zanim w ogóle sprawdzono istnienie "Katowice Główny"), pytamy
+// AI o wybór "sensownej" (największej) stacji — z deterministycznym bezpiecznikiem po
+// liczbie połączeń, gdyby AI zawiodło albo zhalucynowało nazwę spoza kandydatów.
+export async function resolveStationGroupSmart(
+  url: string, key: string, geminiKey: string | undefined, query: string,
+): Promise<SmartStationLookup> {
   const q = query.trim();
   if (!q) return { ok: false, body: { error: "station_not_found", query: q } };
-  try {
-    // Realny błąd znaleziony na produkcji: dopasowanie dokładne było szukane WYŁĄCZNIE
-    // wewnątrz jednego zapytania ILIKE '%q%' LIMIT 20, bez ORDER BY — dla miast z wieloma
-    // stacjami podrzędnymi zawierającymi tę samą nazwę jako podciąg (np. Katowice: Ligota,
-    // Piotrowice, Szopienice, Zawodzie, Brynów...), Postgres bez porządkowania zwraca
-    // wiersze w praktycznie dowolnej kolejności — sama stacja "Katowice" mogła się w ogóle
-    // nie zmieścić w pierwszych 20 wynikach, mimo że istniała w bazie. Zweryfikowane
-    // lokalnie: dokładnie ten scenariusz odtworzony (20 podstacji + "Katowice" wstawione
-    // jako ostatnie) dawał identyczny objaw — "Katowice" całkowicie nieobecne w wyniku.
-    // Naprawa: osobne, ukierunkowane zapytanie o dopasowanie dokładne (ilike BEZ gwiazdek —
-    // to w PostgREST oznacza pełne dopasowanie, nie podciąg) PRZED szerokim skanem
-    // podciągów, więc duża liczba podstacji nigdy nie może wypchnąć właściwego wyniku.
-    // Zapytanie już wymusza dokładną (bez rozróżniania wielkości liter) zgodność nazwy, więc
-    // KAŻDY zwrócony wiersz ma dokładnie szukaną nazwę — różnią się co najwyżej peronem/
-    // stop_id (osobne wiersze GTFS dla tego samego fizycznego przystanku). Zbieramy WSZYSTKIE
-    // takie stop_id w jedną grupę (zob. komentarz przy RailStationGroup) zamiast wybierać
-    // arbitralnie jeden.
-    const exactRows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.${encodeURIComponent(q)}&select=id,name&limit=50`);
-    if (exactRows.length) return { ok: true, station: { name: exactRows[0].name, ids: exactRows.map((r) => r.id) } };
-  } catch {
-    return { ok: false, body: { error: "local_lookup_failed", query: q } };
-  }
   let rows: RailStation[];
   try {
-    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name&limit=100`);
+    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name&limit=200`);
   } catch {
     return { ok: false, body: { error: "local_lookup_failed", query: q } };
   }
   if (!rows.length) return { ok: false, body: { error: "station_not_found", query: q } };
-  // Rozstrzyganie MIĘDZY różnymi nazwami po zdeduplikowanych nazwach — na surowych wierszach
-  // "Katowice Ligota" liczone 4x jako 4 kandydatów łamałoby np. sprawdzenie exact.length===1
-  // w pickBestStationMatch, mimo że to jedna, jednoznaczna nazwa (realny, powiązany błąd).
+
   const uniqueNames = [...new Set(rows.map((r) => r.name))];
   const groupIds = (name: string) => rows.filter((r) => r.name === name).map((r) => r.id);
-  if (uniqueNames.length === 1) return { ok: true, station: { name: uniqueNames[0], ids: groupIds(uniqueNames[0]) } };
-  const best = pickBestStationMatch(uniqueNames.map((name) => ({ id: name, name })), q);
-  if (best) return { ok: true, station: { name: best.name, ids: groupIds(best.name) } };
-  return { ok: false, body: { error: "ambiguous_station", query: q, candidates: uniqueNames.slice(0, 5) } };
+
+  // Szybka ścieżka: jedna odrębna nazwa wśród kandydatów -> użyj jej wprost, bez
+  // wywołania AI (pokrywa np. "Wrocław Kuźniki": jedno trafienie, koniec).
+  if (uniqueNames.length === 1) {
+    return { ok: true, station: { name: uniqueNames[0], ids: groupIds(uniqueNames[0]) }, resolvedVia: "single_candidate" };
+  }
+
+  if (geminiKey) {
+    const aiPick = await askGeminiForStationPick(geminiKey, q, uniqueNames);
+    const normalizedPick = aiPick?.trim();
+    const matched = normalizedPick ? uniqueNames.find((n) => n.trim().toLowerCase() === normalizedPick.toLowerCase()) : undefined;
+    if (matched) {
+      return { ok: true, station: { name: matched, ids: groupIds(matched) }, resolvedVia: "ai", aiRawPick: aiPick };
+    }
+    const fallbackName = await pickCandidateByConnectivity(url, key, uniqueNames, rows);
+    return { ok: true, station: { name: fallbackName, ids: groupIds(fallbackName) }, resolvedVia: "ai_fallback_connectivity", aiRawPick: aiPick };
+  }
+
+  // Brak klucza Gemini w środowisku assistant-tools -- ten sam bezpiecznik po liczbie
+  // połączeń, bez próby wywołania AI.
+  const fallbackName = await pickCandidateByConnectivity(url, key, uniqueNames, rows);
+  return { ok: true, station: { name: fallbackName, ids: groupIds(fallbackName) }, resolvedVia: "ai_fallback_connectivity" };
 }
 
 // Fallback #1 z planu: brak udanego syncu, albo ostatni sukces starszy niż maxAgeHours

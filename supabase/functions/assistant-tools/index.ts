@@ -1,4 +1,4 @@
-import { resolveSingleStationLocal, hasFreshLocalData, runCsaJourney, type CsaResult } from "./csa.ts";
+import { resolveStationGroupSmart, hasFreshLocalData, runCsaJourney, type CsaResult } from "./csa.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -954,10 +954,18 @@ async function tryPlanTrainJourneyLocal(
       return null; // spadnij na żywą — ona da właściwy komunikat no_preferred_station
     }
 
+    const geminiKey = Deno.env.get("GEMINI_API_KEY");
     const [fromLookup, toLookup] = await Promise.all([
-      resolveSingleStationLocal(url, key, fromResolved.query),
-      resolveSingleStationLocal(url, key, toResolved.query),
+      resolveStationGroupSmart(url, key, geminiKey, fromResolved.query),
+      resolveStationGroupSmart(url, key, geminiKey, toResolved.query),
     ]);
+    log("rail_local_station_resolved", {
+      from: fromResolved.query, to: toResolved.query,
+      fromVia: fromLookup.ok ? fromLookup.resolvedVia : undefined,
+      fromPicked: fromLookup.ok ? fromLookup.station.name : undefined,
+      toVia: toLookup.ok ? toLookup.resolvedVia : undefined,
+      toPicked: toLookup.ok ? toLookup.station.name : undefined,
+    });
     if (!fromLookup.ok || !toLookup.ok) {
       log("rail_local_skip", {
         reason: "station_not_resolved_locally",
