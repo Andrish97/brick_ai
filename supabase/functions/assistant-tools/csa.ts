@@ -341,6 +341,10 @@ export type CsaDiagnostics = {
   // syncem/parsowaniem) od "dane są, ale ich service_id nie trafił do aktywnego zbioru na
   // ten dzień" (błąd kalendarza).
   distinctDeparturesFromOrigin?: number;
+  // Rozmiar zbioru "dwukierunkowego" (rail_backward_reachable_stations) -- ile stacji w
+  // ogóle topologicznie może dotrzeć do celu, niezależnie od czasu. undefined = zapytanie
+  // zawiodło (bezpiecznik: wyszukiwanie kontynuuje bez tego filtra, nie blokuje wyniku).
+  backwardReachableCount?: number;
   departureSample?: { depSeconds: number; toStopId: string; serviceVariants: number; activeToday: boolean }[];
 };
 
@@ -394,6 +398,21 @@ export async function runCsaJourney(
       p_max_detour_km: approxKm(from.lat, from.lon, to.lat, to.lon) * MAX_DETOUR_FACTOR,
     }
     : {};
+
+  // "Dwukierunkowość" (odpowiedź na realny problem skali: CSA "zalewał" pół kraju szukając
+  // Zamościa z Katowic) -- JEDNORAZOWE (nie w pętli okien), statyczne przeszukanie WSTECZ od
+  // celu po topologii sieci (ignorujące czas/service_id — zob. migracja
+  // rail_backward_reachable_stations): zbiór stacji, z których cel jest w ogóle osiągalny
+  // JAKIMKOLWIEK łańcuchem kursów. Używany niżej do dodatkowego przycięcia frontieru obok
+  // filtra geograficznego. Bycie nadmiarowym w tym zbiorze jest bezpieczne (najwyżej nie
+  // pomaga) -- błąd zapytania NIE blokuje wyszukiwania, po prostu wyłącza tę optymalizację
+  // dla tego przebiegu (ten sam wzorzec co przy wszystkich innych diagnostykach/filtrach).
+  let backwardReachable: Set<string> | null = null;
+  try {
+    const rows = await sbRpc<{ stop_id: string }>(url, key, "rail_backward_reachable_stations", { p_dest_stop_ids: to.ids });
+    backwardReachable = new Set(rows.map((r) => r.stop_id));
+    diagnostics.backwardReachableCount = backwardReachable.size;
+  } catch { /* optymalizacja opcjonalna — brak filtra to bezpieczny fallback, nie błąd */ }
 
   // "Stacja" to grupa stop_id (różne perony/tory dzielące tę samą nazwę) — dowolny z nich
   // jest poprawnym punktem startu/celu, zob. komentarz przy RailStationGroup.
@@ -483,7 +502,17 @@ export async function runCsaJourney(
       // faktycznie rośnie (albo do MAX_SETTLE_ITERATIONS_PER_WINDOW jako zabezpieczenia).
       let lastFrontierSize = -1;
       for (let settleIter = 0; settleIter < MAX_SETTLE_ITERATIONS_PER_WINDOW; settleIter++) {
-        const frontierSnapshot = [...earliestArrival.keys()];
+        // queryFrontier = frontier CSA PRZYCIĘTY do stacji, z których cel jest w ogóle
+        // topologicznie osiągalny (backwardReachable, zob. wyżej) -- origin ZAWSZE wchodzi
+        // niezależnie od tego zbioru (bezpiecznik: nawet gdyby backwardReachable błędnie/
+        // niekompletnie pominął origin, musimy i tak spróbować z niego wystartować).
+        // Punkt stały liczony na PRZYCIĘTYM zbiorze, nie pełnym earliestArrival -- odkrycie
+        // stacji, z której i tak nie da się dotrzeć do celu, nie powinno wymuszać kolejnego
+        // zapytania.
+        const fullFrontier = [...earliestArrival.keys()];
+        const frontierSnapshot = backwardReachable
+          ? fullFrontier.filter((id) => backwardReachable!.has(id) || fromIds.has(id))
+          : fullFrontier;
         if (frontierSnapshot.length === lastFrontierSize) break; // punkt stały dla TEGO okna
         lastFrontierSize = frontierSnapshot.length;
         if (diagnostics.windowsScanned >= MAX_WINDOWS) break dayLoop; // twardy limit liczby zapytań RPC
