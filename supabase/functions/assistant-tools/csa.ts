@@ -343,8 +343,33 @@ export async function runCsaJourney(
   const fromIds = new Set(from.ids);
   const toIds = new Set(to.ids);
   const earliestArrival = new Map<string, number>(from.ids.map((id) => [id, originWindowStart]));
-  const arrivedViaTrip = new Map<string, string>(from.ids.map((id) => [id, "__origin__"]));
   const incoming = new Map<string, Connection>();
+  // Realny błąd znaleziony na produkcji: śledzenie "przez jaki trip_id dotarliśmy do stacji"
+  // JAKO WŁAŚCIWOŚĆ STACJI (poprzednie arrivedViaTrip: Map<stopId, tripId>, ustawiane TYLKO
+  // gdy dana przesiadka poprawiała earliestArrival celu) gubiło kontynuację kursu za każdym
+  // razem, gdy INNY, także osiągalny kurs dojeżdżał do tego samego przystanku pośredniego
+  // ułamek sekundy wcześniej — w węźle tak gęstym jak Katowice (wiele linii z tej samej
+  // stacji zbiegających się na tym samym najbliższym przystanku) to normalna sytuacja, nie
+  // wyjątek: skutek był taki, że KAŻDY kurs z Katowic "gubił się" dokładnie po pierwszym
+  // przystanku, bo jego WŁASNA kontynuacja przestawała się liczyć jako "ten sam trip" (inny
+  // kurs "wygrywał" earliestArrival tego przystanku), a jego naturalny, kilkuminutowy postój
+  // nie mieścił się w regule przesiadki (min. 30 min) — algorytm nigdy nie docierał dalej niż
+  // jeden przystanek od żadnej stacji. Standardowy CSA (Dibbelt i in.) śledzi to NIEZALEŻNIE
+  // od stacji: boardedTrips to zbiór trip_id, na które już "wsiedliśmy" GDZIEKOLWIEK — raz
+  // wsiadłszy, KAŻDA kolejna noga tego kursu jest automatycznie dopuszczalna (czasy GTFS
+  // wzdłuż trasy jednego kursu są z definicji rosnące), niezależnie od tego, czy jakiś inny
+  // kurs "wygrał" earliestArrival danego przystanku pośredniego.
+  const boardedTrips = new Set<string>();
+  // Powiązany błąd (odtwarzanie trasy): earliestArrival/incoming śledzą NAJSZYBSZE dotarcie
+  // do STACJI, więc gdyby odtwarzanie trasy wstecz szło przez incoming.get(stacja_pośrednia),
+  // mogłoby "przeskoczyć" na inny, szybszy, ale NIEZWIĄZANY kurs, który tę stację wygrał —
+  // pokazując fantomową przesiadkę (np. poniżej 30-minutowego minimum) zamiast prawdziwej
+  // kontynuacji. predecessorOf śledzi poprzednika NA POZIOMIE KONKRETNEGO POŁĄCZENIA (nie
+  // stacji): dla kontynuacji kursu — poprzednie połączenie TEGO SAMEGO trip_id (lastTripConnection);
+  // dla świeżego wsiadania (origin/przesiadka) — connection z incoming dla stacji startowej.
+  const lastTripConnection = new Map<string, Connection>();
+  const predecessorOf = new Map<string, Connection | null>();
+  const connKey = (c: Connection) => `${c.trip_id}|${c.from_stop_id}|${c.dep_seconds}`;
 
   let found = false;
   const windowConnectionCounts: number[] = [];
@@ -398,24 +423,34 @@ export async function runCsaJourney(
         // ABSOLUTNE (względem originWindowStart dnia 0), żeby earliestArrival i reguły
         // przesiadek porównywały się poprawnie MIĘDZY dniami.
         const c: Connection = { ...raw, dep_seconds: raw.dep_seconds + dayAbsBase, arr_seconds: raw.arr_seconds + dayAbsBase };
-        const arrAtFrom = earliestArrival.get(c.from_stop_id);
-        if (arrAtFrom === undefined) continue;
-        const sameTrip = arrivedViaTrip.get(c.from_stop_id) === c.trip_id;
-        // Boarding na stacji STARTOWEJ: tylko w oknie originWindowStart..originWindowEnd
-        // (pierwszy odjazd). Kontynuacja tego samego kursu (sameTrip): bez dodatkowego
-        // bufora — to nie przesiadka. Boarding na PRZESIADCE: osobna reguła 30min-4h,
-        // niezależna od okna startowego (może przesunąć dalsze nogi daleko poza nie).
-        const boardable = fromIds.has(c.from_stop_id)
-          ? (c.dep_seconds >= arrAtFrom && c.dep_seconds < originWindowEnd)
-          : (sameTrip
-            ? c.dep_seconds >= arrAtFrom
-            : (c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS && c.dep_seconds <= arrAtFrom + MAX_TRANSFER_WAIT_SECONDS));
+        let boardable: boolean;
+        let predecessor: Connection | null;
+        if (boardedTrips.has(c.trip_id)) {
+          // Kontynuacja kursu, na który już GDZIEKOLWIEK wsiedliśmy — zawsze dopuszczalna,
+          // bez dodatkowego bufora (to nie przesiadka), niezależnie od earliestArrival tej
+          // konkretnej stacji pośredniej (zob. komentarz przy boardedTrips wyżej). Poprzednik
+          // to POPRZEDNIE połączenie TEGO SAMEGO kursu (nie "najszybsze dotarcie" do stacji).
+          boardable = true;
+          predecessor = lastTripConnection.get(c.trip_id) ?? null;
+        } else {
+          const arrAtFrom = earliestArrival.get(c.from_stop_id);
+          if (arrAtFrom === undefined) continue;
+          // Boarding na stacji STARTOWEJ: tylko w oknie originWindowStart..originWindowEnd
+          // (pierwszy odjazd). Boarding na PRZESIADCE: osobna reguła 30min-4h, niezależna
+          // od okna startowego (może przesunąć dalsze nogi daleko poza nie).
+          boardable = fromIds.has(c.from_stop_id)
+            ? (c.dep_seconds >= arrAtFrom && c.dep_seconds < originWindowEnd)
+            : (c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS && c.dep_seconds <= arrAtFrom + MAX_TRANSFER_WAIT_SECONDS);
+          predecessor = fromIds.has(c.from_stop_id) ? null : (incoming.get(c.from_stop_id) ?? null);
+        }
         if (!boardable) continue;
+        boardedTrips.add(c.trip_id);
+        lastTripConnection.set(c.trip_id, c);
+        predecessorOf.set(connKey(c), predecessor);
 
         const known = earliestArrival.get(c.to_stop_id);
         if (known === undefined || c.arr_seconds < known) {
           earliestArrival.set(c.to_stop_id, c.arr_seconds);
-          arrivedViaTrip.set(c.to_stop_id, c.trip_id);
           incoming.set(c.to_stop_id, c);
           if (toIds.has(c.to_stop_id)) found = true;
         }
@@ -477,14 +512,16 @@ export async function runCsaJourney(
     return { result: null, diagnostics };
   }
 
-  // Odtwórz ścieżkę wstecz przez incoming, potem odwróć.
+  // Odtwórz ścieżkę wstecz przez predecessorOf (NA POZIOMIE POŁĄCZENIA, nie stacji — zob.
+  // komentarz przy predecessorOf: incoming.get(stacja) dałoby NAJSZYBSZE dotarcie do danej
+  // stacji pośredniej, które mogło pochodzić z zupełnie INNEGO, niezwiązanego kursu niż ten,
+  // którym faktycznie kontynuowaliśmy jazdę — pokazując fantomową przesiadkę zamiast
+  // prawdziwej kontynuacji), potem odwróć.
   const chain: Connection[] = [];
-  let cursor = reachedToId;
-  while (!fromIds.has(cursor)) {
-    const c = incoming.get(cursor);
-    if (!c) return { result: null, diagnostics }; // bezpiecznik — nie powinno się zdarzyć, skoro earliestArrival ma wpis
-    chain.push(c);
-    cursor = c.from_stop_id;
+  let current: Connection | null = incoming.get(reachedToId) ?? null;
+  while (current) {
+    chain.push(current);
+    current = predecessorOf.get(connKey(current)) ?? null;
   }
   chain.reverse();
   if (!chain.length) return { result: null, diagnostics };
