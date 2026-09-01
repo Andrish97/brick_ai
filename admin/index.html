@@ -2124,13 +2124,17 @@ function renderJourneyTestResult() {
       : r.skipReason
         ? `<div style="font-size:11px;color:var(--danger);margin-top:6px">Ścieżka lokalna pominięta: ${escHtml(skipLabel[r.skipReason.reason] || r.skipReason.reason)}</div>`
         : '';
+  const sr = r.stationResolved;
+  const stationInfo = sr
+    ? `<div style="font-size:11px;color:var(--muted);margin-top:6px">Stacje: ${escHtml(sr.from || '?')} → <b>${escHtml(sr.fromPicked || '?')}</b> (${escHtml(sr.fromVia || '?')}) &nbsp;|&nbsp; ${escHtml(sr.to || '?')} → <b>${escHtml(sr.toPicked || '?')}</b> (${escHtml(sr.toVia || '?')})</div>`
+    : '';
   const raw = `<details style="margin-top:6px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">surowa odpowiedź + wpisy logów</summary><pre style="font-size:11px;margin-top:6px;white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px;border-radius:6px">${escHtml(JSON.stringify(r, null, 2))}</pre></details>`;
   return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <strong style="font-size:13px">${escHtml(_journeyTest.from)} → ${escHtml(_journeyTest.to)} (${escHtml(_journeyTest.date)})</strong>
         ${pathBadge}
       </div>
-      ${body}${diag}${raw}
+      ${body}${diag}${stationInfo}${raw}
     </div>`;
 }
 
@@ -2166,10 +2170,10 @@ async function runJourneyTest() {
   try {
     const { data: logRows } = await sb.from('logs')
       .select('type,data,created_at')
-      .in('type', ['plan_train_journey_path', 'rail_local_mismatch', 'rail_local_error', 'rail_local_skip', 'rail_local_entry'])
+      .in('type', ['plan_train_journey_path', 'rail_local_mismatch', 'rail_local_error', 'rail_local_skip', 'rail_local_entry', 'rail_local_station_resolved'])
       .gte('created_at', startedAt)
       .order('created_at', { ascending: true })
-      .limit(5);
+      .limit(8);
     const pathRow = logRows?.find(l => l.type === 'plan_train_journey_path');
     result.path = pathRow?.data?.path ?? null;
     result.mismatch = logRows?.some(l => l.type === 'rail_local_mismatch') ?? false;
@@ -2177,6 +2181,8 @@ async function runJourneyTest() {
     result.localError = errRow?.data?.error ?? null;
     const skipRow = logRows?.find(l => l.type === 'rail_local_skip');
     result.skipReason = skipRow?.data ?? null;
+    const stationRow = logRows?.find(l => l.type === 'rail_local_station_resolved');
+    result.stationResolved = stationRow?.data ?? null;
     result.logRows = logRows ?? [];
   } catch { /* diagnostyka opcjonalna — nie blokuj wyniku samej odpowiedzi */ }
 
