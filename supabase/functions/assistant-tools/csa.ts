@@ -147,11 +147,21 @@ type Connection = {
 const TRANSFER_BUFFER_SECONDS = 30 * 60;
 const MAX_TRANSFER_WAIT_SECONDS = 4 * 3600;
 // Całkowity zasięg skanowania musi pomieścić najgorszy realny przypadek: okno startowe
-// (do 4h) + do 3 przesiadek × do 4h oczekiwania każda + same przejazdy — stąd 5×4h=20h,
-// WIĘCEJ niż poprzednie 12h (2h×6), nie mniej. Mniejsza liczba, większych okien (5 zamiast
-// wcześniejszych 6) niż dawniej, żeby nie zwiększać liczby zapytań RPC mimo szerszego zasięgu.
-const WINDOW_SECONDS = 4 * 3600;
-const MAX_WINDOWS = 5;
+// (do 4h) + do 3 przesiadek × do 4h oczekiwania każda + same przejazdy — stąd ~20h,
+// WIĘCEJ niż poprzednie 12h (2h×6), nie mniej.
+//
+// REALNY BŁĄD z produkcji (pierwszy test po wdrożeniu tego kroku, Katowice->Zamość):
+// próba z WINDOW_SECONDS=4h (5 okien) dała connectionsScannedTotal DOKŁADNIE 5000 —
+// równe twardemu LIMIT w rail_connections_in_window (zob. migracja), który nie filtruje
+// po stacji, tylko zwraca CAŁY krajowy rozkład w oknie dla ~667 aktywnych service_id.
+// Podwojenie okna z 2h na 4h najwyraźniej po raz pierwszy realnie w ten limit uderzyło,
+// obcinając dane (sortowanie po dep_seconds ASC ucina PÓŹNIEJszą część okna) zanim CSA
+// zdążyło zobaczyć właściwe połączenia z Katowic. Naprawa: węższe okna (2h, jak w
+// poprzedniej, znanej działającej wersji) ale WIĘCEJ ich (10 zamiast 6), żeby zachować
+// ten sam ~20h łączny zasięg wymagany przez plan — mniej ryzyka ucięcia pojedynczego
+// zapytania, ten sam całkowity zasięg czasowy.
+const WINDOW_SECONDS = 2 * 3600;
+const MAX_WINDOWS = 10;
 const IN_LIST_LIMIT = 500; // praktyczny limit długości URL dla filtra in.() w PostgREST
 
 function inList(ids: string[]): string {
@@ -196,6 +206,11 @@ export type CsaDiagnostics = {
   serviceIdsInFilter: number; // ograniczone przez IN_LIST_LIMIT — jeśli < activeServiceCount, część dnia jest CICHO pomijana
   windowsScanned: number;
   connectionsScannedTotal: number;
+  // Liczba połączeń zwróconych PRZEZ KAŻDE pojedyncze okno — realny błąd na produkcji
+  // (zob. komentarz przy WINDOW_SECONDS) był widoczny tylko jako podejrzanie okrągła
+  // SUMA równa twardemu limitowi RPC; ta lista pozwala odróżnić "jedno okno ucięte przez
+  // limit" od "kilka okien złożyło się na tę sumę" bez zgadywania.
+  windowConnectionCounts?: number[];
   stationsReached: number; // ile stacji dostało policzony czas dotarcia (bez samego origin)
   connectionsFetchError?: string; // realny błąd zapytania o rail_connections, jeśli je przerwał (zob. pętla okien)
   fromGroupSize?: number; // ile stop_id wchodzi w grupę stacji startowej (zob. RailStationGroup)
@@ -258,6 +273,7 @@ export async function runCsaJourney(
 
   let windowStart = originWindowStart;
   let found = false;
+  const windowConnectionCounts: number[] = [];
 
   for (let w = 0; w < MAX_WINDOWS; w++) {
     const windowEnd = windowStart + WINDOW_SECONDS;
@@ -277,6 +293,7 @@ export async function runCsaJourney(
     }
     diagnostics.windowsScanned++;
     diagnostics.connectionsScannedTotal += connections.length;
+    windowConnectionCounts.push(connections.length);
 
     for (const c of connections) {
       const arrAtFrom = earliestArrival.get(c.from_stop_id);
@@ -306,6 +323,7 @@ export async function runCsaJourney(
     windowStart = windowEnd;
   }
   diagnostics.stationsReached = Math.max(0, earliestArrival.size - from.ids.length);
+  diagnostics.windowConnectionCounts = windowConnectionCounts;
 
   // Spośród ewentualnie wielu peronów celu wybierz ten z najwcześniejszym dotarciem.
   const reachedToId = to.ids
