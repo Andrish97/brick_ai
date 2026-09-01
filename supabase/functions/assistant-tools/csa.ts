@@ -217,6 +217,10 @@ const MAX_TRANSFER_WAIT_SECONDS = 4 * 3600;
 // działającej wersji) — mniej ryzyka ucięcia pojedynczego zapytania niż przy 4h.
 const WINDOW_SECONDS = 2 * 3600;
 const MAX_WINDOWS = 25; // twardy limit LICZBY zapytań RPC (niezależnie od liczby dni), zob. komentarz w runCsaJourney
+// Zabezpieczenie pętli ustalania punktu stałego WEWNĄTRZ jednego okna (zob. komentarz przy
+// p_from_stop_ids w runCsaJourney) -- w praktyce powinno zbiegać w 1-2 iteracjach (mało
+// połączeń w oknie faktycznie dotyczy aktualnego frontieru), to tylko twardy sufit.
+const MAX_SETTLE_ITERATIONS_PER_WINDOW = 5;
 // Łączny zasięg CZASOWY (absolutny, od originWindowStart) — 50h, bo 4h to limit samej
 // przesiadki (oczekiwania), nie długości odcinka jazdy między przesiadkami (ten może trwać
 // wiele godzin niezależnie od tego limitu).
@@ -370,6 +374,12 @@ export async function runCsaJourney(
   const lastTripConnection = new Map<string, Connection>();
   const predecessorOf = new Map<string, Connection | null>();
   const connKey = (c: Connection) => `${c.trip_id}|${c.from_stop_id}|${c.dep_seconds}`;
+  // Pętla ustalania punktu stałego wewnątrz okna (zob. p_from_stop_ids niżej) odpytuje TEN
+  // SAM przedział czasu wielokrotnie z rosnącym frontierem — bez deduplikacji to samo
+  // połączenie mogłoby zostać przetworzone DRUGI raz PO TYM, jak jego trip_id trafił już do
+  // boardedTrips, co ustawiałoby predecessorOf na SAMO SIEBIE (nieskończona pętla przy
+  // odtwarzaniu trasy) — realny błąd znaleziony przy weryfikacji tej optymalizacji.
+  const processedConnKeys = new Set<string>();
 
   let found = false;
   const windowConnectionCounts: number[] = [];
@@ -404,59 +414,85 @@ export async function runCsaJourney(
       if (bestTargetArrival !== undefined && absStart > bestTargetArrival) break dayLoop;
 
       const localEnd = localStart + WINDOW_SECONDS;
-      let connections: Connection[];
-      try {
-        connections = await sbRpc<Connection>(url, key, "rail_connections_in_window", {
-          p_service_ids: daySvcList,
-          p_dep_from: localStart,
-          p_dep_to: localEnd,
-        });
-      } catch (e) {
-        return { result: null, diagnostics: { ...diagnostics, connectionsFetchError: String(e) } };
-      }
-      diagnostics.windowsScanned++;
-      diagnostics.connectionsScannedTotal += connections.length;
-      windowConnectionCounts.push(connections.length);
+      // p_from_stop_ids: frontier CSA (stacje aktualnie osiągalne) -- realny problem
+      // wydajnościowy na produkcji: bez tego filtra każde okno zwracało CAŁY krajowy
+      // rozkład w tym przedziale czasu, z czego niemal wszystko niezwiązane z aktualnie
+      // osiągalnymi stacjami. Ten sam limit wierszy filtrowany po stronie serwera pokrywa
+      // dużo większy, użyteczny zasięg eksploracyjny.
+      //
+      // REALNY BŁĄD znaleziony PRZY WERYFIKACJI tej optymalizacji (test lokalny): stacja
+      // odkryta DOPIERO w trakcie przetwarzania TEGO okna nie mogła trafić do filtra
+      // zapytania, które JUŻ POSZŁO (migawka frontieru sprzed zapytania) -- a KOLEJNE okno
+      // obejmuje już PÓŹNIEJSZY przedział dep_seconds, więc jej własne połączenia w TYM
+      // przedziale czasu nigdy nie zostałyby odpytane -- TRWAŁA utrata (nie tylko
+      // opóźnienie), nie sam "brak optymalizacji". Naprawa: pętla ustalania punktu stałego
+      // WEWNĄTRZ okna -- odpytuj ponownie z powiększonym frontierem, dopóki frontier
+      // faktycznie rośnie (albo do MAX_SETTLE_ITERATIONS_PER_WINDOW jako zabezpieczenia).
+      let lastFrontierSize = -1;
+      for (let settleIter = 0; settleIter < MAX_SETTLE_ITERATIONS_PER_WINDOW; settleIter++) {
+        const frontierSnapshot = [...earliestArrival.keys()];
+        if (frontierSnapshot.length === lastFrontierSize) break; // punkt stały dla TEGO okna
+        lastFrontierSize = frontierSnapshot.length;
+        if (diagnostics.windowsScanned >= MAX_WINDOWS) break dayLoop; // twardy limit liczby zapytań RPC
 
-      for (const raw of connections) {
-        // RPC zwraca sekundy LOKALNE dla dayOffset (0 = data podróży) — przeliczamy na
-        // ABSOLUTNE (względem originWindowStart dnia 0), żeby earliestArrival i reguły
-        // przesiadek porównywały się poprawnie MIĘDZY dniami.
-        const c: Connection = { ...raw, dep_seconds: raw.dep_seconds + dayAbsBase, arr_seconds: raw.arr_seconds + dayAbsBase };
-        let boardable: boolean;
-        let predecessor: Connection | null;
-        if (boardedTrips.has(c.trip_id)) {
-          // Kontynuacja kursu, na który już GDZIEKOLWIEK wsiedliśmy — zawsze dopuszczalna,
-          // bez dodatkowego bufora (to nie przesiadka), niezależnie od earliestArrival tej
-          // konkretnej stacji pośredniej (zob. komentarz przy boardedTrips wyżej). Poprzednik
-          // to POPRZEDNIE połączenie TEGO SAMEGO kursu (nie "najszybsze dotarcie" do stacji).
-          boardable = true;
-          predecessor = lastTripConnection.get(c.trip_id) ?? null;
-        } else {
-          const arrAtFrom = earliestArrival.get(c.from_stop_id);
-          if (arrAtFrom === undefined) continue;
-          // Boarding na stacji STARTOWEJ: tylko w oknie originWindowStart..originWindowEnd
-          // (pierwszy odjazd). Boarding na PRZESIADCE: osobna reguła 30min-4h, niezależna
-          // od okna startowego (może przesunąć dalsze nogi daleko poza nie).
-          boardable = fromIds.has(c.from_stop_id)
-            ? (c.dep_seconds >= arrAtFrom && c.dep_seconds < originWindowEnd)
-            : (c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS && c.dep_seconds <= arrAtFrom + MAX_TRANSFER_WAIT_SECONDS);
-          predecessor = fromIds.has(c.from_stop_id) ? null : (incoming.get(c.from_stop_id) ?? null);
+        let connections: Connection[];
+        try {
+          connections = await sbRpc<Connection>(url, key, "rail_connections_in_window", {
+            p_service_ids: daySvcList,
+            p_dep_from: localStart,
+            p_dep_to: localEnd,
+            p_from_stop_ids: frontierSnapshot,
+          });
+        } catch (e) {
+          return { result: null, diagnostics: { ...diagnostics, connectionsFetchError: String(e) } };
         }
-        if (!boardable) continue;
-        boardedTrips.add(c.trip_id);
-        lastTripConnection.set(c.trip_id, c);
-        predecessorOf.set(connKey(c), predecessor);
+        diagnostics.windowsScanned++;
+        diagnostics.connectionsScannedTotal += connections.length;
+        windowConnectionCounts.push(connections.length);
 
-        const known = earliestArrival.get(c.to_stop_id);
-        if (known === undefined || c.arr_seconds < known) {
-          earliestArrival.set(c.to_stop_id, c.arr_seconds);
-          incoming.set(c.to_stop_id, c);
-          if (toIds.has(c.to_stop_id)) found = true;
+        for (const raw of connections) {
+          // RPC zwraca sekundy LOKALNE dla dayOffset (0 = data podróży) — przeliczamy na
+          // ABSOLUTNE (względem originWindowStart dnia 0), żeby earliestArrival i reguły
+          // przesiadek porównywały się poprawnie MIĘDZY dniami.
+          const c: Connection = { ...raw, dep_seconds: raw.dep_seconds + dayAbsBase, arr_seconds: raw.arr_seconds + dayAbsBase };
+          const key = connKey(c);
+          if (processedConnKeys.has(key)) continue; // już przetworzone w poprzedniej iteracji ustalania punktu stałego
+          processedConnKeys.add(key);
+          let boardable: boolean;
+          let predecessor: Connection | null;
+          if (boardedTrips.has(c.trip_id)) {
+            // Kontynuacja kursu, na który już GDZIEKOLWIEK wsiedliśmy — zawsze dopuszczalna,
+            // bez dodatkowego bufora (to nie przesiadka), niezależnie od earliestArrival tej
+            // konkretnej stacji pośredniej (zob. komentarz przy boardedTrips wyżej). Poprzednik
+            // to POPRZEDNIE połączenie TEGO SAMEGO kursu (nie "najszybsze dotarcie" do stacji).
+            boardable = true;
+            predecessor = lastTripConnection.get(c.trip_id) ?? null;
+          } else {
+            const arrAtFrom = earliestArrival.get(c.from_stop_id);
+            if (arrAtFrom === undefined) continue;
+            // Boarding na stacji STARTOWEJ: tylko w oknie originWindowStart..originWindowEnd
+            // (pierwszy odjazd). Boarding na PRZESIADCE: osobna reguła 30min-4h, niezależna
+            // od okna startowego (może przesunąć dalsze nogi daleko poza nie).
+            boardable = fromIds.has(c.from_stop_id)
+              ? (c.dep_seconds >= arrAtFrom && c.dep_seconds < originWindowEnd)
+              : (c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS && c.dep_seconds <= arrAtFrom + MAX_TRANSFER_WAIT_SECONDS);
+            predecessor = fromIds.has(c.from_stop_id) ? null : (incoming.get(c.from_stop_id) ?? null);
+          }
+          if (!boardable) continue;
+          boardedTrips.add(c.trip_id);
+          lastTripConnection.set(c.trip_id, c);
+          predecessorOf.set(key, predecessor);
+
+          const known = earliestArrival.get(c.to_stop_id);
+          if (known === undefined || c.arr_seconds < known) {
+            earliestArrival.set(c.to_stop_id, c.arr_seconds);
+            incoming.set(c.to_stop_id, c);
+            if (toIds.has(c.to_stop_id)) found = true;
+          }
         }
-      }
 
-      if (found) break dayLoop;
+        if (found) break dayLoop;
+      }
       localStart = localEnd;
     }
   }
