@@ -216,7 +216,14 @@ const MAX_TRANSFER_WAIT_SECONDS = 4 * 3600;
 // właściwe połączenia z Katowic. Naprawa: węższe okna (2h, jak w poprzedniej, znanej
 // działającej wersji) — mniej ryzyka ucięcia pojedynczego zapytania niż przy 4h.
 const WINDOW_SECONDS = 2 * 3600;
-const MAX_WINDOWS = 25; // twardy limit LICZBY zapytań RPC (niezależnie od liczby dni), zob. komentarz w runCsaJourney
+// Realny wynik z produkcji (po filtrowaniu po frontierze, poprzedni commit): frontier rósł
+// do 732 stacji, ale budżet 25 zapytań RPC wyczerpał się wcześniej niż pełne 50h skanu --
+// każda iteracja ustalania punktu stałego W OBRĘBIE JEDNEGO okna zużywa osobne zapytanie z
+// tego samego budżetu, więc gdy frontier rósł szybko (typowe dla wczesnych okien), kilka
+// zapytań szło na DOPRECYZOWANIE jednego logicznego okna czasowego zamiast na pokrycie
+// kolejnych. Pojedyncze zapytanie samo w sobie jest tanie (RPC, nie CPU-bound) -- podniesiony
+// limit to więcej sekwencyjnych round-tripów, nie więcej pracy JS.
+const MAX_WINDOWS = 60; // twardy limit LICZBY zapytań RPC (niezależnie od liczby dni), zob. komentarz w runCsaJourney
 // Zabezpieczenie pętli ustalania punktu stałego WEWNĄTRZ jednego okna (zob. komentarz przy
 // p_from_stop_ids w runCsaJourney) -- w praktyce powinno zbiegać w 1-2 iteracjach (mało
 // połączeń w oknie faktycznie dotyczy aktualnego frontieru), to tylko twardy sufit.
