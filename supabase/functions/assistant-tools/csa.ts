@@ -341,10 +341,6 @@ export type CsaDiagnostics = {
   // syncem/parsowaniem) od "dane są, ale ich service_id nie trafił do aktywnego zbioru na
   // ten dzień" (błąd kalendarza).
   distinctDeparturesFromOrigin?: number;
-  // Rozmiar zbioru "dwukierunkowego" (rail_backward_reachable_stations) -- ile stacji w
-  // ogóle topologicznie może dotrzeć do celu, niezależnie od czasu. undefined = zapytanie
-  // zawiodło (bezpiecznik: wyszukiwanie kontynuuje bez tego filtra, nie blokuje wyniku).
-  backwardReachableCount?: number;
   departureSample?: { depSeconds: number; toStopId: string; serviceVariants: number; activeToday: boolean }[];
 };
 
@@ -400,19 +396,19 @@ export async function runCsaJourney(
     : {};
 
   // "Dwukierunkowość" (odpowiedź na realny problem skali: CSA "zalewał" pół kraju szukając
-  // Zamościa z Katowic) -- JEDNORAZOWE (nie w pętli okien), statyczne przeszukanie WSTECZ od
-  // celu po topologii sieci (ignorujące czas/service_id — zob. migracja
-  // rail_backward_reachable_stations): zbiór stacji, z których cel jest w ogóle osiągalny
-  // JAKIMKOLWIEK łańcuchem kursów. Używany niżej do dodatkowego przycięcia frontieru obok
-  // filtra geograficznego. Bycie nadmiarowym w tym zbiorze jest bezpieczne (najwyżej nie
-  // pomaga) -- błąd zapytania NIE blokuje wyszukiwania, po prostu wyłącza tę optymalizację
-  // dla tego przebiegu (ten sam wzorzec co przy wszystkich innych diagnostykach/filtrach).
-  let backwardReachable: Set<string> | null = null;
-  try {
-    const rows = await sbRpc<{ stop_id: string }>(url, key, "rail_backward_reachable_stations", { p_dest_stop_ids: to.ids });
-    backwardReachable = new Set(rows.map((r) => r.stop_id));
-    diagnostics.backwardReachableCount = backwardReachable.size;
-  } catch { /* optymalizacja opcjonalna — brak filtra to bezpieczny fallback, nie błąd */ }
+  // Zamościa z Katowic) -- statyczne przeszukanie WSTECZ od celu po topologii sieci
+  // (ignorujące czas/service_id): "które stacje w ogóle mogą dotrzeć do celu jakimkolwiek
+  // łańcuchem kursów". REALNY BŁĄD znaleziony na produkcji: pierwsza wersja zwracała ten
+  // zbiór jako OSOBNĄ listę do klienta (osobna RPC, jedno zapytanie na start) -- trafiała w
+  // domyślny limit wierszy PostgREST/Supabase (max-rows=1000), w NIEOKREŚLONEJ kolejności,
+  // więc backwardReachableCount w logach wychodził równo 1000 niezależnie od realnego
+  // rozmiaru zbioru -- klient dostawał losowe 1000 z dużo większej, prawdziwej puli, mogąc
+  // łatwo zgubić akurat węzeł prowadzący do celu. Naprawa: filtr wbudowany BEZPOŚREDNIO w
+  // rail_connections_in_window (p_dest_stop_ids, zob. migracja) -- rekurencyjne CTE liczone
+  // WEWNĄTRZ tego samego zapytania, nigdy nie opuszcza bazy jako lista, więc nie ma czego
+  // uciąć. Kosztem jest przeliczanie tej rekurencji przy każdym oknie zamiast raz -- to
+  // obliczenie po stronie DB (nie zużywa budżetu CPU Edge Function), poprawność ważniejsza
+  // niż powtórna praca.
 
   // "Stacja" to grupa stop_id (różne perony/tory dzielące tę samą nazwę) — dowolny z nich
   // jest poprawnym punktem startu/celu, zob. komentarz przy RailStationGroup.
@@ -502,17 +498,7 @@ export async function runCsaJourney(
       // faktycznie rośnie (albo do MAX_SETTLE_ITERATIONS_PER_WINDOW jako zabezpieczenia).
       let lastFrontierSize = -1;
       for (let settleIter = 0; settleIter < MAX_SETTLE_ITERATIONS_PER_WINDOW; settleIter++) {
-        // queryFrontier = frontier CSA PRZYCIĘTY do stacji, z których cel jest w ogóle
-        // topologicznie osiągalny (backwardReachable, zob. wyżej) -- origin ZAWSZE wchodzi
-        // niezależnie od tego zbioru (bezpiecznik: nawet gdyby backwardReachable błędnie/
-        // niekompletnie pominął origin, musimy i tak spróbować z niego wystartować).
-        // Punkt stały liczony na PRZYCIĘTYM zbiorze, nie pełnym earliestArrival -- odkrycie
-        // stacji, z której i tak nie da się dotrzeć do celu, nie powinno wymuszać kolejnego
-        // zapytania.
-        const fullFrontier = [...earliestArrival.keys()];
-        const frontierSnapshot = backwardReachable
-          ? fullFrontier.filter((id) => backwardReachable!.has(id) || fromIds.has(id))
-          : fullFrontier;
+        const frontierSnapshot = [...earliestArrival.keys()];
         if (frontierSnapshot.length === lastFrontierSize) break; // punkt stały dla TEGO okna
         lastFrontierSize = frontierSnapshot.length;
         if (diagnostics.windowsScanned >= MAX_WINDOWS) break dayLoop; // twardy limit liczby zapytań RPC
@@ -524,6 +510,7 @@ export async function runCsaJourney(
             p_dep_from: localStart,
             p_dep_to: localEnd,
             p_from_stop_ids: frontierSnapshot,
+            p_dest_stop_ids: to.ids,
             ...geoParams,
           });
         } catch (e) {
