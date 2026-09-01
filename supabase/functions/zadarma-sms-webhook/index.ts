@@ -472,6 +472,10 @@ const TOOLS = [
             from: { type: "STRING", description: "Stacja/miejscowość startowa, albo 'dom'/'praca'." },
             to: { type: "STRING", description: "Stacja/miejscowość docelowa, albo 'dom'/'praca'." },
             date: { type: "STRING", description: "Data podróży YYYY-MM-DD. Domyślnie dziś." },
+            preferred_time: {
+              type: "STRING",
+              description: "Przybliżona preferowana godzina wyjazdu HH:MM, jeśli użytkownik ją wskazał (wprost albo opisowo: 'rano', 'po południu', 'wieczorem') — inaczej pomiń, wtedy przyjmowana jest bieżąca godzina (dziś) albo poranek (data w przyszłości).",
+            },
           },
           required: ["from", "to"],
         },

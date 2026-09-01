@@ -140,9 +140,18 @@ type Connection = {
   arr_seconds: number;
 };
 
-const TRANSFER_BUFFER_SECONDS = 7 * 60; // te same 7 minut co dotychczasowa żywa heurystyka (MIN_TRANSFER_BUFFER_MIN)
-const WINDOW_SECONDS = 2 * 3600;
-const MAX_WINDOWS = 6; // ~12h przeszukiwania od żądanej godziny, potem poddajemy się (fallback na żywą ścieżkę)
+// Sensowne przesiadki (wymóg użytkownika): między przyjazdem a kolejnym odjazdem na
+// KAŻDEJ przesiadce (nie tylko pierwszej) musi minąć od 30 minut do 4 godzin. To OSOBNA
+// reguła od okna startowego (zob. originWindowStart/End w runCsaJourney) — może przesunąć
+// dalsze nogi trasy daleko poza okno pierwszego odjazdu.
+const TRANSFER_BUFFER_SECONDS = 30 * 60;
+const MAX_TRANSFER_WAIT_SECONDS = 4 * 3600;
+// Całkowity zasięg skanowania musi pomieścić najgorszy realny przypadek: okno startowe
+// (do 4h) + do 3 przesiadek × do 4h oczekiwania każda + same przejazdy — stąd 5×4h=20h,
+// WIĘCEJ niż poprzednie 12h (2h×6), nie mniej. Mniejsza liczba, większych okien (5 zamiast
+// wcześniejszych 6) niż dawniej, żeby nie zwiększać liczby zapytań RPC mimo szerszego zasięgu.
+const WINDOW_SECONDS = 4 * 3600;
+const MAX_WINDOWS = 5;
 const IN_LIST_LIMIT = 500; // praktyczny limit długości URL dla filtra in.() w PostgREST
 
 function inList(ids: string[]): string {
@@ -212,9 +221,15 @@ export type CsaDiagnostics = {
 // faktycznie nie istnieje w danych" od "coś po drodze cicho ucięło wynik" (np.
 // IN_LIST_LIMIT=500 obcinający listę aktywnych service_id danego dnia, jeśli jest ich
 // więcej — realne ryzyko dla krajowego rozkładu, nigdy wcześniej nie zmierzone).
+// originWindowStart/originWindowEnd: okno (typowo 4h), w którym wolno wsiąść NA STACJI
+// STARTOWEJ (pierwszy odjazd) — NIE ogranicza to całej trasy. Każda KOLEJNA przesiadka
+// rządzi się osobno regułą TRANSFER_BUFFER_SECONDS..MAX_TRANSFER_WAIT_SECONDS (30min-4h),
+// niezależną od tego okna — użytkownik wprost poprawił wcześniejsze (błędne) rozumienie,
+// że 4h miałoby ograniczać całą podróż.
 export async function runCsaJourney(
   url: string, key: string,
-  from: RailStationGroup, to: RailStationGroup, date: string, startSeconds: number,
+  from: RailStationGroup, to: RailStationGroup, date: string,
+  originWindowStart: number, originWindowEnd: number,
 ): Promise<{ result: CsaResult | null; diagnostics: CsaDiagnostics }> {
   const emptyDiagnostics: CsaDiagnostics = {
     activeServiceCount: 0, serviceIdsInFilter: 0, windowsScanned: 0, connectionsScannedTotal: 0, stationsReached: 0,
@@ -237,11 +252,11 @@ export async function runCsaJourney(
   // jest poprawnym punktem startu/celu, zob. komentarz przy RailStationGroup.
   const fromIds = new Set(from.ids);
   const toIds = new Set(to.ids);
-  const earliestArrival = new Map<string, number>(from.ids.map((id) => [id, startSeconds]));
+  const earliestArrival = new Map<string, number>(from.ids.map((id) => [id, originWindowStart]));
   const arrivedViaTrip = new Map<string, string>(from.ids.map((id) => [id, "__origin__"]));
   const incoming = new Map<string, Connection>();
 
-  let windowStart = startSeconds;
+  let windowStart = originWindowStart;
   let found = false;
 
   for (let w = 0; w < MAX_WINDOWS; w++) {
@@ -267,9 +282,15 @@ export async function runCsaJourney(
       const arrAtFrom = earliestArrival.get(c.from_stop_id);
       if (arrAtFrom === undefined) continue;
       const sameTrip = arrivedViaTrip.get(c.from_stop_id) === c.trip_id;
+      // Boarding na stacji STARTOWEJ: tylko w oknie originWindowStart..originWindowEnd
+      // (pierwszy odjazd). Kontynuacja tego samego kursu (sameTrip): bez dodatkowego
+      // bufora — to nie przesiadka. Boarding na PRZESIADCE: osobna reguła 30min-4h,
+      // niezależna od okna startowego (może przesunąć dalsze nogi daleko poza nie).
       const boardable = fromIds.has(c.from_stop_id)
-        ? c.dep_seconds >= arrAtFrom
-        : (sameTrip ? c.dep_seconds >= arrAtFrom : c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS);
+        ? (c.dep_seconds >= arrAtFrom && c.dep_seconds < originWindowEnd)
+        : (sameTrip
+          ? c.dep_seconds >= arrAtFrom
+          : (c.dep_seconds >= arrAtFrom + TRANSFER_BUFFER_SECONDS && c.dep_seconds <= arrAtFrom + MAX_TRANSFER_WAIT_SECONDS));
       if (!boardable) continue;
 
       const known = earliestArrival.get(c.to_stop_id);
@@ -311,10 +332,10 @@ export async function runCsaJourney(
       // KTÓRYKOLWIEK jego wariant service_id jest aktywny na ten dzień" policzoną w SQL tą
       // samą logiką co activeServiceIds() — sięga więc realnie przez cały dzień, nie tylko
       // pierwsze kilkadziesiąt zdublowanych wierszy.
-      const windowEndAll = startSeconds + MAX_WINDOWS * WINDOW_SECONDS;
+      const windowEndAll = originWindowStart + MAX_WINDOWS * WINDOW_SECONDS;
       const debugDepartures = await sbRpc<{ dep_seconds: number; to_stop_id: string; distinct_service_variants: number; any_active_today: boolean }>(
         url, key, "rail_debug_departures",
-        { p_stop_ids: from.ids, p_date: date, p_dep_from: startSeconds, p_dep_to: windowEndAll },
+        { p_stop_ids: from.ids, p_date: date, p_dep_from: originWindowStart, p_dep_to: windowEndAll },
       );
       diagnostics.distinctDeparturesFromOrigin = debugDepartures.length;
       const toSample = (d: typeof debugDepartures[number]) => ({

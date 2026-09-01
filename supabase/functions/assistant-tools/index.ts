@@ -848,13 +848,14 @@ Deno.serve(async (req: Request) => {
       const toArg = typeof input.args?.to === "string" ? input.args.to.trim() : "";
       if (!fromArg || !toArg) return json({ error: "from and to are required" }, 400);
       const dateArg = typeof input.args?.date === "string" ? input.args.date : "";
+      const preferredTimeArg = typeof input.args?.preferred_time === "string" ? input.args.preferred_time.trim() : "";
 
       // Najpierw próba lokalna (CSA nad zsynchronizowanym GTFS — zob. csa.ts) — szybsza,
       // bez limitu zapytań PKP, dowolna liczba przesiadek. Przy jakimkolwiek niepowodzeniu
       // (brak świeżych danych, stacja nierozpoznana/niejednoznaczna lokalnie, CSA nic nie
       // znajduje, rozbieżność z żywym API dla bliskiej daty, wyjątek) — bezwarunkowy
       // fallback na dotychczasową żywą heurystykę PKP (planTrainJourneyLive), nigdy błąd 500.
-      const local = await tryPlanTrainJourneyLocal(url, key, user, fromArg, toArg, dateArg);
+      const local = await tryPlanTrainJourneyLocal(url, key, user, fromArg, toArg, dateArg, preferredTimeArg);
       if (local) {
         log("plan_train_journey_path", { path: "local" });
         return json(local);
@@ -907,15 +908,37 @@ async function verifyFirstLegLive(leg: { from: string; departure: string }, date
 // niejednoznaczna lokalnie, CSA nic nie znajduje, rozbieżność z żywym API dla bliskiej
 // daty, dowolny wyjątek), co dispatcher wyżej traktuje jako sygnał do wywołania
 // planTrainJourneyLive — nigdy nie ujawnia błędu 500 z powodu tej ścieżki.
+// Okno startowe (typowo 4h) wyliczone z preferred_time (jeśli AI je podało), inaczej
+// bieżąca godzina dla dziś, albo sensowny poranek (6:00-10:00) dla przyszłej daty —
+// zastępuje dawne sztywne "start=0 dla nie-dziś" (dawało bezsensowny origin window od
+// północy zamiast realnej pory podróży).
+const ORIGIN_WINDOW_SECONDS = 4 * 3600;
+const DEFAULT_FUTURE_MORNING_HOUR = 6;
+
+function computeOriginWindow(dateArg: string, preferredTimeArg: string): { date: string; start: number; end: number } {
+  const date = dateArg || todayDateStr();
+  const isToday = date === todayDateStr();
+  let startSeconds: number;
+  const preferredMin = preferredTimeArg ? parseTimeToMinutes(preferredTimeArg) : null;
+  if (preferredMin !== null) {
+    startSeconds = preferredMin * 60;
+  } else if (isToday) {
+    startSeconds = warsawNow().getHours() * 3600 + warsawNow().getMinutes() * 60;
+  } else {
+    startSeconds = DEFAULT_FUTURE_MORNING_HOUR * 3600;
+  }
+  return { date, start: startSeconds, end: startSeconds + ORIGIN_WINDOW_SECONDS };
+}
+
 async function tryPlanTrainJourneyLocal(
-  url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string,
+  url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string, preferredTimeArg: string,
 ): Promise<CsaResult | null> {
   try {
     // Log wejścia bezwarunkowo (nie tylko przy niepowodzeniu) — realny test (Katowice ->
     // Zamość) zwrócił "live" bez ŻADNEGO z pozostałych logów rail_local_skip poniżej, co
     // przez eliminację wskazuje na TĘ gałąź (jedyną wcześniej bez logowania) — ale bez
     // zobaczenia surowych argumentów od Gemini nie da się tego potwierdzić na pewno.
-    log("rail_local_entry", { fromArg, toArg, dateArg });
+    log("rail_local_entry", { fromArg, toArg, dateArg, preferredTimeArg });
     if (!(await hasFreshLocalData(url, key))) {
       log("rail_local_skip", { reason: "no_fresh_local_data" });
       return null;
@@ -945,15 +968,13 @@ async function tryPlanTrainJourneyLocal(
       return null;
     }
 
-    const date = dateArg || todayDateStr();
-    const isToday = date === todayDateStr();
-    const startSeconds = isToday ? (warsawNow().getHours() * 3600 + warsawNow().getMinutes() * 60) : 0;
+    const { date, start: originWindowStart, end: originWindowEnd } = computeOriginWindow(dateArg, preferredTimeArg);
 
-    const { result, diagnostics } = await runCsaJourney(url, key, fromLookup.station, toLookup.station, date, startSeconds);
+    const { result, diagnostics } = await runCsaJourney(url, key, fromLookup.station, toLookup.station, date, originWindowStart, originWindowEnd);
     if (!result) {
       log("rail_local_skip", {
         reason: "csa_found_nothing",
-        from: fromLookup.station.name, to: toLookup.station.name, date, startSeconds,
+        from: fromLookup.station.name, to: toLookup.station.name, date, originWindowStart, originWindowEnd,
         ...diagnostics,
       });
       return null;
