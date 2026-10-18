@@ -894,6 +894,10 @@ async function handleTransformStep(sql: SqlClient, runId: string, step: Transfor
   }
   // Ostatni krok (cleanup) właśnie się skończył — cały sync faktycznie gotowy dopiero teraz.
   await sql`update rail_sync_runs set status = 'success', transform_step = null, finished_at = now() where id = ${runId}`;
+  // ZIP źródłowy i rozpakowane pliki zajmują miejsce w Postgresie, a po sukcesie
+  // nie są już potrzebne. Zachowujemy tylko metadane biegu; następny import nie musi
+  // czekać do startu, żeby zwolnić przestrzeń po poprzedniej synchronizacji.
+  await sql`delete from rail_sync_blobs where run_id = ${runId}`;
   if (isAutomatic) {
     const [row] = await sql<{ rows_processed: number }[]>`select rows_processed from rail_sync_runs where id = ${runId}`;
     await logRailSync(sql, "finished", { runId, rowsProcessed: row?.rows_processed ?? null });
