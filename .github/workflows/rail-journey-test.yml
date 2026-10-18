@@ -86,12 +86,14 @@ on:
       - ".github/workflows/rail-journey-test.yml"
       - "supabase/functions/rail-gtfs-sync/index.ts"
       - "supabase/functions/assistant-tools/rail-route-search.ts"
+      - "supabase/functions/assistant-tools/rail-stations.ts"
       - "scripts/sync-rail-gtfs.mjs"
       - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
       - "supabase/migrations/20240144000000_rail_connections_smaller_batches.sql"
       - "supabase/migrations/20240145000000_rail_connections_replace_in_place.sql"
       - "supabase/migrations/20240146000000_rail_calendar_cleanup_foreign_key.sql"
       - "supabase/migrations/20240147000000_rail_connections_reverse_search_scope.sql"
+      - "supabase/migrations/20240148000000_rail_connections_corridor_search.sql"
 
 permissions:
   contents: read
