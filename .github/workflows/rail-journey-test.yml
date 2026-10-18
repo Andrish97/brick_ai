@@ -96,6 +96,7 @@ on:
       - "supabase/migrations/20240148000000_rail_connections_corridor_search.sql"
       - "supabase/migrations/20240149000000_rail_connections_corridor_reverse_search.sql"
       - "supabase/migrations/20240150000000_rail_connections_batch_corridor.sql"
+      - "supabase/migrations/20240151000000_rail_connections_geo_window.sql"
 
 permissions:
   actions: read
