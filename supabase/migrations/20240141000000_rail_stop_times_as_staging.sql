@@ -2,6 +2,12 @@
 -- Runtime journey search reads rail_connections, calendar, trips and stops; it never
 -- reads rail_stop_times. Keep stop_times during transformation, then release its
 -- hundreds of MB after the new connections have been created.
+-- The connection transform filters by sync_run_id and orders each trip by
+-- stop_sequence. Without this composite index Postgres must sort the entire staging
+-- set, which timed out on the production database.
+create index if not exists rail_stop_times_run_trip_seq_idx
+  on public.rail_stop_times (sync_run_id, trip_id, stop_sequence);
+
 create or replace function public.rail_gtfs_transform_cleanup(run_id uuid) returns void as $$
 begin
   delete from public.rail_connections where sync_run_id <> run_id;
