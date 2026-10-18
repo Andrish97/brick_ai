@@ -11,11 +11,14 @@ if (start.skipped === "unchanged") {
 }
 if (!start.ok) throw new Error(`Nie udało się uruchomić syncu GTFS: ${JSON.stringify(start)}`);
 
-for (let tick = 1; tick <= 180; tick++) {
+for (let tick = 1; tick <= 600; tick++) {
   await new Promise((resolve) => setTimeout(resolve, 750));
   const result = await call("tick");
   if (tick % 10 === 0 || result.done || result.skipped) {
-    console.log(`GTFS tick ${tick}: ${result.done ? "done" : result.skipped || result.transformStep || result.file || "postęp"}`);
+    const stage = result.transformStep === "connections" && result.nextTrip
+      ? `connections through ${result.nextTrip}`
+      : result.skipped || result.transformStep || result.file || "postęp";
+    console.log(`GTFS tick ${tick}: ${result.done ? "done" : stage}`);
   }
   if (result.done || result.skipped === "nothing_running") {
     console.log("Sync GTFS zakończył pracę; test odpowiedzi sprawdzi świeżość wyniku.");
