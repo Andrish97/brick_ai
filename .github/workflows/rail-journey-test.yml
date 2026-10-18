@@ -55,6 +55,7 @@ on:
           - any
           - one
           - multiple
+          - two_transfers
       expected_variants:
         description: Minimalna liczba wariantów (0 wyłącza sprawdzanie)
         required: true
@@ -89,6 +90,7 @@ on:
       - "supabase/functions/assistant-tools/rail-stations.ts"
       - "supabase/functions/assistant-tools/index.ts"
       - "scripts/sync-rail-gtfs.mjs"
+      - "scripts/test-rail-journey.mjs"
       - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
       - "supabase/migrations/20240144000000_rail_connections_smaller_batches.sql"
       - "supabase/migrations/20240145000000_rail_connections_replace_in_place.sql"
@@ -159,8 +161,8 @@ jobs:
           REPLY_PARTS: ${{ inputs.reply_parts || '4' }}
           EXPECTED_SOURCE: ${{ inputs.expected_source || 'local' }}
           EXPECT_ROUTE: ${{ github.event_name == 'push' && 'true' || inputs.expect_route }}
-          EXPECTED_LEGS: ${{ inputs.expected_legs || 'multiple' }}
-          EXPECTED_VARIANTS: ${{ inputs.expected_variants || '1' }}
+          EXPECTED_LEGS: ${{ github.event_name == 'push' && 'two_transfers' || inputs.expected_legs || 'multiple' }}
+          EXPECTED_VARIANTS: ${{ github.event_name == 'push' && '2' || inputs.expected_variants || '1' }}
           EXPECTED_TEXT: ${{ inputs.expected_text }}
           ALLOW_LIVE_FALLBACK: ${{ inputs.use_live_fallback || 'false' }}
         run: node scripts/test-rail-journey.mjs

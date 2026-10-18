@@ -36,9 +36,9 @@ export type RouteSearchDiagnostics = {
 
 const WINDOW_SECONDS = 4 * 3600;
 const WINDOW_STEP_SECONDS = 2 * 3600;
-const TOTAL_SCAN_SECONDS = 6 * 3600;
+const TOTAL_SCAN_SECONDS = 8 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
-const MAX_RPC_REQUESTS = 3;
+const MAX_RPC_REQUESTS = 4;
 const MIN_TRANSFER_SECONDS = 7 * 60;
 const MAX_TRANSFER_SECONDS = 4 * 3600;
 const MAX_JOURNEYS = 3;
