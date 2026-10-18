@@ -162,10 +162,8 @@ export async function runRailJourneySearch(
       throw new Error(`rail_rpc_page_limit_unresolved ${localStart}-${localEnd}`);
     }
     const midpoint = localStart + Math.floor((localEnd - localStart) / 2);
-    const [left, right] = await Promise.all([
-      fetchWindow(serviceIds, localStart, midpoint, frontier, splitDepth + 1),
-      fetchWindow(serviceIds, midpoint, localEnd, frontier, splitDepth + 1),
-    ]);
+    const left = await fetchWindow(serviceIds, localStart, midpoint, frontier, splitDepth + 1);
+    const right = await fetchWindow(serviceIds, midpoint, localEnd, frontier, splitDepth + 1);
     return [...left, ...right];
   };
 
