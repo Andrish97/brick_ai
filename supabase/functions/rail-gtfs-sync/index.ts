@@ -61,10 +61,10 @@ const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
 // Etap B (transformacja raw -> docelowe + rail_connections + mark-and-sweep) rozbity na
 // osobne kroki, po jednym na tick — zob. duży komentarz przy handleTransformStep. Kolejność
-// ma znaczenie (FK: routes/calendar przed trips, trips przed stop_times, stop_times przed
-// connections).
+// ma znaczenie (FK: routes/calendar przed trips przed connections). Połączenia są
+// budowane bezpośrednio z rail_raw_stop_times; nie materializujemy tabeli pośredniej.
 const TRANSFORM_STEPS = [
-  "stops", "routes", "calendar", "calendar_dates", "trips", "stop_times", "connections", "cleanup",
+  "stops", "routes", "calendar", "calendar_dates", "trips", "connections", "cleanup",
 ] as const;
 type TransformStep = typeof TRANSFORM_STEPS[number];
 
@@ -822,6 +822,10 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
       offset += consumedBytes;
 
       if (reachedEnd) {
+        // Po sparsowaniu ostatniego pliku surowe tabele zawierają już komplet GTFS.
+        // ZIP i rozpakowane kopie nie są potrzebne podczas transformacji, więc zwolnij
+        // ich miejsce przed budowaniem nowych połączeń.
+        await sql`delete from rail_sync_blobs where run_id = ${run.id}`;
         // NIE "done: true" tutaj — parsowanie się skończyło, ale Etap B (transform_step)
         // dopiero zaczyna, jeszcze kilka(naście) ticków przed prawdziwym końcem całego
         // syncu. "done" oznaczałoby dla panelu (syncNow()) koniec CAŁEGO syncu i przerwałoby
@@ -880,7 +884,6 @@ async function runTransformStep(sql: SqlClient, runId: string, step: TransformSt
     case "calendar": await sql`select rail_gtfs_transform_calendar(${runId}::uuid)`; return;
     case "calendar_dates": await sql`select rail_gtfs_transform_calendar_dates(${runId}::uuid)`; return;
     case "trips": await sql`select rail_gtfs_transform_trips(${runId}::uuid)`; return;
-    case "stop_times": await sql`select rail_gtfs_transform_stop_times(${runId}::uuid)`; return;
     case "connections": await sql`select rail_gtfs_transform_connections(${runId}::uuid)`; return;
     case "cleanup": await sql`select rail_gtfs_transform_cleanup(${runId}::uuid)`; return;
   }
@@ -889,7 +892,7 @@ async function runTransformStep(sql: SqlClient, runId: string, step: TransformSt
 async function handleTransformStep(sql: SqlClient, runId: string, step: TransformStep, cursor: string | null, isAutomatic: boolean): Promise<Response> {
   if (step === "connections") {
     const [batch] = await sql<{ next_trip: string | null; done: boolean }[]>`
-      select * from rail_gtfs_transform_connections_batch(${runId}::uuid, ${cursor}::uuid)
+      select * from rail_gtfs_transform_connections_batch(${runId}::uuid, ${cursor}::text)
     `;
     if (!batch) throw new Error("rail_connections_batch_no_result");
     if (!batch.done) return json({ ok: true, transformStep: step, nextTrip: batch.next_trip });
