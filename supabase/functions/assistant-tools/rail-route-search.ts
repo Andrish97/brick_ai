@@ -3,7 +3,7 @@
 // service-day connections and resolving display names.
 import { scanConnections } from "./rail-router.js";
 
-type RailStationGroup = { name: string; ids: string[] };
+type RailStationGroup = { name: string; ids: string[]; lat: number | null; lon: number | null };
 type Connection = {
   trip_id: string;
   service_id: string;
@@ -42,6 +42,14 @@ const MIN_TRANSFER_SECONDS = 7 * 60;
 const MAX_TRANSFER_SECONDS = 4 * 3600;
 const MAX_JOURNEYS = 3;
 const IN_LIST_LIMIT = 500;
+
+function maxDetourKm(from: RailStationGroup, to: RailStationGroup): number | null {
+  if (from.lat === null || from.lon === null || to.lat === null || to.lon === null) return null;
+  const meanLat = (from.lat + to.lat) / 2;
+  const dx = (to.lon - from.lon) * 111.0 * Math.cos(meanLat * Math.PI / 180);
+  const dy = (to.lat - from.lat) * 111.0;
+  return Math.max(100, Math.hypot(dx, dy) * 1.8 + 30);
+}
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
   const response = await fetch(`${url}/rest/v1/${path}`, {
@@ -142,7 +150,11 @@ export async function runRailJourneySearch(
       p_dep_from: localStart,
       p_dep_to: localEnd,
       p_from_stop_ids: frontier,
-      p_dest_stop_ids: to.ids,
+      p_origin_lat: from.lat,
+      p_origin_lon: from.lon,
+      p_dest_lat: to.lat,
+      p_dest_lon: to.lon,
+      p_max_detour_km: maxDetourKm(from, to),
     });
     if (rows.length < POSTGREST_MAX_ROWS) return rows;
     if (splitDepth >= MAX_SPLIT_DEPTH || localEnd - localStart <= 60) {

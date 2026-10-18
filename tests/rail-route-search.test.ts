@@ -27,7 +27,10 @@ Deno.test("ładuje GTFS przez mock PostgREST i zwraca trzy najlepsze warianty be
       return Response.json(rows);
     }
     if (table === "rail_stops") {
-      return Response.json([{ id: "A", name: "Katowice" }, { id: "Z", name: "Zamość" }]);
+      return Response.json([
+        { id: "A", name: "Katowice", lat: 50.26, lon: 19.02 },
+        { id: "Z", name: "Zamość", lat: 50.72, lon: 23.25 },
+      ]);
     }
     if (table === "rail_trips") {
       return Response.json(connections.map((row, i) => ({ id: row.trip_id, short_name: `IC ${i + 1}`, route_id: "route-1" })));
@@ -40,8 +43,8 @@ Deno.test("ładuje GTFS przez mock PostgREST i zwraca trzy najlepsze warianty be
     const { result, diagnostics } = await runRailJourneySearch(
       "https://supabase.test",
       "test-key",
-      { name: "Katowice", ids: ["A"] },
-      { name: "Zamość", ids: ["Z"] },
+      { name: "Katowice", ids: ["A"], lat: 50.26, lon: 19.02 },
+      { name: "Zamość", ids: ["Z"], lat: 50.72, lon: 23.25 },
       "2026-10-19",
       hour(8),
       hour(12),

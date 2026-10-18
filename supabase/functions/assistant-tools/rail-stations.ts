@@ -1,9 +1,9 @@
 // Rozpoznawanie stacji z lokalnego GTFS i sprawdzanie świeżości synchronizacji.
 // Właściwy planer znajduje się w rail-route-search.ts / rail-router.js.
 
-type RailStation = { id: string; name: string };
+type RailStation = { id: string; name: string; lat: number | string | null; lon: number | string | null };
 // Jedna stacja może obejmować kilka peronów / stop_id z tą samą nazwą.
-type RailStationGroup = { name: string; ids: string[] };
+type RailStationGroup = { name: string; ids: string[]; lat: number | null; lon: number | null };
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
   const res = await fetch(`${url}/rest/v1/${path}`, {
@@ -113,7 +113,7 @@ export async function resolveStationGroupSmart(
   if (!q) return { ok: false, body: { error: "station_not_found", query: q } };
   let rows: RailStation[];
   try {
-    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name&limit=200`);
+    rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(q)}*&select=id,name,lat,lon&limit=200`);
   } catch {
     return { ok: false, body: { error: "local_lookup_failed", query: q } };
   }
@@ -121,7 +121,12 @@ export async function resolveStationGroupSmart(
 
   const uniqueNames = [...new Set(rows.map((r) => r.name))];
   const groupIds = (name: string) => rows.filter((r) => r.name === name).map((r) => r.id);
-  const buildGroup = (name: string): RailStationGroup => ({ name, ids: groupIds(name) });
+  const buildGroup = (name: string): RailStationGroup => {
+    const points = rows.filter((row) => row.name === name && row.lat !== null && row.lon !== null);
+    const lat = points.length ? points.reduce((sum, row) => sum + Number(row.lat), 0) / points.length : null;
+    const lon = points.length ? points.reduce((sum, row) => sum + Number(row.lon), 0) / points.length : null;
+    return { name, ids: groupIds(name), lat, lon };
+  };
 
   // Szybka ścieżka: jedna odrębna nazwa wśród kandydatów -> użyj jej wprost, bez
   // wywołania AI (pokrywa np. "Wrocław Kuźniki": jedno trafienie, koniec).
