@@ -33,10 +33,11 @@ export type RouteSearchDiagnostics = {
 };
 
 const WINDOW_SECONDS = 4 * 3600;
-const TOTAL_SCAN_SECONDS = 30 * 3600;
+const TOTAL_SCAN_SECONDS = 24 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
-const MAX_RPC_REQUESTS = 96;
+const MAX_RPC_REQUESTS = 48;
 const MAX_SPLIT_DEPTH = 8;
+const MAX_SETTLE_ROUNDS = 6;
 const POSTGREST_MAX_ROWS = 1000;
 const MIN_TRANSFER_SECONDS = 7 * 60;
 const MAX_TRANSFER_SECONDS = 4 * 3600;
@@ -48,7 +49,7 @@ function maxDetourKm(from: RailStationGroup, to: RailStationGroup): number | nul
   const meanLat = (from.lat + to.lat) / 2;
   const dx = (to.lon - from.lon) * 111.0 * Math.cos(meanLat * Math.PI / 180);
   const dy = (to.lat - from.lat) * 111.0;
-  return Math.max(100, Math.hypot(dx, dy) * 1.8 + 30);
+  return Math.max(100, Math.hypot(dx, dy) * 1.5 + 20);
 }
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
@@ -174,7 +175,7 @@ export async function runRailJourneySearch(
     from.ids,
     to.ids,
     originWindow,
-    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxJourneys: MAX_JOURNEYS },
+    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
   ) as ScanResult;
 
   const maxDayOffset = Math.floor((originWindowStart + TOTAL_SCAN_SECONDS) / 86400);
@@ -205,7 +206,7 @@ export async function runRailJourneySearch(
       // Re-query as newly discovered stations expand the reachable frontier. The round
       // limit is a safety cap for pathological timetables; normal one/two-transfer routes
       // settle in a small number of passes.
-      for (let settle = 0; settle < 8; settle++) {
+      for (let settle = 0; settle < MAX_SETTLE_ROUNDS; settle++) {
         const unseenFrontier = frontier.filter((id) => !previousFrontier.has(id));
         if (!unseenFrontier.length) break;
         for (const id of unseenFrontier) previousFrontier.add(id);
