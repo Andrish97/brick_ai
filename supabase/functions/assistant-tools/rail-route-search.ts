@@ -32,10 +32,10 @@ export type RouteSearchDiagnostics = {
   reachedStationNames?: string[];
 };
 
-const WINDOW_SECONDS = 2 * 3600;
-const TOTAL_SCAN_SECONDS = 50 * 3600;
+const WINDOW_SECONDS = 4 * 3600;
+const TOTAL_SCAN_SECONDS = 30 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
-const MAX_RPC_REQUESTS = 160;
+const MAX_RPC_REQUESTS = 96;
 const MAX_SPLIT_DEPTH = 8;
 const POSTGREST_MAX_ROWS = 1000;
 const MIN_TRANSFER_SECONDS = 7 * 60;
