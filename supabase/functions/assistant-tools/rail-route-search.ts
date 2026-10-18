@@ -57,8 +57,10 @@ async function sbRpc<T>(url: string, key: string, fn: string, args: Record<strin
     headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify(args),
   });
-  if (!response.ok) throw new Error(`rail_db_rpc_failed ${fn}: HTTP ${response.status}`);
-  return response.json();
+  const body = await response.text();
+  if (!response.ok) throw new Error(`rail_db_rpc_failed ${fn}: HTTP ${response.status}: ${body.slice(0, 1200)}`);
+  try { return JSON.parse(body) as T[]; }
+  catch { throw new Error(`rail_db_rpc_invalid_json ${fn}: ${body.slice(0, 1200)}`); }
 }
 
 function inList(ids: string[]): string {
