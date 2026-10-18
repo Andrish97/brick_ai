@@ -29,13 +29,15 @@ export type RouteSearchDiagnostics = {
   connectionsFetchError?: string;
   fromGroupSize?: number;
   toGroupSize?: number;
+  originHasCoordinates?: boolean;
+  destinationHasCoordinates?: boolean;
   reachedStationNames?: string[];
 };
 
 const WINDOW_SECONDS = 4 * 3600;
 const TOTAL_SCAN_SECONDS = 24 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
-const MAX_RPC_REQUESTS = 80;
+const MAX_RPC_REQUESTS = 40;
 const MAX_SPLIT_DEPTH = 8;
 const MAX_SETTLE_ROUNDS = 3;
 const POSTGREST_MAX_ROWS = 1000;
@@ -49,7 +51,7 @@ function maxDetourKm(from: RailStationGroup, to: RailStationGroup): number | nul
   const meanLat = (from.lat + to.lat) / 2;
   const dx = (to.lon - from.lon) * 111.0 * Math.cos(meanLat * Math.PI / 180);
   const dy = (to.lat - from.lat) * 111.0;
-  return Math.max(100, Math.hypot(dx, dy) * 1.5 + 20);
+  return Math.max(100, Math.hypot(dx, dy) * 1.3 + 20);
 }
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
@@ -122,6 +124,8 @@ export async function runRailJourneySearch(
     stationsReached: 0,
     fromGroupSize: from.ids.length,
     toGroupSize: to.ids.length,
+    originHasCoordinates: from.lat !== null && from.lon !== null,
+    destinationHasCoordinates: to.lat !== null && to.lon !== null,
   };
   let dayZeroServices: Set<string>;
   try {
