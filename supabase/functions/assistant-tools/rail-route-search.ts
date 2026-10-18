@@ -37,6 +37,7 @@ const TOTAL_SCAN_SECONDS = 24 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
 const MAX_RPC_REQUESTS = 48;
 const MAX_SPLIT_DEPTH = 8;
+const MAX_SETTLE_ROUNDS = 3;
 const POSTGREST_MAX_ROWS = 1000;
 const MIN_TRANSFER_SECONDS = 7 * 60;
 const MAX_TRANSFER_SECONDS = 4 * 3600;
@@ -198,17 +199,16 @@ export async function runRailJourneySearch(
 
       diagnostics.windowsScanned++;
       const localEnd = Math.min(localStart + WINDOW_SECONDS, EXTENDED_DAY_CEILING_SECONDS);
+      const frontier = current.reachableStopIds;
       let rows: Connection[];
       try {
-        // The RPC already restricts rows to stations that can reach the destination
-        // inside the geographic corridor. Fetch the whole bounded window once instead
-        // of round-tripping for each newly reached station.
-        rows = await fetchWindow([...serviceIds], localStart, localEnd, null);
+        rows = await fetchWindow([...serviceIds], localStart, localEnd, frontier);
       } catch (error) {
         diagnostics.connectionsFetchError = String(error);
         break dayLoop;
       }
 
+      const previousFrontier = new Set(frontier);
       for (const row of rows) {
         const absolute = {
           ...row,
@@ -221,7 +221,30 @@ export async function runRailJourneySearch(
         if (allConnections.has(signature)) continue;
         allConnections.set(signature, absolute);
       }
-      scan();
+      let expanded = scan();
+      for (let settle = 1; settle < MAX_SETTLE_ROUNDS; settle++) {
+        const unseenFrontier = expanded.reachableStopIds.filter((id) => !previousFrontier.has(id));
+        if (!unseenFrontier.length) break;
+        unseenFrontier.forEach((id) => previousFrontier.add(id));
+        try {
+          rows = await fetchWindow([...serviceIds], localStart, localEnd, unseenFrontier);
+        } catch (error) {
+          diagnostics.connectionsFetchError = String(error);
+          break dayLoop;
+        }
+        for (const row of rows) {
+          const absolute = {
+            ...row,
+            dep_seconds: row.dep_seconds + dayBase,
+            arr_seconds: row.arr_seconds + dayBase,
+            service_day_offset: dayOffset,
+            trip_instance_id: `${row.trip_id}@${dayOffset}`,
+          };
+          const signature = `${absolute.trip_id}|${absolute.from_stop_id}|${absolute.to_stop_id}|${absolute.dep_seconds}`;
+          if (!allConnections.has(signature)) allConnections.set(signature, absolute);
+        }
+        expanded = scan();
+      }
     }
   }
 
