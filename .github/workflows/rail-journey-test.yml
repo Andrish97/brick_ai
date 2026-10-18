@@ -79,6 +79,13 @@ on:
         description: Opcjonalny tekst, który ma się pojawić w odpowiedzi SMS
         required: false
         type: string
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rail-journey-test.yml"
+      - "supabase/functions/rail-gtfs-sync/index.ts"
+      - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
 
 permissions:
   contents: read
@@ -93,7 +100,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Sprawdź i odśwież GTFS
-        if: ${{ inputs.refresh_gtfs }}
+        if: ${{ github.event_name == 'push' || inputs.refresh_gtfs }}
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
@@ -101,15 +108,15 @@ jobs:
 
       - name: Uruchom test end-to-end
         env:
-          FROM_STATION: ${{ inputs.from }}
-          TO_STATION: ${{ inputs.to }}
-          TRAVEL_DATE: ${{ inputs.travel_date }}
-          PREFERRED_TIME: ${{ inputs.preferred_time }}
-          REPLY_PARTS: ${{ inputs.reply_parts }}
-          EXPECTED_SOURCE: ${{ inputs.expected_source }}
-          EXPECT_ROUTE: ${{ inputs.expect_route }}
-          EXPECTED_LEGS: ${{ inputs.expected_legs }}
-          EXPECTED_VARIANTS: ${{ inputs.expected_variants }}
+          FROM_STATION: ${{ inputs.from || 'Katowice' }}
+          TO_STATION: ${{ inputs.to || 'Zamość' }}
+          TRAVEL_DATE: ${{ inputs.travel_date || 'jutro' }}
+          PREFERRED_TIME: ${{ inputs.preferred_time || 'rano' }}
+          REPLY_PARTS: ${{ inputs.reply_parts || '4' }}
+          EXPECTED_SOURCE: ${{ inputs.expected_source || 'local' }}
+          EXPECT_ROUTE: ${{ github.event_name == 'push' && 'true' || inputs.expect_route }}
+          EXPECTED_LEGS: ${{ inputs.expected_legs || 'multiple' }}
+          EXPECTED_VARIANTS: ${{ inputs.expected_variants || '1' }}
           EXPECTED_TEXT: ${{ inputs.expected_text }}
-          ALLOW_LIVE_FALLBACK: ${{ inputs.use_live_fallback }}
+          ALLOW_LIVE_FALLBACK: ${{ inputs.use_live_fallback || 'false' }}
         run: node scripts/test-rail-journey.mjs
