@@ -38,9 +38,7 @@ const WINDOW_SECONDS = 4 * 3600;
 const TOTAL_SCAN_SECONDS = 24 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
 const MAX_RPC_REQUESTS = 40;
-const MAX_SPLIT_DEPTH = 8;
 const MAX_SETTLE_ROUNDS = 3;
-const POSTGREST_MAX_ROWS = 1000;
 const MIN_TRANSFER_SECONDS = 7 * 60;
 const MAX_TRANSFER_SECONDS = 4 * 3600;
 const MAX_JOURNEYS = 3;
@@ -146,11 +144,10 @@ export async function runRailJourneySearch(
     localStart: number,
     localEnd: number,
     frontier: string[] | null,
-    splitDepth = 0,
   ): Promise<Connection[]> => {
     if (rpcRequests >= MAX_RPC_REQUESTS) throw new Error("rail_rpc_budget_exhausted");
     rpcRequests++;
-    const rows = await sbRpc<Connection>(url, key, "rail_connections_in_window", {
+    return await sbRpc<Connection>(url, key, "rail_connections_in_window_compact", {
       p_service_ids: serviceIds,
       p_dep_from: localStart,
       p_dep_to: localEnd,
@@ -161,14 +158,6 @@ export async function runRailJourneySearch(
       p_dest_lon: to.lon,
       p_max_detour_km: maxDetourKm(from, to),
     });
-    if (rows.length < POSTGREST_MAX_ROWS) return rows;
-    if (splitDepth >= MAX_SPLIT_DEPTH || localEnd - localStart <= 60) {
-      throw new Error(`rail_rpc_page_limit_unresolved ${localStart}-${localEnd}`);
-    }
-    const midpoint = localStart + Math.floor((localEnd - localStart) / 2);
-    const left = await fetchWindow(serviceIds, localStart, midpoint, frontier, splitDepth + 1);
-    const right = await fetchWindow(serviceIds, midpoint, localEnd, frontier, splitDepth + 1);
-    return [...left, ...right];
   };
 
   const scan = (): ScanResult => scanConnections(

@@ -16,7 +16,7 @@ Deno.test("ładuje GTFS przez mock PostgREST i zwraca trzy najlepsze warianty be
     const table = requestUrl.pathname.split("/").at(-1);
     if (table === "rail_calendar") return Response.json([{ id: "service-1" }]);
     if (table === "rail_calendar_dates") return Response.json([]);
-    if (table === "rail_connections_in_window") {
+    if (table === "rail_connections_in_window_compact") {
       rpcCalls++;
       const args = JSON.parse(String(init?.body));
       const rows = connections.filter((row) =>

@@ -99,6 +99,7 @@ on:
       - "supabase/migrations/20240150000000_rail_connections_batch_corridor.sql"
       - "supabase/migrations/20240151000000_rail_connections_geo_window.sql"
       - "supabase/migrations/20240152000000_rail_connections_trip_window.sql"
+      - "supabase/migrations/20240153000000_rail_connections_compact_rpc.sql"
 
 permissions:
   actions: read
