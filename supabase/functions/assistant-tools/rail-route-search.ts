@@ -155,6 +155,7 @@ export async function runRailJourneySearch(
       p_dest_lat: to.lat,
       p_dest_lon: to.lon,
       p_max_detour_km: maxDetourKm(from, to),
+      p_dest_stop_ids: to.ids,
     });
     if (rows.length < POSTGREST_MAX_ROWS) return rows;
     if (splitDepth >= MAX_SPLIT_DEPTH || localEnd - localStart <= 60) {
