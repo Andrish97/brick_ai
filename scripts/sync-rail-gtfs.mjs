@@ -31,7 +31,9 @@ async function call(action) {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${internalSecret}` },
     body: JSON.stringify({ action }),
-    signal: AbortSignal.timeout(60_000),
+    // A single stop_times/transform step can legitimately run longer than a minute.
+    // The Edge Function's DB statement timeout is 5 minutes, so let the request finish.
+    signal: AbortSignal.timeout(330_000),
   });
   const raw = await response.text();
   let result;
