@@ -695,12 +695,13 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
     const [run] = await sql<{
       id: string; current_file: string | null; current_offset: number; current_header: unknown;
       current_total_bytes: number | null; extract_progress_bytes: number | null; transform_step: string | null;
-    }[]>`select id, current_file, current_offset, current_header, current_total_bytes, extract_progress_bytes, transform_step from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
+      transform_cursor: string | null;
+    }[]>`select id, current_file, current_offset, current_header, current_total_bytes, extract_progress_bytes, transform_step, transform_cursor from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
     if (!run) { return json({ ok: true, skipped: "nothing_running" }); }
     if (!run.current_file) {
       // Wszystkie pliki rozpakowane i sparsowane — jeśli Etap B jeszcze trwa
       // (transform_step ustawiony), zrób następny jego krok; inaczej nic do zrobienia.
-      if (run.transform_step) return await handleTransformStep(sql, run.id, run.transform_step as TransformStep, isAutomatic);
+      if (run.transform_step) return await handleTransformStep(sql, run.id, run.transform_step as TransformStep, run.transform_cursor, isAutomatic);
       return json({ ok: true, skipped: "no_current_file" });
     }
 
@@ -885,7 +886,18 @@ async function runTransformStep(sql: SqlClient, runId: string, step: TransformSt
   }
 }
 
-async function handleTransformStep(sql: SqlClient, runId: string, step: TransformStep, isAutomatic: boolean): Promise<Response> {
+async function handleTransformStep(sql: SqlClient, runId: string, step: TransformStep, cursor: string | null, isAutomatic: boolean): Promise<Response> {
+  if (step === "connections") {
+    const [batch] = await sql<{ next_trip: string | null; done: boolean }[]>`
+      select * from rail_gtfs_transform_connections_batch(${runId}::uuid, ${cursor}::uuid)
+    `;
+    if (!batch) throw new Error("rail_connections_batch_no_result");
+    if (!batch.done) return json({ ok: true, transformStep: step, nextTrip: batch.next_trip });
+    // Kursor zapisuje funkcja SQL w tej samej transakcji co INSERT, więc awaria Edge
+    // Function nie powoduje ponownego dodania tej samej porcji połączeń.
+    await sql`update rail_sync_runs set transform_step = 'cleanup', transform_cursor = null, consecutive_errors = 0 where id = ${runId}`;
+    return json({ ok: true, transformStep: step, nextTransformStep: "cleanup" });
+  }
   await runTransformStep(sql, runId, step);
   const nextStep = TRANSFORM_STEPS[TRANSFORM_STEPS.indexOf(step) + 1] ?? null;
   if (nextStep) {
