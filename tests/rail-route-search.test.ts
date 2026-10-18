@@ -22,7 +22,7 @@ Deno.test("ładuje GTFS przez mock PostgREST i zwraca trzy najlepsze warianty be
       const rows = connections.filter((row) =>
         args.p_service_ids.includes(row.service_id) &&
         row.dep_seconds >= args.p_dep_from && row.dep_seconds < args.p_dep_to &&
-        args.p_from_stop_ids.includes(row.from_stop_id)
+        (args.p_from_stop_ids === null || args.p_from_stop_ids.includes(row.from_stop_id))
       );
       return Response.json(rows);
     }

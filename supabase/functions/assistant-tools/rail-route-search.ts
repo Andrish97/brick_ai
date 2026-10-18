@@ -37,7 +37,6 @@ const TOTAL_SCAN_SECONDS = 24 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
 const MAX_RPC_REQUESTS = 48;
 const MAX_SPLIT_DEPTH = 8;
-const MAX_SETTLE_ROUNDS = 6;
 const POSTGREST_MAX_ROWS = 1000;
 const MIN_TRANSFER_SECONDS = 7 * 60;
 const MAX_TRANSFER_SECONDS = 4 * 3600;
@@ -141,7 +140,7 @@ export async function runRailJourneySearch(
     serviceIds: string[],
     localStart: number,
     localEnd: number,
-    frontier: string[],
+    frontier: string[] | null,
     splitDepth = 0,
   ): Promise<Connection[]> => {
     if (rpcRequests >= MAX_RPC_REQUESTS) throw new Error("rail_rpc_budget_exhausted");
@@ -200,44 +199,30 @@ export async function runRailJourneySearch(
 
       diagnostics.windowsScanned++;
       const localEnd = Math.min(localStart + WINDOW_SECONDS, EXTENDED_DAY_CEILING_SECONDS);
-      let frontier = current.reachableStopIds;
-      let previousFrontier = new Set<string>();
-
-      // Re-query as newly discovered stations expand the reachable frontier. The round
-      // limit is a safety cap for pathological timetables; normal one/two-transfer routes
-      // settle in a small number of passes.
-      for (let settle = 0; settle < MAX_SETTLE_ROUNDS; settle++) {
-        const unseenFrontier = frontier.filter((id) => !previousFrontier.has(id));
-        if (!unseenFrontier.length) break;
-        for (const id of unseenFrontier) previousFrontier.add(id);
-
-        let rows: Connection[];
-        try {
-          rows = await fetchWindow([...serviceIds], localStart, localEnd, frontier);
-        } catch (error) {
-          diagnostics.connectionsFetchError = String(error);
-          break dayLoop;
-        }
-
-        let added = 0;
-        for (const row of rows) {
-          const absolute = {
-            ...row,
-            dep_seconds: row.dep_seconds + dayBase,
-            arr_seconds: row.arr_seconds + dayBase,
-            service_day_offset: dayOffset,
-            trip_instance_id: `${row.trip_id}@${dayOffset}`,
-          };
-          const signature = `${absolute.trip_id}|${absolute.from_stop_id}|${absolute.to_stop_id}|${absolute.dep_seconds}`;
-          if (allConnections.has(signature)) continue;
-          allConnections.set(signature, absolute);
-          added++;
-        }
-        if (!added) break;
-        const expanded = scan();
-        frontier = expanded.reachableStopIds;
-        if (frontier.every((id) => previousFrontier.has(id))) break;
+      let rows: Connection[];
+      try {
+        // The RPC already restricts rows to stations that can reach the destination
+        // inside the geographic corridor. Fetch the whole bounded window once instead
+        // of round-tripping for each newly reached station.
+        rows = await fetchWindow([...serviceIds], localStart, localEnd, null);
+      } catch (error) {
+        diagnostics.connectionsFetchError = String(error);
+        break dayLoop;
       }
+
+      for (const row of rows) {
+        const absolute = {
+          ...row,
+          dep_seconds: row.dep_seconds + dayBase,
+          arr_seconds: row.arr_seconds + dayBase,
+          service_day_offset: dayOffset,
+          trip_instance_id: `${row.trip_id}@${dayOffset}`,
+        };
+        const signature = `${absolute.trip_id}|${absolute.from_stop_id}|${absolute.to_stop_id}|${absolute.dep_seconds}`;
+        if (allConnections.has(signature)) continue;
+        allConnections.set(signature, absolute);
+      }
+      scan();
     }
   }
 
