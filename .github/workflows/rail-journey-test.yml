@@ -85,6 +85,7 @@ on:
     paths:
       - ".github/workflows/rail-journey-test.yml"
       - "supabase/functions/rail-gtfs-sync/index.ts"
+      - "scripts/sync-rail-gtfs.mjs"
       - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
       - "supabase/migrations/20240145000000_rail_connections_replace_in_place.sql"
       - "supabase/migrations/20240146000000_rail_calendar_cleanup_foreign_key.sql"

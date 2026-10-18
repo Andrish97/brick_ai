@@ -13,7 +13,7 @@ if (!start.ok) throw new Error(`Nie udało się uruchomić syncu GTFS: ${JSON.st
 
 for (let tick = 1; tick <= 600; tick++) {
   await new Promise((resolve) => setTimeout(resolve, 750));
-  const result = await call("tick");
+  const result = await callWithRetry("tick");
   if (tick % 10 === 0 || result.done || result.skipped) {
     const stage = result.transformStep === "connections" && result.nextTrip
       ? `connections through ${result.nextTrip}`
@@ -27,7 +27,22 @@ for (let tick = 1; tick <= 600; tick++) {
   // Pojedynczy błąd może być przejściowy; funkcja sama ponawia krok do pięciu razy.
   if (!result.ok && result.error) console.error(`Przejściowy błąd ticka: ${result.error}`);
 }
-throw new Error("Sync GTFS nie zakończył się po 180 krokach.");
+throw new Error("Sync GTFS nie zakończył się po 600 krokach.");
+
+async function callWithRetry(action) {
+  const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 30_000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call(action);
+    } catch (error) {
+      const transient = /Sync HTTP (?:408|425|429|500|502|503|504):|fetch failed|network|timed out|AbortError|ECONNRESET|UND_ERR/i.test(String(error));
+      if (!transient || attempt >= delays.length) throw error;
+      const waitMs = delays[attempt];
+      console.error(`Przejściowy błąd HTTP/sieci (${String(error)}); ponawiam tick za ${waitMs / 1000}s (${attempt + 1}/${delays.length}).`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+}
 
 async function call(action) {
   const response = await fetch(endpoint, {
