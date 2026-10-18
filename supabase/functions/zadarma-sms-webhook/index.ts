@@ -465,7 +465,7 @@ const TOOLS = [
       {
         name: "plan_train_journey",
         description:
-          "Planuje połączenie kolejowe PKP PLK między dwoma punktami, z bezpośrednim połączeniem lub jedną przesiadką znalezioną automatycznie. Endpoint sam formatuje wynik — nie twórz własnego opisu trasy.",
+          "Znajduje połączenia kolejowe PKP PLK między dwoma punktami, w tym z wieloma przesiadkami. Uwzględnia datę i preferowaną porę; endpoint sam formatuje wynik — nie twórz własnego opisu ani rozkładu.",
         parameters: {
           type: "OBJECT",
           properties: {
@@ -554,14 +554,14 @@ async function generateContent(contents: GeminiContent[], system: string, maxOut
   }
 }
 
-async function callAssistantTool(action: string, args: Record<string, unknown>, userId: string, conversationId: string): Promise<Record<string, unknown>> {
+async function callAssistantTool(action: string, args: Record<string, unknown>, userId: string, conversationId: string, testLocalOnly = false): Promise<Record<string, unknown>> {
   const url = Deno.env.get("SUPABASE_URL");
   const secret = Deno.env.get("ASSISTANT_TOOLS_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   try {
     const res = await fetch(`${url}/functions/v1/assistant-tools`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Internal-Secret": secret ?? "" },
-      body: JSON.stringify({ action, user_id: userId, conversation_id: conversationId, args }),
+      body: JSON.stringify({ action, user_id: userId, conversation_id: conversationId, args, ...(testLocalOnly ? { test_local_only: true } : {}) }),
     });
     return await res.json();
   } catch (e) {
@@ -603,7 +603,7 @@ function pkpErrorMessage(toolResult: Record<string, unknown>): string {
     return "Nie udało się ustalić stacji z profilu — podaj jej nazwę wprost.";
   }
   if (error === "no_schedule_data" || error === "no_train_data") return "Brak danych rozkładowych dla tego zapytania.";
-  if (error === "no_connection_found") return "Nie znalazłem połączenia (bezpośredniego ani z jedną przesiadką) dla tej trasy.";
+  if (error === "no_connection_found") return "Nie znalazłem połączenia dla tej trasy w wybranym przedziale czasu.";
   return "Nie udało się pobrać danych kolejowych. Spróbuj ponownie.";
 }
 
@@ -621,18 +621,22 @@ function formatTrainStatus(toolResult: Record<string, unknown>): string {
   return `${toolResult.train} (${plannedTime}, ${toolResult.station}): ${delayText}${status ? ` (${status})` : ""}.`;
 }
 
-function formatTrainJourney(toolResult: Record<string, unknown>): string {
+function formatTrainJourney(toolResult: Record<string, unknown>, maxOptions = 3): string {
   if (toolResult.error) return pkpErrorMessage(toolResult);
-  const legs = Array.isArray(toolResult.legs) ? toolResult.legs as Record<string, unknown>[] : [];
-  if (!legs.length) return "Nie udało się zbudować trasy.";
-  if (legs.length === 1) {
-    const l = legs[0];
-    return `${l.from} -> ${l.to}: odjazd ${l.departure}, przyjazd ${l.arrival} (${l.train}).`;
-  }
-  return legs.map((l, i) => i === 0
-    ? `${l.from} -> ${l.to}: odjazd ${l.departure}, przyjazd ${l.arrival} (${l.train})`
-    : `Przesiadka w ${l.from}\n${l.from} -> ${l.to}: odjazd ${l.departure}, przyjazd ${l.arrival} (${l.train})`
-  ).join("\n");
+  const journeys = Array.isArray(toolResult.journeys)
+    ? (toolResult.journeys as Array<Record<string, unknown>>)
+    : [toolResult];
+  const options = journeys.slice(0, maxOptions).map((journey) => {
+    const legs = Array.isArray(journey.legs) ? journey.legs as Record<string, unknown>[] : [];
+    if (!legs.length) return "";
+    const first = legs[0];
+    const last = legs[legs.length - 1];
+    const stops = [first.from, ...legs.map((leg) => leg.to)].join(" -> ");
+    const trains = [...new Set(legs.map((leg) => String(leg.train ?? "?").trim()))].join(", ");
+    return `${first.departure} ${stops} ${last.arrival} (${trains})`;
+  }).filter(Boolean);
+  if (!options.length) return "Nie udało się zbudować trasy.";
+  return options.map((option, index) => options.length === 1 ? option : `Opcja ${index + 1}: ${option}`).join("\n");
 }
 
 function formatTrainDisruptions(toolResult: Record<string, unknown>): string {
@@ -642,7 +646,8 @@ function formatTrainDisruptions(toolResult: Record<string, unknown>): string {
   return list.map((d) => `- ${d}`).join("\n");
 }
 
-type ToolContext = { userId: string; convId: string };
+type JourneyTraceEntry = { args: Record<string, unknown>; result: Record<string, unknown> };
+type ToolContext = { userId: string; convId: string; replyParts?: 1 | 3 | 4; journeyTrace?: JourneyTraceEntry[]; localOnlyTest?: boolean };
 
 type AssistantOutcome =
   | { kind: "closed" }
@@ -664,6 +669,7 @@ const MAX_TOOL_ROUNDS = 4;
 async function runAssistant(contents: GeminiContent[], systemPrompt: string, maxOutputTokens: number, ctx: ToolContext): Promise<AssistantOutcome> {
   let currentContents = contents;
   let currentMax = maxOutputTokens;
+  let currentReplyParts = ctx.replyParts ?? 1;
   let grantedParts: 1 | 3 | 4 | undefined;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -689,13 +695,14 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
     }
 
     if (DETERMINISTIC_ACTIONS.has(name)) {
-      const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId);
+      const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId, ctx.localOnlyTest && name === "plan_train_journey");
+      if (name === "plan_train_journey") ctx.journeyTrace?.push({ args, result: toolResult });
       log("tool_result", { convId: ctx.convId, name, result: toolResult });
 
       if (name === "get_fastest_arrival") return { kind: "text", text: formatFastestArrival(toolResult) };
       if (name === "get_train_station_board") return { kind: "text", text: formatTrainStationBoard(toolResult) };
       if (name === "get_train_status") return { kind: "text", text: formatTrainStatus(toolResult) };
-      if (name === "plan_train_journey") return { kind: "text", text: formatTrainJourney(toolResult) };
+      if (name === "plan_train_journey") return { kind: "text", text: formatTrainJourney(toolResult, currentReplyParts === 1 ? 1 : 3) };
       if (name === "get_train_disruptions") return { kind: "text", text: formatTrainDisruptions(toolResult) };
 
       // get_directions / get_transit: pełen, sformatowany tekst trasy, wysyłany bez zmian.
@@ -711,6 +718,7 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
 
     if (name === "allow_long_reply" && [1, 3, 4].includes(toolResult.granted_parts as number)) {
       grantedParts = toolResult.granted_parts as 1 | 3 | 4;
+      currentReplyParts = grantedParts;
       currentMax = TOKENS_FOR_PARTS[grantedParts];
     }
 
@@ -809,7 +817,7 @@ type TestTurn = { role: "user" | "model"; text: string };
 // wyłącznie klient (panel, w pamięci przeglądarki) i przekazuje przy każdym wywołaniu —
 // serwer pozostaje bezstanowy, więc "rozmowa" istnieje tylko po stronie testującego,
 // nigdy w conversations/messages, i można mieć ich równolegle dowolnie wiele.
-async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, history: TestTurn[], grantedParts: 1 | 3 | 4): Promise<Response> {
+async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, history: TestTurn[], grantedParts: 1 | 3 | 4, localOnlyTest: boolean): Promise<Response> {
   const content = rawMsg.trim();
   if (!content) return new Response("Empty content", { status: 200, headers: CORS });
 
@@ -825,7 +833,8 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, histo
   systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${grantedParts} SMS (${SMS_PART_CHARS * grantedParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
   log("endpoint_test_start", { convId, content, historyLen: history.length, grantedParts });
-  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId });
+  const journeyTrace: JourneyTraceEntry[] = [];
+  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId, replyParts: grantedParts, journeyTrace, localOnlyTest });
 
   if (outcome.kind === "closed") {
     return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true, granted_parts: grantedParts }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
@@ -841,7 +850,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, histo
   log("endpoint_test_done", { convId, kind: outcome.kind, parts: parts.length });
 
   return new Response(
-    JSON.stringify({ ok: true, test_mode: true, reply: cleanReply, parts: parts.length, granted_parts: nextGrantedParts }),
+    JSON.stringify({ ok: true, test_mode: true, conv_id: convId, reply: cleanReply, parts: parts.length, granted_parts: nextGrantedParts, journey_trace: journeyTrace }),
     { status: 200, headers: { ...CORS, "Content-Type": "application/json" } }
   );
 }
@@ -913,7 +922,8 @@ Deno.serve(async (req: Request) => {
         )
       : [];
     const grantedPartsIn = ([1, 3, 4].includes(rawJson.grantedParts as number) ? rawJson.grantedParts : 1) as 1 | 3 | 4;
-    return await handleEndpointTest(SB, KEY, smsBody, historyIn, grantedPartsIn);
+    const localOnlyTest = rawJson.testLocalOnly === true;
+    return await handleEndpointTest(SB, KEY, smsBody, historyIn, grantedPartsIn, localOnlyTest);
   }
 
   if (!senderPhone || !smsBody) {
@@ -1060,7 +1070,7 @@ Deno.serve(async (req: Request) => {
   }
   systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
 
-  const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId });
+  const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId, replyParts: replySmsParts });
 
   // Zamknięcie rozmowy przez narzędzie — bez odpowiedzi SMS, zgodnie z ustaloną decyzją produktową
   if (outcome.kind === "closed") {

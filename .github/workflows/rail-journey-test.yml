@@ -1,0 +1,103 @@
+name: Test planera kolejowego (bez SMS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: Stacja początkowa
+        required: true
+        default: Katowice
+        type: string
+      to:
+        description: Stacja docelowa
+        required: true
+        default: Zamość
+        type: string
+      travel_date:
+        description: Data lub określenie naturalne, np. jutro
+        required: true
+        default: jutro
+        type: string
+      preferred_time:
+        description: Preferowana pora, np. rano albo 08:00
+        required: true
+        default: rano
+        type: string
+      reply_parts:
+        description: Limit długości odpowiedzi
+        required: true
+        default: "4"
+        type: choice
+        options:
+          - "1"
+          - "3"
+          - "4"
+      expected_source:
+        description: Oczekiwana ścieżka planera
+        required: true
+        default: local
+        type: choice
+        options:
+          - any
+          - local
+          - live
+      expect_route:
+        description: Nie zaliczaj testu, jeśli planer nie zwróci trasy
+        required: true
+        default: true
+        type: boolean
+      expected_legs:
+        description: Oczekiwany kształt trasy
+        required: true
+        default: any
+        type: choice
+        options:
+          - any
+          - one
+          - multiple
+      expected_variants:
+        description: Minimalna liczba wariantów (0 wyłącza sprawdzanie)
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "0"
+          - "1"
+          - "2"
+          - "3"
+      use_live_fallback:
+        description: Włącz awaryjne zapytania do PKP (zużywa limit API)
+        required: true
+        default: false
+        type: boolean
+      expected_text:
+        description: Opcjonalny tekst, który ma się pojawić w odpowiedzi SMS
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test-journey:
+    name: Test odpowiedzi o połączeniu kolejowym
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pobierz repozytorium
+        uses: actions/checkout@v4
+
+      - name: Uruchom test end-to-end
+        env:
+          FROM_STATION: ${{ inputs.from }}
+          TO_STATION: ${{ inputs.to }}
+          TRAVEL_DATE: ${{ inputs.travel_date }}
+          PREFERRED_TIME: ${{ inputs.preferred_time }}
+          REPLY_PARTS: ${{ inputs.reply_parts }}
+          EXPECTED_SOURCE: ${{ inputs.expected_source }}
+          EXPECT_ROUTE: ${{ inputs.expect_route }}
+          EXPECTED_LEGS: ${{ inputs.expected_legs }}
+          EXPECTED_VARIANTS: ${{ inputs.expected_variants }}
+          EXPECTED_TEXT: ${{ inputs.expected_text }}
+          ALLOW_LIVE_FALLBACK: ${{ inputs.use_live_fallback }}
+        run: node scripts/test-rail-journey.mjs

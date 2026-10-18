@@ -1,4 +1,5 @@
-import { resolveStationGroupSmart, hasFreshLocalData, runCsaJourney, type CsaResult } from "./csa.ts";
+import { resolveStationGroupSmart, hasFreshLocalData } from "./rail-stations.ts";
+import { runRailJourneySearch, type JourneySearchResult } from "./rail-route-search.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -24,6 +25,7 @@ type ToolRequest = {
   user_id: string;
   conversation_id: string;
   args?: Record<string, unknown>;
+  test_local_only?: boolean;
 };
 
 function json(body: object, status = 200): Response {
@@ -417,8 +419,8 @@ function resolveStationPoint(value: string, user: UserProfile): { query: string 
 type StationLookup = { ok: true; station: PkpStation } | { ok: false; body: Record<string, unknown> };
 
 // Logika ujednoznaczniania współdzielona (w zamyśle, choć zduplikowana z powodów
-// unikania cyklicznego importu — zob. csa.ts) między żywym wyszukiwaniem PKP a lokalnym
-// (resolveSingleStationLocal w csa.ts, przy szukaniu w rail_stops z GTFS).
+// unikania cyklicznego importu — zob. rail-stations.ts) między żywym wyszukiwaniem PKP a
+// lokalnym (resolveStationGroupSmart, przy szukaniu w rail_stops z GTFS).
 function pickBestStationMatch(candidates: PkpStation[], query: string): PkpStation | null {
   if (candidates.length === 1) return candidates[0];
   if (candidates.length === 0) return null;
@@ -834,12 +836,9 @@ Deno.serve(async (req: Request) => {
       return json({ disruptions: summaries });
     }
 
-    // Planer połączeń kolejowych z przesiadkami — najpierw bezpośrednie, jeśli brak:
-    // 1 przesiadka, znaleziona DYNAMICZNIE z realnego rozkładu (nie ze sztywnej listy
-    // stacji) — bierzemy pociągi odjeżdżające ze stacji startowej, pobieramy ich pełną
-    // trasę (/schedules/route/{scheduleId}/{orderId}), i sprawdzamy, czy z któregoś
-    // przystanku da się dojechać dalej do celu. Ograniczone do garści najbliższych
-    // odjazdów, żeby zmieścić się w limicie zapytań API (klucz Basic: 100/h).
+    // Planer korzysta najpierw z lokalnego GTFS i zwraca do trzech najlepszych tras.
+    // Nieudany odczyt, brak danych lub niepotwierdzony bliski odjazd przełącza na
+    // istniejący fallback PKP.
     if (input.action === "plan_train_journey") {
       const user = await getUser(url, key, input.user_id);
       if (!user) return json({ error: "User not found" }, 404);
@@ -850,18 +849,22 @@ Deno.serve(async (req: Request) => {
       const dateArg = typeof input.args?.date === "string" ? input.args.date : "";
       const preferredTimeArg = typeof input.args?.preferred_time === "string" ? input.args.preferred_time.trim() : "";
 
-      // Najpierw próba lokalna (CSA nad zsynchronizowanym GTFS — zob. csa.ts) — szybsza,
-      // bez limitu zapytań PKP, dowolna liczba przesiadek. Przy jakimkolwiek niepowodzeniu
-      // (brak świeżych danych, stacja nierozpoznana/niejednoznaczna lokalnie, CSA nic nie
-      // znajduje, rozbieżność z żywym API dla bliskiej daty, wyjątek) — bezwarunkowy
-      // fallback na dotychczasową żywą heurystykę PKP (planTrainJourneyLive), nigdy błąd 500.
-      const local = await tryPlanTrainJourneyLocal(url, key, user, fromArg, toArg, dateArg, preferredTimeArg);
-      if (local) {
+      // Lokalny skan po połączeniach GTFS (rail-route-search.ts) szuka wariantów
+      // z wieloma przesiadkami bez zapytań PKP. Przy braku lokalnego wyniku, świeżych
+      // danych lub potwierdzenia bliskiego odjazdu pozostaje awaryjny fallback PKP.
+      const localAttempt = await tryPlanTrainJourneyLocal(url, key, user, fromArg, toArg, dateArg, preferredTimeArg);
+      if (localAttempt.result) {
         log("plan_train_journey_path", { path: "local" });
-        return json(local);
+        return json({ ...localAttempt.result, route_source: "local" });
+      }
+      if (input.test_local_only === true) {
+        log("plan_train_journey_path", { path: "local_test_only" });
+        return json({ error: "no_connection_found", route_source: "local", local_only_test: true, local_failure: localAttempt.failure });
       }
       log("plan_train_journey_path", { path: "live" });
-      return await planTrainJourneyLive(url, key, user, fromArg, toArg, dateArg);
+      const liveResponse = await planTrainJourneyPkpFallback(url, key, user, fromArg, toArg, dateArg);
+      const liveBody = await liveResponse.json().catch(() => ({}));
+      return json({ ...(liveBody && typeof liveBody === "object" ? liveBody : {}), route_source: "live", local_failure: localAttempt.failure }, liveResponse.status);
     }
 
     return json({ error: "Unknown action" }, 400);
@@ -883,7 +886,7 @@ function isNearTermDate(date: string): boolean {
   return date === tomorrowStr;
 }
 
-// Weryfikacja pierwszej nogi trasy z CSA względem żywego /schedules PKP — nie tylko
+// Weryfikacja pierwszej nogi trasy względem żywego /schedules PKP — nie tylko
 // "pokaż opóźnienie", ale sygnał, że lokalny GTFS wciąż zgadza się z rzeczywistością.
 // Brak dopasowania w tolerancji ±3 min traktujemy jako niepotwierdzone (nie jako "brak
 // danych o opóźnieniu") — wywołujący ma wtedy spaść na żywą heurystykę zamiast pokazać
@@ -903,11 +906,11 @@ async function verifyFirstLegLive(leg: { from: string; departure: string }, date
   return false;
 }
 
-// Próba lokalna (CSA nad zsynchronizowanym GTFS) dla plan_train_journey — zwraca null
+// Próba lokalnego wyszukiwania nad zsynchronizowanym GTFS — zwraca null
 // przy JAKIMKOLWIEK niepowodzeniu (brak świeżych danych, stacja nierozpoznana/
-// niejednoznaczna lokalnie, CSA nic nie znajduje, rozbieżność z żywym API dla bliskiej
+// niejednoznaczna lokalnie, skan nie znajduje trasy, rozbieżność z żywym API dla bliskiej
 // daty, dowolny wyjątek), co dispatcher wyżej traktuje jako sygnał do wywołania
-// planTrainJourneyLive — nigdy nie ujawnia błędu 500 z powodu tej ścieżki.
+// planTrainJourneyPkpFallback — nigdy nie ujawnia błędu 500 z powodu tej ścieżki.
 // Okno startowe (typowo 4h) wyliczone z preferred_time (jeśli AI je podało), inaczej
 // bieżąca godzina dla dziś, albo sensowny poranek (6:00-10:00) dla przyszłej daty —
 // zastępuje dawne sztywne "start=0 dla nie-dziś" (dawało bezsensowny origin window od
@@ -932,7 +935,7 @@ function computeOriginWindow(dateArg: string, preferredTimeArg: string): { date:
 
 async function tryPlanTrainJourneyLocal(
   url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string, preferredTimeArg: string,
-): Promise<CsaResult | null> {
+): Promise<{ result: JourneySearchResult | null; failure?: Record<string, unknown> }> {
   try {
     // Log wejścia bezwarunkowo (nie tylko przy niepowodzeniu) — realny test (Katowice ->
     // Zamość) zwrócił "live" bez ŻADNEGO z pozostałych logów rail_local_skip poniżej, co
@@ -941,7 +944,7 @@ async function tryPlanTrainJourneyLocal(
     log("rail_local_entry", { fromArg, toArg, dateArg, preferredTimeArg });
     if (!(await hasFreshLocalData(url, key))) {
       log("rail_local_skip", { reason: "no_fresh_local_data" });
-      return null;
+      return { result: null, failure: { reason: "no_fresh_local_data" } };
     }
 
     const fromResolved = resolveStationPoint(fromArg, user);
@@ -951,7 +954,7 @@ async function tryPlanTrainJourneyLocal(
         reason: "no_preferred_station",
         fromArg, toArg, fromMissing: fromResolved.missing, toMissing: toResolved.missing,
       });
-      return null; // spadnij na żywą — ona da właściwy komunikat no_preferred_station
+      return { result: null, failure: { reason: "no_preferred_station", fromMissing: fromResolved.missing, toMissing: toResolved.missing } };
     }
 
     const geminiKey = Deno.env.get("GEMINI_API_KEY");
@@ -973,40 +976,58 @@ async function tryPlanTrainJourneyLocal(
         fromBody: fromLookup.ok ? undefined : fromLookup.body,
         toBody: toLookup.ok ? undefined : toLookup.body,
       });
-      return null;
+      return { result: null, failure: { reason: "station_not_resolved_locally", from: fromResolved.query, to: toResolved.query } };
     }
 
     const { date, start: originWindowStart, end: originWindowEnd } = computeOriginWindow(dateArg, preferredTimeArg);
 
-    const { result, diagnostics } = await runCsaJourney(url, key, fromLookup.station, toLookup.station, date, originWindowStart, originWindowEnd);
+    const { result, diagnostics } = await runRailJourneySearch(url, key, fromLookup.station, toLookup.station, date, originWindowStart, originWindowEnd);
     if (!result) {
       log("rail_local_skip", {
         reason: "csa_found_nothing",
         from: fromLookup.station.name, to: toLookup.station.name, date, originWindowStart, originWindowEnd,
         ...diagnostics,
       });
-      return null;
+      return { result: null, failure: { reason: "route_not_found_locally", from: fromLookup.station.name, to: toLookup.station.name, date, diagnostics } };
     }
 
+    let verifiedJourneys = result.journeys;
     if (isNearTermDate(date)) {
-      const verified = await verifyFirstLegLive(result.legs[0], date);
-      if (!verified) {
+      const firstLegChecks = new Map<string, Promise<boolean>>();
+      const verifyCandidate = (journey: JourneySearchResult["journeys"][number]) => {
+        const leg = journey.legs[0];
+        const key = `${leg.from}|${leg.departure}`;
+        let check = firstLegChecks.get(key);
+        if (!check) {
+          check = verifyFirstLegLive(leg, date);
+          firstLegChecks.set(key, check);
+        }
+        return check;
+      };
+      const checked = await Promise.all(result.journeys.map(async (journey) => ({
+        journey,
+        verified: await verifyCandidate(journey),
+      })));
+      verifiedJourneys = checked.filter((item) => item.verified).map((item) => item.journey);
+      if (!verifiedJourneys.length) {
         log("rail_local_mismatch", { from: fromLookup.station.name, to: toLookup.station.name, date });
-        return null;
+        return { result: null, failure: { reason: "first_leg_not_verified_live", from: fromLookup.station.name, to: toLookup.station.name, date } };
+      }
+      if (verifiedJourneys.length < result.journeys.length) {
+        log("rail_local_candidates_filtered", { from: fromLookup.station.name, to: toLookup.station.name, date, candidates: result.journeys.length, verified: verifiedJourneys.length });
       }
     }
 
-    return result;
+    return { result: { ...verifiedJourneys[0], journeys: verifiedJourneys } };
   } catch (e) {
     log("rail_local_error", { error: String(e) });
-    return null;
+    return { result: null, failure: { reason: "local_search_error", error: String(e) } };
   }
 }
 
-// Żywa heurystyka PKP (bezpośredni odcinek, potem do 1, potem do 2 przesiadek) —
-// zachowana bez zmian jako TRWAŁY bezpiecznik, nie tymczasowa łatka migracyjna. Wywoływana
-// przez dispatcher plan_train_journey wyżej, zawsze gdy próba lokalna (CSA) zawiedzie.
-async function planTrainJourneyLive(url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string): Promise<Response> {
+// Awaryjny planer PKP zachowany na czas problemów z lokalnym GTFS. Może obsłużyć mniej
+// wariantów niż lokalny planer i pozostaje ograniczony limitami zewnętrznego API.
+async function planTrainJourneyPkpFallback(url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string): Promise<Response> {
   {
     {
       const fromResolved = resolveStationPoint(fromArg, user);

@@ -2159,7 +2159,7 @@ async function runJourneyTest() {
     if (!res.ok || json?.ok === false) {
       result = { error: json?.error || text || `HTTP ${res.status}` };
     } else {
-      result = { reply: json?.reply ?? null, closed: !!json?.closed, parts: json?.parts ?? null };
+      result = { reply: json?.reply ?? null, closed: !!json?.closed, parts: json?.parts ?? null, journeyTrace: json?.journey_trace ?? [] };
     }
   } catch (e) {
     result = { error: String(e) };
@@ -2185,6 +2185,11 @@ async function runJourneyTest() {
     result.stationResolved = stationRow?.data ?? null;
     result.logRows = logRows ?? [];
   } catch { /* diagnostyka opcjonalna — nie blokuj wyniku samej odpowiedzi */ }
+
+  const journey = result.journeyTrace?.at(-1);
+  if (!result.path && (journey?.result?.route_source === 'local' || journey?.result?.route_source === 'live')) {
+    result.path = journey.result.route_source;
+  }
 
   _journeyTest.result = result;
   _journeyTest.running = false;
