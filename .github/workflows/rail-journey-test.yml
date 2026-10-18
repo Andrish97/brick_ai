@@ -86,6 +86,7 @@ on:
       - ".github/workflows/rail-journey-test.yml"
       - "supabase/functions/rail-gtfs-sync/index.ts"
       - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
+      - "supabase/migrations/20240145000000_rail_connections_replace_in_place.sql"
 
 permissions:
   contents: read
