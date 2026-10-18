@@ -852,7 +852,9 @@ Deno.serve(async (req: Request) => {
       // Lokalny skan po połączeniach GTFS (rail-route-search.ts) szuka wariantów
       // z wieloma przesiadkami bez zapytań PKP. Przy braku lokalnego wyniku, świeżych
       // danych lub potwierdzenia bliskiego odjazdu pozostaje awaryjny fallback PKP.
-      const localAttempt = await tryPlanTrainJourneyLocal(url, key, user, fromArg, toArg, dateArg, preferredTimeArg);
+      const localAttempt = await tryPlanTrainJourneyLocal(
+        url, key, user, fromArg, toArg, dateArg, preferredTimeArg, input.test_local_only === true,
+      );
       if (localAttempt.result) {
         log("plan_train_journey_path", { path: "local" });
         return json({ ...localAttempt.result, route_source: "local" });
@@ -935,6 +937,7 @@ function computeOriginWindow(dateArg: string, preferredTimeArg: string): { date:
 
 async function tryPlanTrainJourneyLocal(
   url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string, preferredTimeArg: string,
+  skipLiveVerification = false,
 ): Promise<{ result: JourneySearchResult | null; failure?: Record<string, unknown> }> {
   try {
     // Log wejścia bezwarunkowo (nie tylko przy niepowodzeniu) — realny test (Katowice ->
@@ -992,7 +995,7 @@ async function tryPlanTrainJourneyLocal(
     }
 
     let verifiedJourneys = result.journeys;
-    if (isNearTermDate(date)) {
+    if (isNearTermDate(date) && !skipLiveVerification) {
       const firstLegChecks = new Map<string, Promise<boolean>>();
       const verifyCandidate = (journey: JourneySearchResult["journeys"][number]) => {
         const leg = journey.legs[0];

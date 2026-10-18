@@ -87,6 +87,7 @@ on:
       - "supabase/functions/rail-gtfs-sync/index.ts"
       - "supabase/functions/assistant-tools/rail-route-search.ts"
       - "supabase/functions/assistant-tools/rail-stations.ts"
+      - "supabase/functions/assistant-tools/index.ts"
       - "scripts/sync-rail-gtfs.mjs"
       - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
       - "supabase/migrations/20240144000000_rail_connections_smaller_batches.sql"
