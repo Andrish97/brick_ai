@@ -151,13 +151,13 @@ export async function resolveStationGroupSmart(
 // za nieaktualne) — w obu przypadkach nie ufamy lokalnym danym.
 export async function hasFreshLocalData(url: string, key: string, maxAgeHours = 48): Promise<boolean> {
   try {
-    const rows = await sbGet<{ finished_at: string | null }>(
+    const rows = await sbGet<{ finished_at: string | null; feed_checked_at: string | null }>(
       url, key,
-      `rail_sync_runs?status=eq.success&order=finished_at.desc&limit=1&select=finished_at`,
+      `rail_sync_runs?status=eq.success&order=finished_at.desc&limit=1&select=finished_at,feed_checked_at`,
     );
-    const finishedAt = rows[0]?.finished_at;
-    if (!finishedAt) return false;
-    return Date.now() - new Date(finishedAt).getTime() < maxAgeHours * 3600 * 1000;
+    const lastVerifiedAt = rows[0]?.feed_checked_at ?? rows[0]?.finished_at;
+    if (!lastVerifiedAt) return false;
+    return Date.now() - new Date(lastVerifiedAt).getTime() < maxAgeHours * 3600 * 1000;
   } catch {
     return false;
   }

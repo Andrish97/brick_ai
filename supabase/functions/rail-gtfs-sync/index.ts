@@ -363,12 +363,13 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     const contentLengthHeader = headRes.headers.get("content-length");
     const feedTotalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
 
-    const [lastSuccess] = await sql<{ feed_last_modified: string | null }[]>`
-      select feed_last_modified from rail_sync_runs
+    const [lastSuccess] = await sql<{ id: string; feed_last_modified: string | null }[]>`
+      select id, feed_last_modified from rail_sync_runs
       where status = 'success'
       order by finished_at desc nulls last limit 1
     `;
     if (feedLastModified && lastSuccess?.feed_last_modified && new Date(lastSuccess.feed_last_modified).getTime() === feedLastModified.getTime()) {
+      await sql`update rail_sync_runs set feed_checked_at = now() where id = ${lastSuccess.id}`;
       return json({ ok: true, skipped: "unchanged" });
     }
 
@@ -398,8 +399,8 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     // SOURCE_ZIP. Samo pobieranie jest teraz krok-po-kroku przez "tick" (zob.
     // downloadOneChunk) dokładnie tym samym mechanizmem co reszta syncu.
     const [run] = await sql<{ id: string }[]>`
-      insert into rail_sync_runs (status, current_file, current_offset, current_total_bytes, feed_last_modified)
-      values ('running', ${SOURCE_ZIP}, 0, ${feedTotalBytes}, ${feedLastModified ? feedLastModified.toISOString() : null})
+      insert into rail_sync_runs (status, current_file, current_offset, current_total_bytes, feed_last_modified, feed_checked_at)
+      values ('running', ${SOURCE_ZIP}, 0, ${feedTotalBytes}, ${feedLastModified ? feedLastModified.toISOString() : null}, now())
       returning id
     `;
     // Blob-y po starych/nieudanych biegach nie są już potrzebne.
@@ -623,7 +624,7 @@ async function extractBigFileChunk(
     // DecompressionStream buforuje wewnętrznie ograniczoną ilość danych i zablokowałby się,
     // gdyby nikt jednocześnie nie odbierał wyjścia.
     const writeDone = (async () => {
-      await dsWriter.write(compressed);
+      await dsWriter.write(new Uint8Array(compressed));
       await dsWriter.close();
     })();
     const dsReader = ds.readable.getReader();

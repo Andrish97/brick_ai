@@ -12,4 +12,6 @@ przez produkcyjny endpoint testowy Gemini + `plan_train_journey`. Nie uruchamia
 Zadarma ani funkcji wysyłającej SMS. Domyślnie testuje tylko lokalny planer i
 nie wykonuje zapytań do PKP. Opcja „Włącz awaryjne zapytania do PKP” uruchamia
 pełny fallback `live` i zużywa limit API. Formularz pozwala sprawdzić źródło
-`local`/`live`, liczbę wariantów, przesiadki i limit 1/3/4 części SMS.
+`local`/`live`, liczbę wariantów, przesiadki i limit 1/3/4 części SMS. Opcjonalne
+„Sprawdź i odśwież GTFS” kontroluje feed przed testem i kończy synchronizację,
+jeśli rozkład się zmienił. Ta opcja również nie wysyła SMS-ów.

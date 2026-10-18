@@ -70,6 +70,11 @@ on:
         required: true
         default: false
         type: boolean
+      refresh_gtfs:
+        description: Przed testem sprawdź feed i w razie potrzeby zsynchronizuj GTFS
+        required: true
+        default: false
+        type: boolean
       expected_text:
         description: Opcjonalny tekst, który ma się pojawić w odpowiedzi SMS
         required: false
@@ -82,10 +87,17 @@ jobs:
   test-journey:
     name: Test odpowiedzi o połączeniu kolejowym
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 25
     steps:
       - name: Pobierz repozytorium
         uses: actions/checkout@v4
+
+      - name: Sprawdź i odśwież GTFS
+        if: ${{ inputs.refresh_gtfs }}
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+        run: node scripts/sync-rail-gtfs.mjs
 
       - name: Uruchom test end-to-end
         env:
