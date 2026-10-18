@@ -14,7 +14,7 @@ const c = (trip, from, to, dep, arr, train = trip) => ({
 });
 const window = { start: t(8), end: t(12) };
 
-test("ciąg dalszy tego samego pociągu nie wymaga 30-minutowej przesiadki", () => {
+test("ciąg dalszy tego samego pociągu nie wymaga bufora przesiadkowego", () => {
   const result = findJourneyCandidates([
     c("IC1", "A", "B", t(8), t(8, 20)),
     c("IC1", "B", "C", t(8, 22), t(9)),
@@ -26,22 +26,30 @@ test("ciąg dalszy tego samego pociągu nie wymaga 30-minutowej przesiadki", () 
   assert.equal(result[0].legs[0].to_stop_id, "D");
 });
 
-test("odrzuca przesiadkę krótszą niż 30 minut", () => {
+test("odrzuca przesiadkę krótszą niż 7 minut", () => {
   const result = findJourneyCandidates([
     c("IC1", "A", "B", t(8), t(9)),
-    c("REG1", "B", "C", t(9, 29), t(10)),
+    c("REG1", "B", "C", t(9, 6), t(10)),
   ], ["A"], ["C"], window);
   assert.deepEqual(result, []);
 });
 
-test("akceptuje przesiadkę od 30 minut do 4 godzin", () => {
+test("akceptuje przesiadkę od 7 minut do 4 godzin", () => {
   const result = findJourneyCandidates([
     c("IC1", "A", "B", t(8), t(9)),
-    c("REG1", "B", "C", t(9, 30), t(10)),
+    c("REG1", "B", "C", t(9, 7), t(10)),
   ], ["A"], ["C"], window);
   assert.equal(result.length, 1);
   assert.equal(result[0].direct, false);
   assert.equal(result[0].legs.length, 2);
+});
+
+test("ten sam szablon GTFS następnego dnia nie jest kontynuacją wczorajszego pociągu", () => {
+  const result = findJourneyCandidates([
+    { ...c("DAILY", "A", "B", t(8), t(9)), service_day_offset: 0 },
+    { ...c("DAILY", "B", "C", 86400 + t(8), 86400 + t(9)), service_day_offset: 1 },
+  ], ["A"], ["C"], window);
+  assert.deepEqual(result, []);
 });
 
 test("odrzuca oczekiwanie dłuższe niż 4 godziny", () => {

@@ -11,6 +11,8 @@ type Connection = {
   to_stop_id: string;
   dep_seconds: number;
   arr_seconds: number;
+  service_day_offset?: number;
+  trip_instance_id?: string;
 };
 type JourneyLeg = { from: string; to: string; departure: string; arrival: string; train: string };
 type JourneyOption = { direct: boolean; legs: JourneyLeg[] };
@@ -36,7 +38,7 @@ const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
 const MAX_RPC_REQUESTS = 160;
 const MAX_SPLIT_DEPTH = 8;
 const POSTGREST_MAX_ROWS = 1000;
-const MIN_TRANSFER_SECONDS = 30 * 60;
+const MIN_TRANSFER_SECONDS = 7 * 60;
 const MAX_TRANSFER_SECONDS = 4 * 3600;
 const MAX_JOURNEYS = 3;
 const IN_LIST_LIMIT = 500;
@@ -185,8 +187,9 @@ export async function runRailJourneySearch(
       let frontier = current.reachableStopIds;
       let previousFrontier = new Set<string>();
 
-      // At most four legal transfers fit in a two-hour block (30 minute minimum). A few
-      // extra rounds account for connections discovered at the block boundary.
+      // Re-query as newly discovered stations expand the reachable frontier. The round
+      // limit is a safety cap for pathological timetables; normal one/two-transfer routes
+      // settle in a small number of passes.
       for (let settle = 0; settle < 8; settle++) {
         const unseenFrontier = frontier.filter((id) => !previousFrontier.has(id));
         if (!unseenFrontier.length) break;
@@ -202,7 +205,13 @@ export async function runRailJourneySearch(
 
         let added = 0;
         for (const row of rows) {
-          const absolute = { ...row, dep_seconds: row.dep_seconds + dayBase, arr_seconds: row.arr_seconds + dayBase };
+          const absolute = {
+            ...row,
+            dep_seconds: row.dep_seconds + dayBase,
+            arr_seconds: row.arr_seconds + dayBase,
+            service_day_offset: dayOffset,
+            trip_instance_id: `${row.trip_id}@${dayOffset}`,
+          };
           const signature = `${absolute.trip_id}|${absolute.from_stop_id}|${absolute.to_stop_id}|${absolute.dep_seconds}`;
           if (allConnections.has(signature)) continue;
           allConnections.set(signature, absolute);

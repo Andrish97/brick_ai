@@ -2,7 +2,7 @@
 // this module so the routing rules can be tested without Supabase or PKP services.
 
 const DEFAULTS = {
-  minTransferSeconds: 30 * 60,
+  minTransferSeconds: 7 * 60,
   maxTransferSeconds: 4 * 60 * 60,
   maxLabelsPerStop: 24,
   maxJourneys: 3,
@@ -52,6 +52,9 @@ export function scanConnections(connections, originStopIds, destinationStopIds, 
     const from = connection.from_stop_id;
     const to = connection.to_stop_id;
     const trip = connection.trip_id;
+    // GTFS trip IDs identify a template and repeat on every active service day.
+    // Keep each day's physical train instance separate in scans spanning midnight.
+    const tripInstance = connection.trip_instance_id ?? `${trip}@${connection.service_day_offset ?? 0}`;
     const boardings = [];
 
     if (origins.has(from) && connection.dep_seconds >= originWindow.start && connection.dep_seconds < originWindow.end) {
@@ -63,18 +66,18 @@ export function scanConnections(connections, originStopIds, destinationStopIds, 
       });
     }
 
-    const throughAtStop = aboard.get(trip)?.get(from) ?? [];
+    const throughAtStop = aboard.get(tripInstance)?.get(from) ?? [];
     boardings.push(...throughAtStop);
 
     const transfersAtStop = byStop.get(from) ?? [];
     for (const label of transfersAtStop) {
-      if (label.tripIds.at(-1) === trip) continue;
+      if (label.tripIds.at(-1) === tripInstance) continue;
       const wait = connection.dep_seconds - label.arrival;
       if (wait >= cfg.minTransferSeconds && wait <= cfg.maxTransferSeconds) boardings.push(label);
     }
 
     for (const previous of boardings) {
-      const continuing = previous.tripIds.at(-1) === trip;
+      const continuing = previous.tripIds.at(-1) === tripInstance;
       const legs = previous.legs.map((leg) => ({ ...leg }));
       const currentLeg = legs.at(-1);
       if (continuing && currentLeg?.to_stop_id === from) {
@@ -83,6 +86,7 @@ export function scanConnections(connections, originStopIds, destinationStopIds, 
       } else {
         legs.push({
           trip_id: trip,
+          trip_instance_id: tripInstance,
           from_stop_id: from,
           to_stop_id: to,
           departure: connection.dep_seconds,
@@ -91,16 +95,16 @@ export function scanConnections(connections, originStopIds, destinationStopIds, 
         });
       }
 
-      const tripIds = continuing ? previous.tripIds : [...previous.tripIds, trip];
+      const tripIds = continuing ? previous.tripIds : [...previous.tripIds, tripInstance];
       const next = {
         arrival: connection.arr_seconds,
         firstDeparture: previous.firstDeparture,
         tripIds,
         legs,
       };
-      const byTrip = aboard.get(trip) ?? new Map();
+      const byTrip = aboard.get(tripInstance) ?? new Map();
       keepLabel(byTrip, to, next);
-      aboard.set(trip, byTrip);
+      aboard.set(tripInstance, byTrip);
       keepLabel(byStop, to, next);
       if (destinations.has(to)) saveResult(next);
     }
