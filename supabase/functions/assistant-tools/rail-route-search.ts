@@ -37,8 +37,6 @@ export type RouteSearchDiagnostics = {
   toGroupSize?: number;
   originHasCoordinates?: boolean;
   destinationHasCoordinates?: boolean;
-  reachedStationNames?: string[];
-  debugStationLabels?: Array<{ name: string; stopId: string; labels: Array<{ arrival: number; firstDeparture: number; trainCount: number; lastTrip: string | null }> }>;
 };
 
 // Skanuj po maks. 30 minutach naraz. Ponieważ minimalna przesiadka też trwa
@@ -257,29 +255,7 @@ export async function runRailJourneySearch(
   const finalScan = scanner.result() as ScanResult;
   diagnostics.stationsReached = Math.max(0, finalScan.reachableStopIds.length - from.ids.length);
   if (fetchFailed || diagnostics.connectionsFetchError) return { result: null, diagnostics };
-  if (!finalScan.journeys.length) {
-    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 15);
-    try {
-      const debugNames = ["Koluszki", "Wrocław Główny", "Legnica", "Żary"];
-      const nameFilter = debugNames.map((name) => `"${name}"`).join(",");
-      const debugStops = await sbGet<{ id: string; name: string }>(
-        url, key,
-        `rail_stops?name=in.${encodeURIComponent(`(${nameFilter})`)}&select=id,name&limit=200`,
-      );
-      const labels = scanner.inspectStops(debugStops.map((stop) => stop.id)) as Array<{
-        stopId: string;
-        labels: Array<{ arrival: number; firstDeparture: number; trainCount: number; lastTrip: string | null }>;
-      }>;
-      diagnostics.debugStationLabels = debugStops.map((stop, index) => ({ name: stop.name, ...labels[index] }));
-    } catch { /* optional route debugging */ }
-    if (reachedIds.length) {
-      try {
-        const rows = await sbGet<{ id: string; name: string }>(url, key, `rail_stops?id=in.(${inList(reachedIds)})&select=id,name`);
-        diagnostics.reachedStationNames = rows.map((row) => row.name);
-      } catch { /* optional diagnostics */ }
-    }
-    return { result: null, diagnostics };
-  }
+  if (!finalScan.journeys.length) return { result: null, diagnostics };
 
   const rawJourneys = finalScan.journeys;
   const stopIds = [...new Set(rawJourneys.flatMap((journey) => journey.legs.flatMap((leg) => [leg.from_stop_id, leg.to_stop_id])))];
