@@ -10,18 +10,25 @@ const expectedLegs = (process.env.EXPECTED_LEGS || "any").trim();
 const expectedVariants = Number(process.env.EXPECTED_VARIANTS || 0);
 const expectedText = (process.env.EXPECTED_TEXT || "").trim();
 const allowLiveFallback = process.env.ALLOW_LIVE_FALLBACK === "true";
+const verifyLive = process.env.VERIFY_LIVE !== "false";
 
 if (![1, 3, 4].includes(grantedParts)) throw new Error("REPLY_PARTS musi wynosić 1, 3 albo 4.");
 if (!["any", "local", "live"].includes(expectedSource)) throw new Error("EXPECTED_SOURCE musi wynosić any, local albo live.");
 if (!["any", "one", "multiple", "two_transfers"].includes(expectedLegs)) throw new Error("EXPECTED_LEGS musi wynosić any, one, multiple albo two_transfers.");
 if (!Number.isInteger(expectedVariants) || expectedVariants < 0 || expectedVariants > 3) throw new Error("EXPECTED_VARIANTS musi wynosić 0–3.");
 
-const url = process.env.TEST_ENDPOINT_URL || `https://${projectRef}.supabase.co/functions/v1/zadarma-sms-webhook?endpoint_test=1`;
+const supabaseUrl = (process.env.SUPABASE_URL || `https://${projectRef}.supabase.co`).replace(/\/$/, "");
+const internalSecret = required("INTERNAL_SECRET");
+const url = process.env.TEST_ENDPOINT_URL || `${supabaseUrl}/functions/v1/zadarma-sms-webhook?endpoint_test=1`;
 const question = `Jak dojadę pociągiem z ${from} do ${to} ${date} ${time}?`;
 const response = await fetch(url, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ event: "incoming_sms", msg: question, history: [], grantedParts, testLocalOnly: !allowLiveFallback }),
+  headers: { "Content-Type": "application/json", "X-Internal-Secret": internalSecret },
+  body: JSON.stringify({
+    event: "incoming_sms", msg: question, history: [], grantedParts,
+    testLocalOnly: !verifyLive,
+    disableLiveFallback: !allowLiveFallback,
+  }),
   signal: AbortSignal.timeout(120_000),
 });
 const raw = await response.text();
@@ -43,6 +50,10 @@ if (expectedSource !== "any" && source !== expectedSource) {
 const routeFound = Array.isArray(journey.result?.legs) && journey.result.legs.length > 0;
 const legCount = Array.isArray(journey.result?.legs) ? journey.result.legs.length : 0;
 const variantCount = Array.isArray(journey.result?.journeys) ? journey.result.journeys.length : (routeFound ? 1 : 0);
+const liveVerification = journey.result?.live_verification;
+if (verifyLive && source === "local" && !liveVerification) {
+  throw new Error(`Lokalny wynik nie zawiera potwierdzenia przez PKP /schedules. Wynik: ${JSON.stringify(journey.result)}`);
+}
 if (expectRoute && !routeFound) {
   throw new Error(`Oczekiwano znalezionej trasy, planer jej nie zwrócił. Wynik: ${JSON.stringify(journey.result)}; odpowiedź: ${result.reply}`);
 }
@@ -69,6 +80,8 @@ const summary = [
   `- Trasa znaleziona: ${routeFound ? "tak" : "nie"}`,
   `- Liczba odcinków: ${legCount}`,
   `- Liczba wariantów: ${variantCount}`,
+  `- Weryfikacja PKP API: ${liveVerification ? `${liveVerification.verified_candidates}/${liveVerification.checked_candidates} wariantów, ${liveVerification.duration_ms} ms` : "pominięta lub nie dotyczy tej daty"}`,
+  `- Czas wywołania planera: ${journey.duration_ms ?? "brak"} ms`,
   `- Wiadomości SMS: ${result.parts}/${grantedParts} (tryb testowy, nic nie wysłano)`,
   `- ID diagnostyczne: \`${result.conv_id || "brak"}\``,
   `- Wywołane argumenty narzędzia: \`${JSON.stringify(journey.args)}\``,
@@ -86,6 +99,8 @@ if (process.env.GITHUB_STEP_SUMMARY) {
 }
 
 console.log(`PASS: ${from} -> ${to}; route_source=${source}; parts=${result.parts}/${grantedParts}`);
+console.log(`Search tool elapsed: ${journey.duration_ms ?? "unavailable"} ms`);
+console.log(`PKP API verification: ${liveVerification ? `${liveVerification.verified_candidates}/${liveVerification.checked_candidates}; ${liveVerification.duration_ms} ms` : "skipped/not applicable"}`);
 console.log(`Reply: ${result.reply}`);
 
 function required(name) {

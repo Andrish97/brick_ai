@@ -71,6 +71,11 @@ on:
         required: true
         default: false
         type: boolean
+      verify_live:
+        description: Potwierdź znalezione warianty przez PKP /schedules (jutro lub dziś)
+        required: true
+        default: true
+        type: boolean
       refresh_gtfs:
         description: Przed testem sprawdź feed i w razie potrzeby zsynchronizuj GTFS
         required: true
@@ -154,6 +159,7 @@ jobs:
 
       - name: Uruchom test end-to-end
         env:
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
           FROM_STATION: ${{ inputs.from || 'Katowice' }}
           TO_STATION: ${{ inputs.to || 'Zamość' }}
           TRAVEL_DATE: ${{ inputs.travel_date || 'jutro' }}
@@ -165,4 +171,5 @@ jobs:
           EXPECTED_VARIANTS: ${{ github.event_name == 'push' && '2' || inputs.expected_variants || '1' }}
           EXPECTED_TEXT: ${{ inputs.expected_text }}
           ALLOW_LIVE_FALLBACK: ${{ inputs.use_live_fallback || 'false' }}
+          VERIFY_LIVE: ${{ github.event_name == 'push' && 'true' || inputs.verify_live || 'true' }}
         run: node scripts/test-rail-journey.mjs

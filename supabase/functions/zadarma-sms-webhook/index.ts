@@ -9,7 +9,7 @@ const ZADARMA_API_URL = "https://api.zadarma.com";
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Secret",
 };
 const COMPACT_THRESHOLD = 20; // wiadomości przed kompaktowaniem
 const SUFFIX_LEN = 7; // "\n" + 6-cyfrowy kod rozmowy
@@ -554,14 +554,21 @@ async function generateContent(contents: GeminiContent[], system: string, maxOut
   }
 }
 
-async function callAssistantTool(action: string, args: Record<string, unknown>, userId: string, conversationId: string, testLocalOnly = false): Promise<Record<string, unknown>> {
+async function callAssistantTool(
+  action: string, args: Record<string, unknown>, userId: string, conversationId: string,
+  testOptions?: { localOnly?: boolean; disableLiveFallback?: boolean },
+): Promise<Record<string, unknown>> {
   const url = Deno.env.get("SUPABASE_URL");
   const secret = Deno.env.get("ASSISTANT_TOOLS_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   try {
     const res = await fetch(`${url}/functions/v1/assistant-tools`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Internal-Secret": secret ?? "" },
-      body: JSON.stringify({ action, user_id: userId, conversation_id: conversationId, args, ...(testLocalOnly ? { test_local_only: true } : {}) }),
+      body: JSON.stringify({
+        action, user_id: userId, conversation_id: conversationId, args,
+        ...(testOptions?.localOnly ? { test_local_only: true } : {}),
+        ...(testOptions?.disableLiveFallback ? { test_disable_live_fallback: true } : {}),
+      }),
     });
     return await res.json();
   } catch (e) {
@@ -631,12 +638,18 @@ function formatTrainJourney(toolResult: Record<string, unknown>, maxOptions = 3)
     if (!legs.length) return "";
     const first = legs[0];
     const last = legs[legs.length - 1];
-    const stops = [first.from, ...legs.map((leg) => leg.to)].join(" -> ");
-    const trains = [...new Set(legs.map((leg) => String(leg.train ?? "?").trim()))].join(", ");
-    return `${first.departure} ${stops} ${last.arrival} (${trains})`;
+    const route = [`${first.from} ${first.departure}`];
+    for (let index = 0; index < legs.length - 1; index++) {
+      const leg = legs[index];
+      const next = legs[index + 1];
+      // Przyjazd poprzedza nazwę stacji, odjazd następuje po jej nazwie.
+      route.push(`${leg.arrival} ${leg.to} ${next.departure}`);
+    }
+    route.push(`${last.arrival} ${last.to}`);
+    return route.join("-");
   }).filter(Boolean);
   if (!options.length) return "Nie udało się zbudować trasy.";
-  return options.map((option, index) => options.length === 1 ? option : `Opcja ${index + 1}: ${option}`).join("\n");
+  return options.map((option, index) => `${index + 1}.${option}`).join("\n");
 }
 
 function formatTrainDisruptions(toolResult: Record<string, unknown>): string {
@@ -646,8 +659,33 @@ function formatTrainDisruptions(toolResult: Record<string, unknown>): string {
   return list.map((d) => `- ${d}`).join("\n");
 }
 
-type JourneyTraceEntry = { args: Record<string, unknown>; result: Record<string, unknown> };
-type ToolContext = { userId: string; convId: string; replyParts?: 1 | 3 | 4; journeyTrace?: JourneyTraceEntry[]; localOnlyTest?: boolean };
+const RAIL_SMS_FORMAT_INSTRUCTIONS = `\n\nOdpowiadasz na SMS użytkownika na podstawie wyniku narzędzia kolejowego. Najpierw rozpoznaj, o co pyta, i dobierz format do intencji — nie używaj jednego szablonu do wszystkich pytań. Odpowiedź ma być krótka, konkretna i zawierać tylko informacje potrzebne do odpowiedzi. Dla pytania o odjazd podaj właściwą stację i godzinę; dla prośby o całe połączenie podaj przebieg z godzinami przyjazdów i odjazdów na przesiadkach; dla pytania o czas/warunki przesiadki pokaż też oba czasy i przerwę tylko jeśli wynika z danych; dla statusu podaj pociąg i opóźnienie albo informację o braku danych; dla utrudnień podaj ich zakres i wpływ. Przy pytaniu ogólnym wybierz najważniejszy wariant, a kilka opcji pokaż tylko wtedy, gdy użytkownik o nie prosi albo są potrzebne do sensownej odpowiedzi. Nie dodawaj etykiet typu "Opcja 1", numerów pociągów, nazw handlowych, dat ani wyjaśnień, jeśli nie pomagają odpowiedzieć na pytanie. Nie zgaduj i nie uzupełniaj brakujących danych. Bez wstępów, ozdobników, emoji i Markdownu. Zachowaj prosty, zwarty zapis SMS.`;
+
+async function formatRailAnswer(
+  contents: GeminiContent[],
+  functionCallPart: Record<string, unknown> | null,
+  name: string,
+  args: Record<string, unknown>,
+  toolResult: Record<string, unknown>,
+  system: string,
+  maxOutputTokens: number,
+  fallback: () => string,
+): Promise<string> {
+  if (toolResult.error) return pkpErrorMessage(toolResult);
+  const callPart = functionCallPart ?? { functionCall: { name, args } };
+  const formatContents: GeminiContent[] = [
+    ...contents,
+    { role: "model", parts: [callPart] },
+    { role: "function", parts: [{ functionResponse: { name, response: toolResult } }] },
+  ];
+  const formatted = await generateContent(formatContents, `${system}${RAIL_SMS_FORMAT_INSTRUCTIONS}`, maxOutputTokens, false);
+  if (formatted.text?.trim()) return formatted.text.trim();
+  log("rail_answer_format_fallback", { action: name });
+  return fallback();
+}
+
+type JourneyTraceEntry = { args: Record<string, unknown>; result: Record<string, unknown>; duration_ms?: number };
+type ToolContext = { userId: string; convId: string; replyParts?: 1 | 3 | 4; journeyTrace?: JourneyTraceEntry[]; localOnlyTest?: boolean; disableLiveFallback?: boolean };
 
 type AssistantOutcome =
   | { kind: "closed" }
@@ -695,15 +733,30 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
     }
 
     if (DETERMINISTIC_ACTIONS.has(name)) {
-      const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId, ctx.localOnlyTest && name === "plan_train_journey");
-      if (name === "plan_train_journey") ctx.journeyTrace?.push({ args, result: toolResult });
+      const toolStartedAt = name === "plan_train_journey" ? performance.now() : 0;
+      const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId, name === "plan_train_journey" ? {
+        localOnly: ctx.localOnlyTest,
+        disableLiveFallback: ctx.disableLiveFallback,
+      } : undefined);
+      if (name === "plan_train_journey") {
+        const durationMs = Math.round(performance.now() - toolStartedAt);
+        ctx.journeyTrace?.push({ args, result: toolResult, duration_ms: durationMs });
+        log("rail_search_duration", { convId: ctx.convId, durationMs });
+      }
       log("tool_result", { convId: ctx.convId, name, result: toolResult });
 
       if (name === "get_fastest_arrival") return { kind: "text", text: formatFastestArrival(toolResult) };
-      if (name === "get_train_station_board") return { kind: "text", text: formatTrainStationBoard(toolResult) };
-      if (name === "get_train_status") return { kind: "text", text: formatTrainStatus(toolResult) };
-      if (name === "plan_train_journey") return { kind: "text", text: formatTrainJourney(toolResult, currentReplyParts === 1 ? 1 : 3) };
-      if (name === "get_train_disruptions") return { kind: "text", text: formatTrainDisruptions(toolResult) };
+      if (["get_train_station_board", "get_train_status", "plan_train_journey", "get_train_disruptions"].includes(name)) {
+        const fallback = name === "get_train_station_board"
+          ? () => formatTrainStationBoard(toolResult)
+          : name === "get_train_status"
+            ? () => formatTrainStatus(toolResult)
+            : name === "plan_train_journey"
+              ? () => formatTrainJourney(toolResult, currentReplyParts === 1 ? 1 : 3)
+              : () => formatTrainDisruptions(toolResult);
+        const text = await formatRailAnswer(currentContents, turn.functionCallPart, name, args, toolResult, systemPrompt, currentMax, fallback);
+        return { kind: "text", text, grantedParts };
+      }
 
       // get_directions / get_transit: pełen, sformatowany tekst trasy, wysyłany bez zmian.
       if (toolResult.error) return { kind: "text", text: directionsErrorMessage(toolResult) };
@@ -817,7 +870,7 @@ type TestTurn = { role: "user" | "model"; text: string };
 // wyłącznie klient (panel, w pamięci przeglądarki) i przekazuje przy każdym wywołaniu —
 // serwer pozostaje bezstanowy, więc "rozmowa" istnieje tylko po stronie testującego,
 // nigdy w conversations/messages, i można mieć ich równolegle dowolnie wiele.
-async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, history: TestTurn[], grantedParts: 1 | 3 | 4, localOnlyTest: boolean): Promise<Response> {
+async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, history: TestTurn[], grantedParts: 1 | 3 | 4, localOnlyTest: boolean, disableLiveFallback: boolean): Promise<Response> {
   const content = rawMsg.trim();
   if (!content) return new Response("Empty content", { status: 200, headers: CORS });
 
@@ -834,7 +887,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, histo
 
   log("endpoint_test_start", { convId, content, historyLen: history.length, grantedParts });
   const journeyTrace: JourneyTraceEntry[] = [];
-  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId, replyParts: grantedParts, journeyTrace, localOnlyTest });
+  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId, replyParts: grantedParts, journeyTrace, localOnlyTest, disableLiveFallback });
 
   if (outcome.kind === "closed") {
     return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true, granted_parts: grantedParts }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
@@ -855,13 +908,36 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, histo
   );
 }
 
+async function isAuthorizedTestRequest(req: Request): Promise<boolean> {
+  const internalSecret = Deno.env.get("INTERNAL_SECRET");
+  if (internalSecret && req.headers.get("X-Internal-Secret") === internalSecret) return true;
+
+  const token = /^Bearer\s+(.+)$/i.exec(req.headers.get("Authorization") ?? "")?.[1];
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const apiKey = Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!token || !supabaseUrl || !apiKey) return false;
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: { apikey: apiKey, Authorization: `Bearer ${token}` },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 // --- Handler ---
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
   if (req.method === "GET") {
-    const echo = new URL(req.url).searchParams.get("zd_echo");
+    const url = new URL(req.url);
+    const secret = Deno.env.get("INTERNAL_SECRET");
+    if (!secret || url.searchParams.get("sms_token") !== secret) {
+      return new Response("Unauthorized", { status: 401, headers: CORS });
+    }
+    const echo = url.searchParams.get("zd_echo");
     return new Response(echo ?? "OK", { status: 200, headers: CORS });
   }
   const dryRun = new URL(req.url).searchParams.get("dry_run") === "1";
@@ -888,6 +964,20 @@ Deno.serve(async (req: Request) => {
 
   if (raw.zd_echo) return new Response(raw.zd_echo, { status: 200, headers: CORS });
 
+  if (testMode || pkpTest) {
+    if (!(await isAuthorizedTestRequest(req))) {
+      return new Response("Unauthorized", { status: 401, headers: CORS });
+    }
+  } else {
+    // Zadarma musi dotrzeć bez sesji panelowej, dlatego konfigurujemy jego URL
+    // z sekretnym tokenem serwerowym. Sam publiczny adres nie wystarczy do wywołania.
+    const secret = Deno.env.get("INTERNAL_SECRET");
+    const supplied = new URL(req.url).searchParams.get("sms_token");
+    if (!secret || supplied !== secret) {
+      return new Response("Unauthorized", { status: 401, headers: CORS });
+    }
+  }
+
   const SB = Deno.env.get("SUPABASE_URL")!;
   const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   initLog(SB, KEY);
@@ -895,9 +985,6 @@ Deno.serve(async (req: Request) => {
   if (pkpTest) {
     return await handlePkpTest();
   }
-
-  // Zapisz raw payload do webhook_logs
-  await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });
 
   const event = (raw.event ?? "").toLowerCase();
   if (event !== "sms" && event !== "incoming_sms") {
@@ -923,7 +1010,8 @@ Deno.serve(async (req: Request) => {
       : [];
     const grantedPartsIn = ([1, 3, 4].includes(rawJson.grantedParts as number) ? rawJson.grantedParts : 1) as 1 | 3 | 4;
     const localOnlyTest = rawJson.testLocalOnly === true;
-    return await handleEndpointTest(SB, KEY, smsBody, historyIn, grantedPartsIn, localOnlyTest);
+    const disableLiveFallback = rawJson.disableLiveFallback === true;
+    return await handleEndpointTest(SB, KEY, smsBody, historyIn, grantedPartsIn, localOnlyTest, disableLiveFallback);
   }
 
   if (!senderPhone || !smsBody) {
@@ -945,17 +1033,13 @@ Deno.serve(async (req: Request) => {
     const parsed = parseSmsKnownPhone(smsBody);
     convCode = parsed.convCode;
     effectiveContent = parsed.content;
-    log("sms_parsed", { from: senderPhone, to: recipientDid, knownPhone: true, convCode, content: effectiveContent, smsBody });
   } else {
     // Nieznany numer — wymagany kod użytkownika (pierwsza linia)
     const parsed = parseSmsUnknownPhone(smsBody);
     convCode = parsed.convCode;
     effectiveContent = parsed.content;
-    log("sms_parsed", { from: senderPhone, to: recipientDid, knownPhone: false, userCode: parsed.userCode, convCode, content: effectiveContent, smsBody });
-
     matchedUsers = await sbGet(SB, KEY, `users?code=eq.${parsed.userCode}&active=eq.true&select=id,active,system_prompt`) as UserRow[];
     if (!matchedUsers.length) {
-      log("error", { reason: "unknown_user", userCode: parsed.userCode, from: senderPhone });
       return new Response("Unknown user", { status: 200, headers: CORS });
     }
   }
@@ -964,6 +1048,10 @@ Deno.serve(async (req: Request) => {
     log("error", { reason: "empty_content", from: senderPhone, smsBody });
     return new Response("Empty content", { status: 200, headers: CORS });
   }
+
+  // Logujemy dopiero po dopasowaniu numeru lub poprawnej weryfikacji kodu SMS.
+  await sbPost(SB, KEY, "webhook_logs", { raw_payload: raw });
+  log("sms_parsed", { from: senderPhone, to: recipientDid, knownPhone: usersByPhone.length > 0, convCode });
 
   const userId = matchedUsers[0].id;
   const userSystemPrompt = matchedUsers[0].system_prompt ?? null;

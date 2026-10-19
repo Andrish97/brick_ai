@@ -2,8 +2,8 @@
 // this module so the routing rules can be tested without Supabase or PKP services.
 
 const DEFAULTS = {
-  minTransferSeconds: 7 * 60,
-  maxTransferSeconds: 4 * 60 * 60,
+  minTransferSeconds: 30 * 60,
+  maxTransferSeconds: 2.5 * 60 * 60,
   maxLabelsPerStop: 24,
   maxJourneys: 3,
 };

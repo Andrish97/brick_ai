@@ -26,6 +26,7 @@ type ToolRequest = {
   conversation_id: string;
   args?: Record<string, unknown>;
   test_local_only?: boolean;
+  test_disable_live_fallback?: boolean;
 };
 
 function json(body: object, status = 200): Response {
@@ -859,9 +860,9 @@ Deno.serve(async (req: Request) => {
         log("plan_train_journey_path", { path: "local" });
         return json({ ...localAttempt.result, route_source: "local" });
       }
-      if (input.test_local_only === true) {
+      if (input.test_local_only === true || input.test_disable_live_fallback === true) {
         log("plan_train_journey_path", { path: "local_test_only" });
-        return json({ error: "no_connection_found", route_source: "local", local_only_test: true, local_failure: localAttempt.failure });
+        return json({ error: "no_connection_found", route_source: "local", local_only_test: input.test_local_only === true, live_fallback_disabled: input.test_disable_live_fallback === true, local_failure: localAttempt.failure });
       }
       log("plan_train_journey_path", { path: "live" });
       const liveResponse = await planTrainJourneyPkpFallback(url, key, user, fromArg, toArg, dateArg);
@@ -888,24 +889,43 @@ function isNearTermDate(date: string): boolean {
   return date === tomorrowStr;
 }
 
-// Weryfikacja pierwszej nogi trasy względem żywego /schedules PKP — nie tylko
-// "pokaż opóźnienie", ale sygnał, że lokalny GTFS wciąż zgadza się z rzeczywistością.
-// Brak dopasowania w tolerancji ±3 min traktujemy jako niepotwierdzone (nie jako "brak
-// danych o opóźnieniu") — wywołujący ma wtedy spaść na żywą heurystykę zamiast pokazać
-// potencjalnie nieaktualną trasę bez ostrzeżenia.
-async function verifyFirstLegLive(leg: { from: string; departure: string }, date: string): Promise<boolean> {
-  const liveFrom = await resolveSingleStation(leg.from);
-  if (!liveFrom.ok) return false;
-  const result = await pkpFetch("/schedules", { stations: liveFrom.station.id, dateFrom: date, dateTo: date });
-  if (!result.ok) return false;
-  const plannedMin = parseTimeToMinutes(leg.departure);
-  if (plannedMin === null) return false;
-  for (const r of asList(result.data)) {
-    const stop = stationStopIn(r, liveFrom.station.id);
-    const t = timeStrToMinutes(stop?.departureTime ?? stop?.arrivalTime);
-    if (t !== null && Math.abs(t - plannedMin) <= 3) return true;
-  }
-  return false;
+// Weryfikuje wszystkie odcinki trzech kandydatów jednym zbiorczym /schedules.
+// Najpierw rozwiązuje tylko unikalne stacje (zwykle kilka, nie osobne żądanie dla
+// każdego przystanku każdego pociągu), a następnie porównuje oba końce każdego odcinka.
+async function verifyJourneysLive(
+  journeys: JourneySearchResult["journeys"], date: string,
+): Promise<boolean[]> {
+  const stationNames = [...new Set(journeys.flatMap((journey) =>
+    journey.legs.flatMap((leg) => [leg.from, leg.to])
+  ))];
+  const lookups = await Promise.all(stationNames.map(async (name) => [name, await resolveSingleStation(name)] as const));
+  const stationByName = new Map(lookups);
+  if (lookups.some(([, lookup]) => !lookup.ok)) return journeys.map(() => false);
+  const stationIds = [...new Set(lookups.map(([, lookup]) => (lookup as { ok: true; station: PkpStation }).station.id))];
+  const result = await pkpFetch("/schedules", { stations: stationIds.join(","), dateFrom: date, dateTo: date });
+  if (!result.ok) return journeys.map(() => false);
+  const routes = asList(result.data);
+
+  return journeys.map((journey) => journey.legs.every((leg) => {
+    const from = stationByName.get(leg.from);
+    const to = stationByName.get(leg.to);
+    if (!from?.ok || !to?.ok) return false;
+    const fromMin = parseTimeToMinutes(leg.departure);
+    const toMin = parseTimeToMinutes(leg.arrival);
+    if (fromMin === null || toMin === null) return false;
+    return routes.some((route) => {
+      const fromStop = stationStopIn(route, from.station.id);
+      const toStop = stationStopIn(route, to.station.id);
+      if (!fromStop || !toStop) return false;
+      const fromOrder = Number(fromStop.orderNumber ?? -1);
+      const toOrder = Number(toStop.orderNumber ?? -1);
+      if (!(fromOrder >= 0 && toOrder > fromOrder)) return false;
+      const liveDeparture = timeStrToMinutes(fromStop.departureTime ?? fromStop.arrivalTime);
+      const liveArrival = timeStrToMinutes(toStop.arrivalTime ?? toStop.departureTime);
+      return liveDeparture !== null && liveArrival !== null
+        && Math.abs(liveDeparture - fromMin) <= 3 && Math.abs(liveArrival - toMin) <= 3;
+    });
+  }));
 }
 
 // Próba lokalnego wyszukiwania nad zsynchronizowanym GTFS — zwraca null
@@ -995,33 +1015,28 @@ async function tryPlanTrainJourneyLocal(
     }
 
     let verifiedJourneys = result.journeys;
+    let liveVerification: Record<string, unknown> | null = null;
     if (isNearTermDate(date) && !skipLiveVerification) {
-      const firstLegChecks = new Map<string, Promise<boolean>>();
-      const verifyCandidate = (journey: JourneySearchResult["journeys"][number]) => {
-        const leg = journey.legs[0];
-        const key = `${leg.from}|${leg.departure}`;
-        let check = firstLegChecks.get(key);
-        if (!check) {
-          check = verifyFirstLegLive(leg, date);
-          firstLegChecks.set(key, check);
-        }
-        return check;
+      const verificationStartedAt = performance.now();
+      const checked = await verifyJourneysLive(result.journeys, date);
+      verifiedJourneys = result.journeys.filter((_, index) => checked[index]);
+      liveVerification = {
+        source: "PKP /schedules",
+        checked_candidates: checked.length,
+        verified_candidates: verifiedJourneys.length,
+        duration_ms: Math.round(performance.now() - verificationStartedAt),
       };
-      const checked = await Promise.all(result.journeys.map(async (journey) => ({
-        journey,
-        verified: await verifyCandidate(journey),
-      })));
-      verifiedJourneys = checked.filter((item) => item.verified).map((item) => item.journey);
+      log("rail_live_verification", { from: fromLookup.station.name, to: toLookup.station.name, date, ...liveVerification });
       if (!verifiedJourneys.length) {
-        log("rail_local_mismatch", { from: fromLookup.station.name, to: toLookup.station.name, date });
-        return { result: null, failure: { reason: "first_leg_not_verified_live", from: fromLookup.station.name, to: toLookup.station.name, date } };
+        log("rail_local_mismatch", { from: fromLookup.station.name, to: toLookup.station.name, date, verifiedLegs: 0 });
+        return { result: null, failure: { reason: "journey_not_verified_live", from: fromLookup.station.name, to: toLookup.station.name, date, live_verification: liveVerification } };
       }
       if (verifiedJourneys.length < result.journeys.length) {
-        log("rail_local_candidates_filtered", { from: fromLookup.station.name, to: toLookup.station.name, date, candidates: result.journeys.length, verified: verifiedJourneys.length });
+        log("rail_local_candidates_filtered", { from: fromLookup.station.name, to: toLookup.station.name, date, candidates: result.journeys.length, verified: verifiedJourneys.length, check: "all_legs" });
       }
     }
 
-    return { result: { ...verifiedJourneys[0], journeys: verifiedJourneys } };
+    return { result: { ...verifiedJourneys[0], journeys: verifiedJourneys, ...(liveVerification ? { live_verification: liveVerification } : {}) } };
   } catch (e) {
     log("rail_local_error", { error: String(e) });
     return { result: null, failure: { reason: "local_search_error", error: String(e) } };
