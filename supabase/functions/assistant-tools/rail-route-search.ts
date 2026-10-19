@@ -170,66 +170,70 @@ export async function runRailJourneySearch(
 
   const activeByOffset = new Map<number, Set<string>>([[0, dayZeroServices]]);
   let fetchFailed = false;
-  dayLoop:
+  scanLoop:
   for (let absoluteStart = originWindowStart; absoluteStart < originWindowStart + TOTAL_SCAN_SECONDS; absoluteStart += WINDOW_STEP_SECONDS) {
-    const current = scanner.result() as ScanResult;
-    const thirdArrival = current.journeys.at(-1)?.arrival;
-    if (current.journeys.length >= MAX_JOURNEYS && thirdArrival !== undefined && absoluteStart > thirdArrival) break;
+    const absoluteWindowEnd = Math.min(absoluteStart + WINDOW_SECONDS, originWindowStart + TOTAL_SCAN_SECONDS);
+    for (let segmentStart = absoluteStart; segmentStart < absoluteWindowEnd;) {
+      const segmentEnd = Math.min(absoluteWindowEnd, (Math.floor(segmentStart / 86400) + 1) * 86400);
+      const current = scanner.result() as ScanResult;
+      const thirdArrival = current.journeys.at(-1)?.arrival;
+      if (current.journeys.length >= MAX_JOURNEYS && thirdArrival !== undefined && segmentStart > thirdArrival) break scanLoop;
 
-    diagnostics.windowsScanned++;
-    const absoluteEnd = Math.min(absoluteStart + WINDOW_SECONDS, originWindowStart + TOTAL_SCAN_SECONDS);
-    const firstOffset = Math.max(0, Math.floor(absoluteStart / 86400) - 1);
-    const lastOffset = Math.floor((absoluteEnd - 1) / 86400);
-    const batch: Connection[] = [];
-    const seen = new Set<string>();
-    const frontier = current.reachableStopIds;
+      diagnostics.windowsScanned++;
+      const firstOffset = Math.max(0, Math.floor(segmentStart / 86400) - 1);
+      const lastOffset = Math.floor((segmentEnd - 1) / 86400);
+      const batch: Connection[] = [];
+      const seen = new Set<string>();
+      const frontier = current.reachableStopIds;
 
-    for (let dayOffset = firstOffset; dayOffset <= lastOffset; dayOffset++) {
-      const dayBase = dayOffset * 86400;
-      const localStart = Math.max(0, absoluteStart - dayBase);
-      const localEnd = Math.min(EXTENDED_DAY_CEILING_SECONDS, absoluteEnd - dayBase);
-      if (localStart >= localEnd) continue;
+      for (let dayOffset = firstOffset; dayOffset <= lastOffset; dayOffset++) {
+        const dayBase = dayOffset * 86400;
+        const localStart = Math.max(0, segmentStart - dayBase);
+        const localEnd = Math.min(EXTENDED_DAY_CEILING_SECONDS, segmentEnd - dayBase);
+        if (localStart >= localEnd) continue;
 
-      let serviceIds = activeByOffset.get(dayOffset);
-      if (!serviceIds) {
+        let serviceIds = activeByOffset.get(dayOffset);
+        if (!serviceIds) {
+          try {
+            serviceIds = await activeServiceIds(url, key, addDays(date, dayOffset));
+            activeByOffset.set(dayOffset, serviceIds);
+          } catch (error) {
+            diagnostics.connectionsFetchError = `active_service_lookup_failed_day_${dayOffset}: ${String(error)}`;
+            fetchFailed = true;
+            break scanLoop;
+          }
+        }
+        if (!serviceIds.size) continue;
+
+        let rows: Connection[];
         try {
-          serviceIds = await activeServiceIds(url, key, addDays(date, dayOffset));
-          activeByOffset.set(dayOffset, serviceIds);
+          rows = await fetchWindow([...serviceIds], localStart, localEnd, frontier);
         } catch (error) {
-          diagnostics.connectionsFetchError = `active_service_lookup_failed_day_${dayOffset}: ${String(error)}`;
+          diagnostics.connectionsFetchError = String(error);
           fetchFailed = true;
-          break dayLoop;
+          break scanLoop;
+        }
+
+        for (const row of rows) {
+          const absolute = {
+            ...row,
+            dep_seconds: row.dep_seconds + dayBase,
+            arr_seconds: row.arr_seconds + dayBase,
+            service_day_offset: dayOffset,
+            trip_instance_id: `${row.trip_id}@${dayOffset}`,
+          };
+          const signature = `${absolute.trip_id}|${absolute.from_stop_id}|${absolute.to_stop_id}|${absolute.dep_seconds}`;
+          if (seen.has(signature)) continue;
+          seen.add(signature);
+          batch.push(absolute);
         }
       }
-      if (!serviceIds.size) continue;
 
-      let rows: Connection[];
-      try {
-        rows = await fetchWindow([...serviceIds], localStart, localEnd, frontier);
-      } catch (error) {
-        diagnostics.connectionsFetchError = String(error);
-        fetchFailed = true;
-        break dayLoop;
-      }
-
-      for (const row of rows) {
-        const absolute = {
-          ...row,
-          dep_seconds: row.dep_seconds + dayBase,
-          arr_seconds: row.arr_seconds + dayBase,
-          service_day_offset: dayOffset,
-          trip_instance_id: `${row.trip_id}@${dayOffset}`,
-        };
-        const signature = `${absolute.trip_id}|${absolute.from_stop_id}|${absolute.to_stop_id}|${absolute.dep_seconds}`;
-        if (seen.has(signature)) continue;
-        seen.add(signature);
-        batch.push(absolute);
-      }
+      batch.sort((a, b) => a.dep_seconds - b.dep_seconds || a.arr_seconds - b.arr_seconds);
+      scanner.addConnections(batch);
+      diagnostics.connectionsScannedTotal += batch.length;
+      segmentStart = segmentEnd;
     }
-
-    batch.sort((a, b) => a.dep_seconds - b.dep_seconds || a.arr_seconds - b.arr_seconds);
-    scanner.addConnections(batch);
-    diagnostics.connectionsScannedTotal += batch.length;
   }
 
   const finalScan = scanner.result() as ScanResult;
