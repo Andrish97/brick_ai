@@ -556,7 +556,7 @@ async function generateContent(contents: GeminiContent[], system: string, maxOut
 
 async function callAssistantTool(
   action: string, args: Record<string, unknown>, userId: string, conversationId: string,
-  testOptions?: { localOnly?: boolean; disableLiveFallback?: boolean },
+  testOptions?: { localOnly?: boolean },
 ): Promise<Record<string, unknown>> {
   const url = Deno.env.get("SUPABASE_URL");
   const secret = Deno.env.get("ASSISTANT_TOOLS_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -567,7 +567,6 @@ async function callAssistantTool(
       body: JSON.stringify({
         action, user_id: userId, conversation_id: conversationId, args,
         ...(testOptions?.localOnly ? { test_local_only: true } : {}),
-        ...(testOptions?.disableLiveFallback ? { test_disable_live_fallback: true } : {}),
       }),
     });
     return await res.json();
@@ -685,7 +684,7 @@ async function formatRailAnswer(
 }
 
 type JourneyTraceEntry = { args: Record<string, unknown>; result: Record<string, unknown>; duration_ms?: number };
-type ToolContext = { userId: string; convId: string; replyParts?: 1 | 3 | 4; journeyTrace?: JourneyTraceEntry[]; localOnlyTest?: boolean; disableLiveFallback?: boolean };
+type ToolContext = { userId: string; convId: string; replyParts?: 1 | 3 | 4; journeyTrace?: JourneyTraceEntry[]; localOnlyTest?: boolean };
 
 type AssistantOutcome =
   | { kind: "closed" }
@@ -736,7 +735,6 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
       const toolStartedAt = name === "plan_train_journey" ? performance.now() : 0;
       const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId, name === "plan_train_journey" ? {
         localOnly: ctx.localOnlyTest,
-        disableLiveFallback: ctx.disableLiveFallback,
       } : undefined);
       if (name === "plan_train_journey") {
         const durationMs = Math.round(performance.now() - toolStartedAt);
@@ -870,7 +868,7 @@ type TestTurn = { role: "user" | "model"; text: string };
 // wyłącznie klient (panel, w pamięci przeglądarki) i przekazuje przy każdym wywołaniu —
 // serwer pozostaje bezstanowy, więc "rozmowa" istnieje tylko po stronie testującego,
 // nigdy w conversations/messages, i można mieć ich równolegle dowolnie wiele.
-async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, history: TestTurn[], grantedParts: 1 | 3 | 4, localOnlyTest: boolean, disableLiveFallback: boolean): Promise<Response> {
+async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, history: TestTurn[], grantedParts: 1 | 3 | 4, localOnlyTest: boolean): Promise<Response> {
   const content = rawMsg.trim();
   if (!content) return new Response("Empty content", { status: 200, headers: CORS });
 
@@ -887,7 +885,7 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, histo
 
   log("endpoint_test_start", { convId, content, historyLen: history.length, grantedParts });
   const journeyTrace: JourneyTraceEntry[] = [];
-  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId, replyParts: grantedParts, journeyTrace, localOnlyTest, disableLiveFallback });
+  const outcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[grantedParts], { userId: TEST_MODE_USER_ID, convId, replyParts: grantedParts, journeyTrace, localOnlyTest });
 
   if (outcome.kind === "closed") {
     return new Response(JSON.stringify({ ok: true, test_mode: true, closed: true, granted_parts: grantedParts }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
@@ -1010,8 +1008,7 @@ Deno.serve(async (req: Request) => {
       : [];
     const grantedPartsIn = ([1, 3, 4].includes(rawJson.grantedParts as number) ? rawJson.grantedParts : 1) as 1 | 3 | 4;
     const localOnlyTest = rawJson.testLocalOnly === true;
-    const disableLiveFallback = rawJson.disableLiveFallback === true;
-    return await handleEndpointTest(SB, KEY, smsBody, historyIn, grantedPartsIn, localOnlyTest, disableLiveFallback);
+    return await handleEndpointTest(SB, KEY, smsBody, historyIn, grantedPartsIn, localOnlyTest);
   }
 
   if (!senderPhone || !smsBody) {

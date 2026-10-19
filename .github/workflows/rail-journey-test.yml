@@ -40,7 +40,6 @@ on:
         options:
           - any
           - local
-          - live
       expect_route:
         description: Nie zaliczaj testu, jeśli planer nie zwróci trasy
         required: true
@@ -67,11 +66,6 @@ on:
           - "1"
           - "2"
           - "3"
-      use_live_fallback:
-        description: Włącz awaryjne zapytania do PKP (zużywa limit API)
-        required: true
-        default: false
-        type: boolean
       verify_live:
         description: Potwierdź znalezione warianty przez PKP /schedules (jutro lub dziś)
         required: true
@@ -79,6 +73,11 @@ on:
         type: boolean
       refresh_gtfs:
         description: Przed testem sprawdź feed i w razie potrzeby zsynchronizuj GTFS
+        required: true
+        default: false
+        type: boolean
+      inspect_gtfs:
+        description: Pokaż lokalne rekordy GTFS dla wskazanych stacji i godzin
         required: true
         default: false
         type: boolean
@@ -158,6 +157,45 @@ jobs:
           INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
         run: node scripts/sync-rail-gtfs.mjs
 
+      - name: Sprawdź lokalne odcinki GTFS
+        if: ${{ inputs.inspect_gtfs }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          TRAVEL_DATE: ${{ inputs.travel_date }}
+        run: |
+          psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -v travel_date="$TRAVEL_DATE" <<'SQL'
+          with params as (select :'travel_date'::date as travel_date), active as (
+            select c.id as service_id
+            from public.rail_calendar c, params p
+            where c.start_date <= p.travel_date and c.end_date >= p.travel_date
+              and case extract(isodow from p.travel_date)::int
+                when 1 then c.monday when 2 then c.tuesday when 3 then c.wednesday
+                when 4 then c.thursday when 5 then c.friday when 6 then c.saturday
+                else c.sunday end
+            union
+            select d.service_id from public.rail_calendar_dates d, params p
+            where d.date = p.travel_date and d.exception_type = 1
+            except
+            select d.service_id from public.rail_calendar_dates d, params p
+            where d.date = p.travel_date and d.exception_type = 2
+          )
+          select tr.short_name as train, f.name as from_station, c.dep_seconds,
+                 t.name as to_station, c.arr_seconds, c.service_id in (select service_id from active) as active
+          from public.rail_connections c
+          join public.rail_stops f on f.id = c.from_stop_id
+          join public.rail_stops t on t.id = c.to_stop_id
+          join public.rail_trips tr on tr.id = c.trip_id
+          where c.dep_seconds between 14*3600 and 23*3600
+            and ((f.name ilike '%Tomaszów Mazowiecki%' and c.dep_seconds between 15*3600 and 16*3600)
+              or (f.name ilike '%Koluszki%' and c.dep_seconds between 16*3600 and 17*3600)
+              or (f.name ilike '%Legnica%' and c.dep_seconds between 20*3600 and 22*3600)
+              or (t.name ilike '%Koluszki%' and c.arr_seconds between 15*3600 and 17*3600)
+              or (t.name ilike '%Legnica%' and c.arr_seconds between 19*3600 and 21*3600)
+              or (t.name ilike '%Żary%' and c.arr_seconds between 21*3600 and 23*3600))
+          order by c.dep_seconds
+          limit 200;
+          SQL
+
       - name: Uruchom test end-to-end
         env:
           INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
@@ -171,6 +209,5 @@ jobs:
           EXPECTED_LEGS: ${{ github.event_name == 'push' && 'one' || inputs.expected_legs || 'multiple' }}
           EXPECTED_VARIANTS: ${{ github.event_name == 'push' && '1' || inputs.expected_variants || '1' }}
           EXPECTED_TEXT: ${{ inputs.expected_text }}
-          ALLOW_LIVE_FALLBACK: ${{ inputs.use_live_fallback || 'false' }}
-          VERIFY_LIVE: ${{ github.event_name == 'push' && 'true' || inputs.verify_live || 'true' }}
+          VERIFY_LIVE: ${{ github.event_name == 'push' && 'false' || inputs.verify_live || 'true' }}
         run: node scripts/test-rail-journey.mjs

@@ -50,7 +50,7 @@ Deno.test("ładuje GTFS przez mock PostgREST i zwraca trzy najlepsze warianty be
       hour(12),
     );
     if (!result) throw new Error(`Brak trasy: ${JSON.stringify(diagnostics)}`);
-    if (result.journeys.length !== 3) throw new Error(`Oczekiwano 3 tras, otrzymano ${result.journeys.length}`);
+    if (result.journeys.length !== 4) throw new Error(`Oczekiwano 4 tras, otrzymano ${result.journeys.length}`);
     if (result.journeys[0].legs[0].departure !== "09:00") throw new Error("Najlepszy wariant nie ma najwcześniejszego przyjazdu");
     if (result.journeys[0].legs[0].train !== "IC 2") throw new Error("Nie uzupełniono etykiety pociągu");
     if (diagnostics.windowsScanned < 2 || rpcCalls < 2) throw new Error("Skan nie objął kilku okien rozkładu");

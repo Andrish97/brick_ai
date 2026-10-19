@@ -26,7 +26,6 @@ type ToolRequest = {
   conversation_id: string;
   args?: Record<string, unknown>;
   test_local_only?: boolean;
-  test_disable_live_fallback?: boolean;
 };
 
 function json(body: object, status = 200): Response {
@@ -354,17 +353,6 @@ async function pkpSearchStations(query: string): Promise<PkpResult<PkpStation[]>
     log("pkp_error", { reason: "stations_unparsed", query, rawPreview: JSON.stringify(result.data).slice(0, 400) });
   }
   return { ok: true, data: stations };
-}
-
-// /operations zwraca też słownik stacji ID->nazwa na poziomie odpowiedzi (potwierdzone
-// /fields/operations: "st"/"stations"). Używane do nazwania stacji przesiadkowej
-// odkrytej dynamicznie z pełnej trasy pociągu (tam mamy tylko jej ID).
-async function lookupStationName(stationId: string): Promise<string | null> {
-  const result = await pkpFetch("/operations", { stations: stationId });
-  if (!result.ok) return null;
-  const dict = (result.data && typeof result.data === "object" ? (result.data as Record<string, unknown>).stations : null) as Record<string, unknown> | null;
-  const name = dict && typeof dict === "object" ? dict[stationId] : null;
-  return typeof name === "string" ? name : null;
 }
 
 // Numer/nazwa pociągu bywa w "name" (nie zawsze — część pociągów go nie ma), inaczej
@@ -837,9 +825,8 @@ Deno.serve(async (req: Request) => {
       return json({ disruptions: summaries });
     }
 
-    // Planer korzysta najpierw z lokalnego GTFS i zwraca do trzech najlepszych tras.
-    // Nieudany odczyt, brak danych lub niepotwierdzony bliski odjazd przełącza na
-    // istniejący fallback PKP.
+    // Planer wyszukuje wyłącznie w lokalnym GTFS. API PKP służy jedynie do
+    // weryfikacji tras znalezionych lokalnie.
     if (input.action === "plan_train_journey") {
       const user = await getUser(url, key, input.user_id);
       if (!user) return json({ error: "User not found" }, 404);
@@ -851,8 +838,7 @@ Deno.serve(async (req: Request) => {
       const preferredTimeArg = typeof input.args?.preferred_time === "string" ? input.args.preferred_time.trim() : "";
 
       // Lokalny skan po połączeniach GTFS (rail-route-search.ts) szuka wariantów
-      // z wieloma przesiadkami bez zapytań PKP. Przy braku lokalnego wyniku, świeżych
-      // danych lub potwierdzenia bliskiego odjazdu pozostaje awaryjny fallback PKP.
+      // z wieloma przesiadkami. Tylko znalezione warianty są sprawdzane w PKP.
       const localAttempt = await tryPlanTrainJourneyLocal(
         url, key, user, fromArg, toArg, dateArg, preferredTimeArg, input.test_local_only === true,
       );
@@ -860,14 +846,8 @@ Deno.serve(async (req: Request) => {
         log("plan_train_journey_path", { path: "local" });
         return json({ ...localAttempt.result, route_source: "local" });
       }
-      if (input.test_local_only === true || input.test_disable_live_fallback === true) {
-        log("plan_train_journey_path", { path: "local_test_only" });
-        return json({ error: "no_connection_found", route_source: "local", local_only_test: input.test_local_only === true, live_fallback_disabled: input.test_disable_live_fallback === true, local_failure: localAttempt.failure });
-      }
-      log("plan_train_journey_path", { path: "live" });
-      const liveResponse = await planTrainJourneyPkpFallback(url, key, user, fromArg, toArg, dateArg);
-      const liveBody = await liveResponse.json().catch(() => ({}));
-      return json({ ...(liveBody && typeof liveBody === "object" ? liveBody : {}), route_source: "live", local_failure: localAttempt.failure }, liveResponse.status);
+      log("plan_train_journey_path", { path: "local_no_route" });
+      return json({ error: "no_connection_found", route_source: "local", local_failure: localAttempt.failure });
     }
 
     return json({ error: "Unknown action" }, 400);
@@ -931,14 +911,13 @@ async function verifyJourneysLive(
 // Próba lokalnego wyszukiwania nad zsynchronizowanym GTFS — zwraca null
 // przy JAKIMKOLWIEK niepowodzeniu (brak świeżych danych, stacja nierozpoznana/
 // niejednoznaczna lokalnie, skan nie znajduje trasy, rozbieżność z żywym API dla bliskiej
-// daty, dowolny wyjątek), co dispatcher wyżej traktuje jako sygnał do wywołania
-// planTrainJourneyPkpFallback — nigdy nie ujawnia błędu 500 z powodu tej ścieżki.
+// daty, dowolny wyjątek), co dispatcher wyżej zwraca jako brak znalezionej trasy.
 // Okno startowe (typowo 4h) wyliczone z preferred_time (jeśli AI je podało), inaczej
-// bieżąca godzina dla dziś, albo sensowny poranek (6:00-10:00) dla przyszłej daty —
+// bieżąca godzina dla dziś, albo sensowny poranek (8:00-12:00) dla przyszłej daty —
 // zastępuje dawne sztywne "start=0 dla nie-dziś" (dawało bezsensowny origin window od
 // północy zamiast realnej pory podróży).
 const ORIGIN_WINDOW_SECONDS = 4 * 3600;
-const DEFAULT_FUTURE_MORNING_HOUR = 6;
+const DEFAULT_FUTURE_MORNING_HOUR = 8;
 
 function computeOriginWindow(dateArg: string, preferredTimeArg: string): { date: string; start: number; end: number } {
   const date = dateArg || todayDateStr();
@@ -1040,280 +1019,5 @@ async function tryPlanTrainJourneyLocal(
   } catch (e) {
     log("rail_local_error", { error: String(e) });
     return { result: null, failure: { reason: "local_search_error", error: String(e) } };
-  }
-}
-
-// Awaryjny planer PKP zachowany na czas problemów z lokalnym GTFS. Może obsłużyć mniej
-// wariantów niż lokalny planer i pozostaje ograniczony limitami zewnętrznego API.
-async function planTrainJourneyPkpFallback(url: string, key: string, user: UserProfile, fromArg: string, toArg: string, dateArg: string): Promise<Response> {
-  {
-    {
-      const fromResolved = resolveStationPoint(fromArg, user);
-      if (!fromResolved.query) return json({ error: "no_preferred_station", hint: fromResolved.missing }, 200);
-      const toResolved = resolveStationPoint(toArg, user);
-      if (!toResolved.query) return json({ error: "no_preferred_station", hint: toResolved.missing }, 200);
-
-      const [fromLookup, toLookup] = await Promise.all([resolveSingleStation(fromResolved.query), resolveSingleStation(toResolved.query)]);
-      if (!fromLookup.ok) return json(fromLookup.body, 200);
-      if (!toLookup.ok) return json(toLookup.body, 200);
-      const from = fromLookup.station, to = toLookup.station;
-
-      const date = dateArg || todayDateStr();
-      const isToday = date === todayDateStr();
-      const nowMin = warsawNow().getHours() * 60 + warsawNow().getMinutes();
-
-      const directResult = await pkpFetch("/schedules", { stations: `${from.id},${to.id}`, dateFrom: date, dateTo: date });
-      if (!directResult.ok) return json({ error: directResult.error }, 200);
-      const allRoutes = asList(directResult.data);
-
-      const direct = allRoutes
-        .map((r) => {
-          const a = stationStopIn(r, from.id), b = stationStopIn(r, to.id);
-          if (!a || !b) return null;
-          const oa = Number(a.orderNumber ?? -1), ob = Number(b.orderNumber ?? -2);
-          if (!(oa < ob)) return null;
-          const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
-          const arrMin = timeStrToMinutes(b.arrivalTime ?? b.departureTime);
-          if (depMin === null || arrMin === null) return null;
-          if (isToday && depMin < nowMin) return null;
-          return { route: r, depMin, arrMin, depTime: (a.departureTime ?? a.arrivalTime) as string, arrTime: (b.arrivalTime ?? b.departureTime) as string };
-        })
-        .filter((x): x is NonNullable<typeof x> => x !== null)
-        .sort((x, y) => x.depMin - y.depMin);
-
-      if (direct.length) {
-        const best = direct[0];
-        return json({
-          direct: true,
-          legs: [{ from: from.name, to: to.name, departure: best.depTime.slice(0, 5), arrival: best.arrTime.slice(0, 5), train: trainLabel(best.route) }],
-        });
-      }
-
-      // Brak bezpośredniego — kandydaci na przesiadkę: pociągi odjeżdżające z "from"
-      // (te same dane, które już mamy z zapytania wyżej — routes dotykające from, ale
-      // nie to), ograniczone do kilku najbliższych odjazdów.
-      const fromLegCandidates = allRoutes
-        .map((r) => {
-          const a = stationStopIn(r, from.id);
-          if (!a) return null;
-          const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
-          if (depMin === null) return null;
-          if (isToday && depMin < nowMin) return null;
-          return { route: r, depMin, depTime: (a.departureTime ?? a.arrivalTime) as string };
-        })
-        .filter((x): x is NonNullable<typeof x> => x !== null)
-        .sort((x, y) => x.depMin - y.depMin)
-        .slice(0, 6);
-
-      if (!fromLegCandidates.length) {
-        return json({ error: "no_connection_found", diagnostics: { stage: "no_departures_from_origin", allRoutesCount: allRoutes.length } }, 200);
-      }
-
-      // Pełna trasa każdego kandydata, żeby poznać WSZYSTKIE jego przystanki (filtrowane
-      // /schedules pokazuje tylko stację, o którą pytaliśmy) — to jedyne miejsce, gdzie
-      // dopuszczamy nieprzetestowaną na żywo ścieżkę API; parsowanie defensywne + log.
-      // arriveAtTransferTime: surowy string HH:MM:SS z pełnej trasy — filtrowane
-      // /schedules (użyte gdzie indziej w tej funkcji) NIGDY nie ma wpisu dla stacji
-      // przesiadkowej (bo o nią nie pytaliśmy), więc to jedyne miejsce, gdzie ten
-      // czas jest w ogóle dostępny — musi zostać przeniesiony aż do finalnej odpowiedzi.
-      const transferCandidates: Array<{ stationId: string; arriveAtTransfer: number; arriveAtTransferTime: string; leg1: typeof fromLegCandidates[0] }> = [];
-      let routeDetailOk = 0, routeDetailFailed = 0, totalStopsSeen = 0;
-      for (const cand of fromLegCandidates) {
-        const scheduleId = cand.route.scheduleId, orderId = cand.route.orderId;
-        if (scheduleId == null || orderId == null) continue;
-        const full = await pkpFetch(`/schedules/route/${scheduleId}/${orderId}`, {});
-        if (!full.ok) { routeDetailFailed++; log("pkp_error", { reason: "route_detail_failed", scheduleId, orderId, error: full.error }); continue; }
-        const fullRoute = (full.data && typeof full.data === "object" ? full.data as Record<string, unknown> : null);
-        const stops = fullRoute ? (Array.isArray(fullRoute.stations) ? fullRoute.stations as Record<string, unknown>[]
-          : Array.isArray(fullRoute.route) ? fullRoute.route as Record<string, unknown>[] : []) : [];
-        if (!stops.length) { routeDetailFailed++; log("pkp_error", { reason: "route_detail_unparsed", scheduleId, orderId, rawPreview: JSON.stringify(full.data).slice(0, 400) }); continue; }
-        routeDetailOk++;
-        totalStopsSeen += stops.length;
-        for (const s of stops) {
-          const sid = String(s.stationId ?? "");
-          if (!sid || sid === from.id || sid === to.id) continue;
-          const rawTime = s.arrivalTime ?? s.departureTime;
-          const arrMin = timeStrToMinutes(rawTime);
-          if (arrMin === null) continue;
-          transferCandidates.push({ stationId: sid, arriveAtTransfer: arrMin, arriveAtTransferTime: String(rawTime), leg1: cand });
-        }
-      }
-
-      if (!transferCandidates.length) {
-        return json({
-          error: "no_connection_found",
-          diagnostics: { stage: "no_transfer_candidates", fromLegCandidatesCount: fromLegCandidates.length, routeDetailOk, routeDetailFailed, totalStopsSeen },
-        }, 200);
-      }
-
-      const candidateIds = [...new Set(transferCandidates.map((c) => c.stationId))];
-      const onwardResult = await pkpFetch("/schedules", { stations: `${candidateIds.join(",")},${to.id}`, dateFrom: date, dateTo: date });
-      if (!onwardResult.ok) return json({ error: "no_connection_found", diagnostics: { stage: "onward_schedules_failed", error: onwardResult.error } }, 200);
-      const onwardRoutes = asList(onwardResult.data);
-
-      const MIN_TRANSFER_BUFFER_MIN = 7;
-      type Combo = { tc: typeof transferCandidates[0]; leg2Route: Record<string, unknown>; leg2DepMin: number; arrMin: number };
-      const combos: Combo[] = [];
-      for (const tc of transferCandidates) {
-        for (const r of onwardRoutes) {
-          const a = stationStopIn(r, tc.stationId), b = stationStopIn(r, to.id);
-          if (!a || !b) continue;
-          const oa = Number(a.orderNumber ?? -1), ob = Number(b.orderNumber ?? -2);
-          if (!(oa < ob)) continue;
-          const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
-          const arrMin = timeStrToMinutes(b.arrivalTime ?? b.departureTime);
-          if (depMin === null || arrMin === null) continue;
-          if (depMin < tc.arriveAtTransfer + MIN_TRANSFER_BUFFER_MIN) continue;
-          combos.push({ tc, leg2Route: r, leg2DepMin: depMin, arrMin });
-        }
-      }
-
-      if (!combos.length) {
-        // Jedna przesiadka nie wystarczyła — niektóre trasy (np. Zamość) naprawdę
-        // wymagają dwóch. `onwardRoutes` już zawiera pociągi odjeżdżające ZE stacji
-        // przesiadkowych 1. rzędu (bo zapytanie o nie było bez ograniczenia do samego
-        // `to`), więc drugi poziom przesiadki budujemy z tych samych danych — bez
-        // dodatkowego zapytania /schedules, tylko kolejny odczyt pełnej trasy dla garści
-        // najszybszych odjazdów z przesiadki 1. rzędu.
-        type Leg2Departure = { tc: typeof transferCandidates[0]; route: Record<string, unknown>; depMin: number };
-        const leg2Departures: Leg2Departure[] = [];
-        for (const tc of transferCandidates) {
-          for (const r of onwardRoutes) {
-            const a = stationStopIn(r, tc.stationId);
-            if (!a) continue;
-            const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
-            if (depMin === null || depMin < tc.arriveAtTransfer + MIN_TRANSFER_BUFFER_MIN) continue;
-            leg2Departures.push({ tc, route: r, depMin });
-          }
-        }
-        leg2Departures.sort((a, b) => a.depMin - b.depMin);
-        const boundedLeg2 = leg2Departures.slice(0, 6);
-
-        type Transfer2Candidate = { stationId: string; arriveAtTransfer2: number; arriveAtTransfer2Time: string; leg2: Leg2Departure };
-        const transfer2Candidates: Transfer2Candidate[] = [];
-        const seenRouteKeys = new Set<string>();
-        for (const l2 of boundedLeg2) {
-          const scheduleId = l2.route.scheduleId, orderId = l2.route.orderId;
-          if (scheduleId == null || orderId == null) continue;
-          const routeKey = `${scheduleId}:${orderId}`;
-          if (seenRouteKeys.has(routeKey)) continue;
-          seenRouteKeys.add(routeKey);
-          const full = await pkpFetch(`/schedules/route/${scheduleId}/${orderId}`, {});
-          if (!full.ok) { log("pkp_error", { reason: "route_detail_failed_leg2", scheduleId, orderId, error: full.error }); continue; }
-          const fullRoute = (full.data && typeof full.data === "object" ? full.data as Record<string, unknown> : null);
-          const stops = fullRoute ? (Array.isArray(fullRoute.stations) ? fullRoute.stations as Record<string, unknown>[]
-            : Array.isArray(fullRoute.route) ? fullRoute.route as Record<string, unknown>[] : []) : [];
-          for (const s of stops) {
-            const sid = String(s.stationId ?? "");
-            if (!sid || sid === from.id || sid === to.id || sid === l2.tc.stationId) continue;
-            const rawTime = s.arrivalTime ?? s.departureTime;
-            const arrMin = timeStrToMinutes(rawTime);
-            if (arrMin === null) continue;
-            transfer2Candidates.push({ stationId: sid, arriveAtTransfer2: arrMin, arriveAtTransfer2Time: String(rawTime), leg2: l2 });
-          }
-        }
-
-        if (transfer2Candidates.length) {
-          const t2Ids = [...new Set(transfer2Candidates.map((c) => c.stationId))];
-          const finalResult = await pkpFetch("/schedules", { stations: `${t2Ids.join(",")},${to.id}`, dateFrom: date, dateTo: date });
-          const finalRoutes = finalResult.ok ? asList(finalResult.data) : [];
-
-          type Combo3 = { t2: Transfer2Candidate; leg3Route: Record<string, unknown>; arrMin: number };
-          const combos3: Combo3[] = [];
-          for (const t2 of transfer2Candidates) {
-            for (const r of finalRoutes) {
-              const a = stationStopIn(r, t2.stationId), b = stationStopIn(r, to.id);
-              if (!a || !b) continue;
-              const oa = Number(a.orderNumber ?? -1), ob = Number(b.orderNumber ?? -2);
-              if (!(oa < ob)) continue;
-              const depMin = timeStrToMinutes(a.departureTime ?? a.arrivalTime);
-              const arrMin = timeStrToMinutes(b.arrivalTime ?? b.departureTime);
-              if (depMin === null || arrMin === null) continue;
-              if (depMin < t2.arriveAtTransfer2 + MIN_TRANSFER_BUFFER_MIN) continue;
-              combos3.push({ t2, leg3Route: r, arrMin });
-            }
-          }
-
-          if (combos3.length) {
-            combos3.sort((x, y) => x.arrMin - y.arrMin);
-            const chosen3 = combos3[0];
-            const tc = chosen3.t2.leg2.tc;
-            const leg1Stop = stationStopIn(tc.leg1.route, from.id);
-            const leg2DepStop = stationStopIn(chosen3.t2.leg2.route, tc.stationId);
-            const leg2ArrStop = stationStopIn(chosen3.t2.leg2.route, chosen3.t2.stationId);
-            const leg3DepStop = stationStopIn(chosen3.leg3Route, chosen3.t2.stationId);
-            const leg3ArrStop = stationStopIn(chosen3.leg3Route, to.id);
-            const [transfer1Name, transfer2Name] = await Promise.all([
-              lookupStationName(tc.stationId),
-              lookupStationName(chosen3.t2.stationId),
-            ]);
-            const t1Label = transfer1Name ?? `stacja ${tc.stationId}`;
-            const t2Label = transfer2Name ?? `stacja ${chosen3.t2.stationId}`;
-
-            return json({
-              direct: false,
-              legs: [
-                {
-                  from: from.name, to: t1Label,
-                  departure: String(leg1Stop?.departureTime ?? leg1Stop?.arrivalTime ?? "").slice(0, 5),
-                  arrival: tc.arriveAtTransferTime.slice(0, 5),
-                  train: trainLabel(tc.leg1.route),
-                },
-                {
-                  from: t1Label, to: t2Label,
-                  departure: String(leg2DepStop?.departureTime ?? "").slice(0, 5),
-                  arrival: chosen3.t2.arriveAtTransfer2Time.slice(0, 5),
-                  train: trainLabel(chosen3.t2.leg2.route),
-                },
-                {
-                  from: t2Label, to: to.name,
-                  departure: String(leg3DepStop?.departureTime ?? "").slice(0, 5),
-                  arrival: String(leg3ArrStop?.arrivalTime ?? leg3ArrStop?.departureTime ?? "").slice(0, 5),
-                  train: trainLabel(chosen3.leg3Route),
-                },
-              ],
-            });
-          }
-        }
-
-        const candidateNames = await Promise.all(candidateIds.slice(0, 6).map((id) => lookupStationName(id)));
-        return json({
-          error: "no_connection_found",
-          diagnostics: {
-            stage: "no_onward_combo",
-            triedTwoTransfers: true,
-            transferCandidateStations: candidateIds.slice(0, 6).map((id, i) => candidateNames[i] ?? id),
-            onwardRoutesCount: onwardRoutes.length,
-          },
-        }, 200);
-      }
-      combos.sort((x, y) => x.arrMin - y.arrMin || x.tc.leg1.depMin - y.tc.leg1.depMin);
-      const chosen = combos[0];
-      const leg1Stop = stationStopIn(chosen.tc.leg1.route, from.id);
-      const leg2DepStop = stationStopIn(chosen.leg2Route, chosen.tc.stationId);
-      const leg2ArrStop = stationStopIn(chosen.leg2Route, to.id);
-      // Pełna trasa dała tylko ID stacji przesiadkowej, nie nazwę — /operations zwraca
-      // słownik ID->nazwa ("stations" w odpowiedzi, potwierdzone /fields/operations),
-      // więc doszukujemy nazwy tym samym, tanim zapytaniem, zamiast zgadywać.
-      const transferName = (await lookupStationName(chosen.tc.stationId)) ?? `stacja ${chosen.tc.stationId}`;
-
-      return json({
-        direct: false,
-        legs: [
-          {
-            from: from.name, to: transferName,
-            departure: String(leg1Stop?.departureTime ?? leg1Stop?.arrivalTime ?? "").slice(0, 5),
-            arrival: chosen.tc.arriveAtTransferTime.slice(0, 5),
-            train: trainLabel(chosen.tc.leg1.route),
-          },
-          {
-            from: transferName, to: to.name,
-            departure: String(leg2DepStop?.departureTime ?? "").slice(0, 5),
-            arrival: String(leg2ArrStop?.arrivalTime ?? leg2ArrStop?.departureTime ?? "").slice(0, 5),
-            train: trainLabel(chosen.leg2Route),
-          },
-        ],
-      });
-    }
   }
 }

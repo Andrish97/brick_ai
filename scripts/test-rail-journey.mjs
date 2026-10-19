@@ -9,11 +9,10 @@ const expectRoute = process.env.EXPECT_ROUTE === "true";
 const expectedLegs = (process.env.EXPECTED_LEGS || "any").trim();
 const expectedVariants = Number(process.env.EXPECTED_VARIANTS || 0);
 const expectedText = (process.env.EXPECTED_TEXT || "").trim();
-const allowLiveFallback = process.env.ALLOW_LIVE_FALLBACK === "true";
 const verifyLive = process.env.VERIFY_LIVE !== "false";
 
 if (![1, 3, 4].includes(grantedParts)) throw new Error("REPLY_PARTS musi wynosić 1, 3 albo 4.");
-if (!["any", "local", "live"].includes(expectedSource)) throw new Error("EXPECTED_SOURCE musi wynosić any, local albo live.");
+if (!["any", "local"].includes(expectedSource)) throw new Error("EXPECTED_SOURCE musi wynosić any albo local.");
 if (!["any", "one", "multiple", "two_transfers", "three_transfers"].includes(expectedLegs)) throw new Error("EXPECTED_LEGS musi wynosić any, one, multiple, two_transfers albo three_transfers.");
 if (!Number.isInteger(expectedVariants) || expectedVariants < 0 || expectedVariants > 3) throw new Error("EXPECTED_VARIANTS musi wynosić 0–3.");
 
@@ -27,7 +26,6 @@ const response = await fetch(url, {
   body: JSON.stringify({
     event: "incoming_sms", msg: question, history: [], grantedParts,
     testLocalOnly: !verifyLive,
-    disableLiveFallback: !allowLiveFallback,
   }),
   signal: AbortSignal.timeout(120_000),
 });
@@ -41,8 +39,8 @@ if (!response.ok || result.ok !== true || result.test_mode !== true) {
 const journey = Array.isArray(result.journey_trace) ? result.journey_trace.at(-1) : null;
 if (!journey) throw new Error(`Gemini nie wywołał plan_train_journey. Odpowiedź: ${result.reply || "(pusta)"}`);
 const source = journey.result?.route_source;
-if (source !== "local" && source !== "live") {
-  throw new Error(`Planer nie zwrócił ścieżki local/live. Wynik: ${JSON.stringify(journey.result)}`);
+if (source !== "local") {
+  throw new Error(`Planer nie zwrócił ścieżki lokalnej. Wynik: ${JSON.stringify(journey.result)}`);
 }
 if (expectedSource !== "any" && source !== expectedSource) {
   throw new Error(`Oczekiwano ścieżki ${expectedSource}, użyto ${source}.`);
@@ -89,7 +87,7 @@ const summary = [
   `- Trasa: ${from} → ${to}`,
   `- Kiedy: ${date} ${time}`,
   `- Ścieżka planera: **${source}**`,
-  `- Tryb fallback: ${allowLiveFallback ? "pełny (może użyć limitowanego API PKP)" : "lokalny (bez zapytań do PKP)"}`,
+  `- Weryfikacja API PKP: ${verifyLive ? "tylko po znalezieniu trasy lokalnej" : "wyłączona"}`,
   `- Trasa znaleziona: ${routeFound ? "tak" : "nie"}`,
   `- Liczba odcinków: ${legCount}`,
   `- Liczba wariantów: ${variantCount}`,
@@ -151,7 +149,7 @@ function preferredWindowStart(value) {
   const normalized = value.toLocaleLowerCase("pl");
   const exact = /^(\d{1,2}):(\d{2})$/.exec(normalized);
   if (exact) return Number(exact[1]) * 60 + Number(exact[2]);
-  if (normalized.includes("rano")) return 6 * 60;
+  if (normalized.includes("rano")) return 8 * 60;
   if (normalized.includes("połud")) return 12 * 60;
   if (normalized.includes("wiecz")) return 18 * 60;
   return null;
