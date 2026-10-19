@@ -113,6 +113,7 @@ console.log(`PASS: ${from} -> ${to}; route_source=${source}; parts=${result.part
 console.log(`Search tool elapsed: ${journey.duration_ms ?? "unavailable"} ms`);
 console.log(`PKP API verification: ${liveVerification ? `${liveVerification.verified_candidates}/${liveVerification.checked_candidates}; ${liveVerification.duration_ms} ms` : "skipped/not applicable"}`);
 console.log(`Tool arguments: ${JSON.stringify(journey.args)}`);
+console.log(`Tool result: ${JSON.stringify(journey.result)}`);
 console.log(`Legs: ${JSON.stringify(journey.result?.legs || [])}`);
 console.log(`Reply: ${result.reply}`);
 
