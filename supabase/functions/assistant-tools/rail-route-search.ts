@@ -32,6 +32,7 @@ export type RouteSearchDiagnostics = {
   originHasCoordinates?: boolean;
   destinationHasCoordinates?: boolean;
   reachedStationNames?: string[];
+  reachedStopIds?: string[];
 };
 
 // Skanuj po maks. 30 minutach naraz. Ponieważ minimalna przesiadka też trwa
@@ -249,7 +250,8 @@ export async function runRailJourneySearch(
   diagnostics.stationsReached = Math.max(0, finalScan.reachableStopIds.length - from.ids.length);
   if (fetchFailed || diagnostics.connectionsFetchError) return { result: null, diagnostics };
   if (!finalScan.journeys.length) {
-    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 15);
+    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 2000);
+    diagnostics.reachedStopIds = reachedIds;
     if (reachedIds.length) {
       try {
         const rows = await sbGet<{ id: string; name: string }>(url, key, `rail_stops?id=in.(${inList(reachedIds)})&select=id,name`);
