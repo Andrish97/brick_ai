@@ -26,18 +26,18 @@ test("ciąg dalszy tego samego pociągu nie wymaga bufora przesiadkowego", () =>
   assert.equal(result[0].legs[0].to_stop_id, "D");
 });
 
-test("odrzuca przesiadkę krótszą niż 7 minut", () => {
+test("odrzuca przesiadkę krótszą niż 30 minut", () => {
   const result = findJourneyCandidates([
     c("IC1", "A", "B", t(8), t(9)),
-    c("REG1", "B", "C", t(9, 6), t(10)),
+    c("REG1", "B", "C", t(9, 29), t(10)),
   ], ["A"], ["C"], window);
   assert.deepEqual(result, []);
 });
 
-test("akceptuje przesiadkę od 7 minut do 4 godzin", () => {
+test("akceptuje przesiadkę od 30 minut do 2,5 godziny", () => {
   const result = findJourneyCandidates([
     c("IC1", "A", "B", t(8), t(9)),
-    c("REG1", "B", "C", t(9, 7), t(10)),
+    c("REG1", "B", "C", t(9, 30), t(10)),
   ], ["A"], ["C"], window);
   assert.equal(result.length, 1);
   assert.equal(result[0].direct, false);
@@ -52,10 +52,32 @@ test("ten sam szablon GTFS następnego dnia nie jest kontynuacją wczorajszego p
   assert.deepEqual(result, []);
 });
 
-test("odrzuca oczekiwanie dłuższe niż 4 godziny", () => {
+test("znajduje trasę z trzema przesiadkami", () => {
+  const result = findJourneyCandidates([
+    c("T1", "A", "B", t(8), t(8, 30)),
+    c("T2", "B", "C", t(9), t(9, 30)),
+    c("T3", "C", "D", t(10), t(10, 30)),
+    c("T4", "D", "E", t(11), t(11, 30)),
+  ], ["A"], ["E"], window);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].legs.length, 4);
+});
+
+test("nie przekracza limitu trzech przesiadek", () => {
+  const result = findJourneyCandidates([
+    c("T1", "A", "B", t(8), t(8, 20)),
+    c("T2", "B", "C", t(8, 50), t(9, 10)),
+    c("T3", "C", "D", t(9, 40), t(10)),
+    c("T4", "D", "E", t(10, 30), t(10, 50)),
+    c("T5", "E", "Z", t(11, 20), t(11, 40)),
+  ], ["A"], ["Z"], window);
+  assert.deepEqual(result, []);
+});
+
+test("odrzuca oczekiwanie dłuższe niż 2,5 godziny", () => {
   const result = findJourneyCandidates([
     c("IC1", "A", "B", t(8), t(9)),
-    c("REG1", "B", "C", t(13, 1), t(14)),
+    c("REG1", "B", "C", t(11, 31), t(12)),
   ], ["A"], ["C"], window);
   assert.deepEqual(result, []);
 });

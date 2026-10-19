@@ -35,10 +35,13 @@ export type RouteSearchDiagnostics = {
 };
 
 const WINDOW_SECONDS = 4 * 3600;
-const WINDOW_STEP_SECONDS = 2 * 3600;
-const TOTAL_SCAN_SECONDS = 6 * 3600;
+// The four-hour limit applies to the first departure from the origin. Keep
+// looking at later connections long enough for cross-country trips and up to
+// three transfers to reach their destination.
+const WINDOW_STEP_SECONDS = WINDOW_SECONDS;
+const TOTAL_SCAN_SECONDS = 20 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
-const MAX_RPC_REQUESTS = 3;
+const MAX_RPC_REQUESTS = 8;
 const MIN_TRANSFER_SECONDS = 30 * 60;
 const MAX_TRANSFER_SECONDS = 2.5 * 3600;
 const MAX_JOURNEYS = 3;
@@ -165,7 +168,7 @@ export async function runRailJourneySearch(
     from.ids,
     to.ids,
     originWindow,
-    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
+    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
   ) as ScanResult;
 
   const maxDayOffset = Math.floor((originWindowStart + TOTAL_SCAN_SECONDS) / 86400);

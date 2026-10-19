@@ -56,6 +56,7 @@ on:
           - one
           - multiple
           - two_transfers
+          - three_transfers
       expected_variants:
         description: Minimalna liczba wariantów (0 wyłącza sprawdzanie)
         required: true

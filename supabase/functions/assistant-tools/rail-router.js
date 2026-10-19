@@ -5,6 +5,7 @@ const DEFAULTS = {
   minTransferSeconds: 30 * 60,
   maxTransferSeconds: 2.5 * 60 * 60,
   maxLabelsPerStop: 24,
+  maxTransfers: 3,
   maxJourneys: 3,
 };
 
@@ -72,6 +73,8 @@ export function scanConnections(connections, originStopIds, destinationStopIds, 
     const transfersAtStop = byStop.get(from) ?? [];
     for (const label of transfersAtStop) {
       if (label.tripIds.at(-1) === tripInstance) continue;
+      // The origin boarding is not a transfer, so N transfers permit N+1 trains.
+      if (label.tripIds.length >= cfg.maxTransfers + 1) continue;
       const wait = connection.dep_seconds - label.arrival;
       if (wait >= cfg.minTransferSeconds && wait <= cfg.maxTransferSeconds) boardings.push(label);
     }
