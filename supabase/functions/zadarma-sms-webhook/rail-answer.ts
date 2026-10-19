@@ -26,3 +26,24 @@ export function departureOnlyReply(question: string, result: Record<string, unkn
   if (typeof first.from !== "string" || typeof first.departure !== "string") return null;
   return `${first.from} ${first.departure}`;
 }
+
+/** Answer a transfer-time question with only the arrival/departure pair(s). */
+export function transferTimesReply(question: string, result: Record<string, unknown>): string | null {
+  const normalized = question.toLocaleLowerCase("pl-PL");
+  const asksForTransferTimes = /\bprzesiad\w*\b/.test(normalized) &&
+    /\b(?:o\s+której|kiedy|jak\s+długo|ile\s+(?:czasu|minut)|przyjazd|godzin)\b/.test(normalized);
+  if (!asksForTransferTimes) return null;
+
+  const journey = Array.isArray(result.journeys) ? result.journeys[0] : result;
+  if (!journey || typeof journey !== "object") return null;
+  const legs = (journey as { legs?: unknown }).legs;
+  if (!Array.isArray(legs) || legs.length < 2) return null;
+  const transfers = legs.slice(0, -1).map((leg, index) => {
+    const current = leg as { to?: unknown; arrival?: unknown };
+    const next = legs[index + 1] as { departure?: unknown };
+    if (typeof current.to !== "string" || typeof current.arrival !== "string" || typeof next.departure !== "string") return "";
+    return `${current.arrival} ${current.to} ${next.departure}`;
+  });
+  if (transfers.some((transfer) => !transfer)) return null;
+  return transfers.join("-");
+}

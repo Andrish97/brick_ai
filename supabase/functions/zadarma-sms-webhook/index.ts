@@ -1,5 +1,5 @@
 import { createHmac, createHash } from "node:crypto";
-import { broadRailTimeOverride, departureOnlyReply } from "./rail-answer.ts";
+import { broadRailTimeOverride, departureOnlyReply, transferTimesReply } from "./rail-answer.ts";
 
 // Globalny w środowisku Supabase Edge Functions (Deno Deploy) — pozwala kontynuować
 // pracę w tle po zwróceniu odpowiedzi HTTP. Brak w standardowych typach Deno.
@@ -677,6 +677,8 @@ async function formatRailAnswer(
       .map((part) => typeof part.text === "string" ? part.text : "").join(" ") ?? "";
     const departureReply = departureOnlyReply(question, toolResult);
     if (departureReply) return departureReply;
+    const transferReply = transferTimesReply(question, toolResult);
+    if (transferReply) return transferReply;
   }
   const callPart = functionCallPart ?? { functionCall: { name, args } };
   const formatContents: GeminiContent[] = [

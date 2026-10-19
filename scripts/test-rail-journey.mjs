@@ -94,6 +94,12 @@ if (expectedIntent === "departure_only") {
 if (["journey", "transfer"].includes(expectedIntent)) {
   const legs = journey.result.journeys?.[0]?.legs || journey.result.legs || [];
   if (legs.length < 2) throw new Error(`Test ${expectedIntent} wymaga trasy z przesiadką; otrzymano ${legs.length} odcinków.`);
+  if (expectedIntent === "transfer") {
+    const expectedReply = legs.slice(0, -1).map((leg, index) => `${leg.arrival} ${leg.to} ${legs[index + 1].departure}`).join("-");
+    if (normalize(result.reply) !== normalize(expectedReply)) {
+      throw new Error(`Odpowiedź o przesiadce powinna zawierać wyłącznie "${expectedReply}". Odpowiedź: ${result.reply}`);
+    }
+  }
   const transferIndices = expectedIntent === "transfer" ? [0] : legs.slice(0, -1).map((_, index) => index);
   for (const index of transferIndices) {
     const previous = legs[index];
