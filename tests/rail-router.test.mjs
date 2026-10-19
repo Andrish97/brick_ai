@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findJourneyCandidates } from "../supabase/functions/assistant-tools/rail-router.js";
+import { createConnectionScanner, findJourneyCandidates } from "../supabase/functions/assistant-tools/rail-router.js";
 
 const t = (h, m = 0) => h * 3600 + m * 60;
 const c = (trip, from, to, dep, arr, train = trip) => ({
@@ -61,6 +61,19 @@ test("znajduje trasę z trzema przesiadkami", () => {
   ], ["A"], ["E"], window);
   assert.equal(result.length, 1);
   assert.equal(result[0].legs.length, 4);
+});
+
+test("skan przyrostowy łączy okna bez ponownego liczenia wcześniejszych połączeń", () => {
+  const scanner = createConnectionScanner(["A"], ["D"], window);
+  scanner.addConnections([
+    c("IC1", "A", "B", t(8), t(9)),
+  ]);
+  assert.deepEqual(scanner.result().journeys, []);
+  scanner.addConnections([
+    c("REG1", "B", "C", t(9, 30), t(10)),
+    c("IC2", "C", "D", t(10, 30), t(11)),
+  ]);
+  assert.equal(scanner.result().journeys[0].legs.length, 3);
 });
 
 test("nie przekracza limitu trzech przesiadek", () => {

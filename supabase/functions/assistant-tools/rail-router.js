@@ -14,13 +14,14 @@ const DEFAULTS = {
  * options sorted by arrival time. `time` values must use one absolute timeline across
  * service days (for example, day offset * 86400 + GTFS seconds).
  */
-export function scanConnections(connections, originStopIds, destinationStopIds, originWindow, options = {}) {
+export function createConnectionScanner(originStopIds, destinationStopIds, originWindow, options = {}) {
   const cfg = { ...DEFAULTS, ...options };
   const origins = new Set(originStopIds);
   const destinations = new Set(destinationStopIds);
   const byStop = new Map();
   const aboard = new Map();
   const results = new Map();
+  let lastDeparture = -Infinity;
   for (const origin of origins) byStop.set(origin, []);
 
   const keyFor = (label) => `${label.firstDeparture}|${label.tripIds.join(",")}`;
@@ -49,80 +50,97 @@ export function scanConnections(connections, originStopIds, destinationStopIds, 
     if (!old || label.arrival < old.arrival) results.set(key, label);
   }
 
-  for (const connection of connections) {
-    const from = connection.from_stop_id;
-    const to = connection.to_stop_id;
-    const trip = connection.trip_id;
-    // GTFS trip IDs identify a template and repeat on every active service day.
-    // Keep each day's physical train instance separate in scans spanning midnight.
-    const tripInstance = connection.trip_instance_id ?? `${trip}@${connection.service_day_offset ?? 0}`;
-    const boardings = [];
+  function addConnections(connections) {
+    for (const connection of connections) {
+      if (connection.dep_seconds < lastDeparture) {
+        throw new Error("rail_connections_not_chronological");
+      }
+      lastDeparture = connection.dep_seconds;
+      const from = connection.from_stop_id;
+      const to = connection.to_stop_id;
+      const trip = connection.trip_id;
+      // GTFS trip IDs identify a template and repeat on every active service day.
+      // Keep each day's physical train instance separate in scans spanning midnight.
+      const tripInstance = connection.trip_instance_id ?? `${trip}@${connection.service_day_offset ?? 0}`;
+      const boardings = [];
 
-    if (origins.has(from) && connection.dep_seconds >= originWindow.start && connection.dep_seconds < originWindow.end) {
-      boardings.push({
-        arrival: connection.dep_seconds,
-        firstDeparture: connection.dep_seconds,
-        tripIds: [],
-        legs: [],
-      });
-    }
-
-    const throughAtStop = aboard.get(tripInstance)?.get(from) ?? [];
-    boardings.push(...throughAtStop);
-
-    const transfersAtStop = byStop.get(from) ?? [];
-    for (const label of transfersAtStop) {
-      if (label.tripIds.at(-1) === tripInstance) continue;
-      // The origin boarding is not a transfer, so N transfers permit N+1 trains.
-      if (label.tripIds.length >= cfg.maxTransfers + 1) continue;
-      const wait = connection.dep_seconds - label.arrival;
-      if (wait >= cfg.minTransferSeconds && wait <= cfg.maxTransferSeconds) boardings.push(label);
-    }
-
-    for (const previous of boardings) {
-      const continuing = previous.tripIds.at(-1) === tripInstance;
-      const legs = previous.legs.map((leg) => ({ ...leg }));
-      const currentLeg = legs.at(-1);
-      if (continuing && currentLeg?.to_stop_id === from) {
-        currentLeg.to_stop_id = to;
-        currentLeg.arrival = connection.arr_seconds;
-      } else {
-        legs.push({
-          trip_id: trip,
-          trip_instance_id: tripInstance,
-          from_stop_id: from,
-          to_stop_id: to,
-          departure: connection.dep_seconds,
-          arrival: connection.arr_seconds,
-          train: connection.train ?? connection.short_name ?? "?",
+      if (origins.has(from) && connection.dep_seconds >= originWindow.start && connection.dep_seconds < originWindow.end) {
+        boardings.push({
+          arrival: connection.dep_seconds,
+          firstDeparture: connection.dep_seconds,
+          tripIds: [],
+          legs: [],
         });
       }
 
-      const tripIds = continuing ? previous.tripIds : [...previous.tripIds, tripInstance];
-      const next = {
-        arrival: connection.arr_seconds,
-        firstDeparture: previous.firstDeparture,
-        tripIds,
-        legs,
-      };
-      const byTrip = aboard.get(tripInstance) ?? new Map();
-      keepLabel(byTrip, to, next);
-      aboard.set(tripInstance, byTrip);
-      keepLabel(byStop, to, next);
-      if (destinations.has(to)) saveResult(next);
+      const throughAtStop = aboard.get(tripInstance)?.get(from) ?? [];
+      boardings.push(...throughAtStop);
+
+      const transfersAtStop = byStop.get(from) ?? [];
+      for (const label of transfersAtStop) {
+        if (label.tripIds.at(-1) === tripInstance) continue;
+        // The origin boarding is not a transfer, so N transfers permit N+1 trains.
+        if (label.tripIds.length >= cfg.maxTransfers + 1) continue;
+        const wait = connection.dep_seconds - label.arrival;
+        if (wait >= cfg.minTransferSeconds && wait <= cfg.maxTransferSeconds) boardings.push(label);
+      }
+
+      for (const previous of boardings) {
+        const continuing = previous.tripIds.at(-1) === tripInstance;
+        const legs = previous.legs.map((leg) => ({ ...leg }));
+        const currentLeg = legs.at(-1);
+        if (continuing && currentLeg?.to_stop_id === from) {
+          currentLeg.to_stop_id = to;
+          currentLeg.arrival = connection.arr_seconds;
+        } else {
+          legs.push({
+            trip_id: trip,
+            trip_instance_id: tripInstance,
+            from_stop_id: from,
+            to_stop_id: to,
+            departure: connection.dep_seconds,
+            arrival: connection.arr_seconds,
+            train: connection.train ?? connection.short_name ?? "?",
+          });
+        }
+
+        const tripIds = continuing ? previous.tripIds : [...previous.tripIds, tripInstance];
+        const next = {
+          arrival: connection.arr_seconds,
+          firstDeparture: previous.firstDeparture,
+          tripIds,
+          legs,
+        };
+        const byTrip = aboard.get(tripInstance) ?? new Map();
+        keepLabel(byTrip, to, next);
+        aboard.set(tripInstance, byTrip);
+        keepLabel(byStop, to, next);
+        if (destinations.has(to)) saveResult(next);
+      }
     }
   }
 
-  const journeys = [...results.values()]
-    .sort((a, b) => a.arrival - b.arrival || a.legs.length - b.legs.length || a.firstDeparture - b.firstDeparture)
-    .slice(0, cfg.maxJourneys)
-    .map((journey) => ({
-      departure: journey.firstDeparture,
-      arrival: journey.arrival,
-      direct: journey.legs.length === 1,
-      legs: journey.legs,
-    }));
-  return { journeys, reachableStopIds: [...byStop.keys()] };
+  function result() {
+    const journeys = [...results.values()]
+      .sort((a, b) => a.arrival - b.arrival || a.legs.length - b.legs.length || a.firstDeparture - b.firstDeparture)
+      .slice(0, cfg.maxJourneys)
+      .map((journey) => ({
+        departure: journey.firstDeparture,
+        arrival: journey.arrival,
+        direct: journey.legs.length === 1,
+        legs: journey.legs,
+      }));
+    return { journeys, reachableStopIds: [...byStop.keys()] };
+  }
+
+  return { addConnections, result };
+}
+
+export function scanConnections(connections, originStopIds, destinationStopIds, originWindow, options = {}) {
+  const scanner = createConnectionScanner(originStopIds, destinationStopIds, originWindow, options);
+  const ordered = [...connections].sort((a, b) => a.dep_seconds - b.dep_seconds || a.arr_seconds - b.arr_seconds);
+  scanner.addConnections(ordered);
+  return scanner.result();
 }
 
 export function findJourneyCandidates(connections, originStopIds, destinationStopIds, originWindow, options = {}) {

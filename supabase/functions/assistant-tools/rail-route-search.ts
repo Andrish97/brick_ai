@@ -1,7 +1,7 @@
 // Database adapter for rail-router.js. The router itself is pure and tested with
 // synthetic GTFS connections; this module is responsible only for loading active
 // service-day connections and resolving display names.
-import { scanConnections } from "./rail-router.js";
+import { createConnectionScanner } from "./rail-router.js";
 
 type RailStationGroup = { name: string; ids: string[]; lat: number | null; lon: number | null };
 type Connection = {
@@ -105,9 +105,9 @@ function secondsToHHMM(seconds: number): string {
 }
 
 /**
- * Find up to three sensible journeys in one complete connection scan. Each RPC window
- * is reloaded when the reachable-station frontier grows; the accumulated data is always
- * rescanned chronologically so out-of-order pages can never corrupt CSA state.
+ * Fetch and process each four-hour connection window once. The router retains its CSA
+ * state between windows, so adding a longer search horizon does not repeatedly rescan
+ * the entire timetable.
  */
 export async function runRailJourneySearch(
   url: string,
@@ -138,8 +138,13 @@ export async function runRailJourneySearch(
   diagnostics.activeServiceCount = dayZeroServices.size;
   if (!dayZeroServices.size) return { result: null, diagnostics };
 
-  const allConnections = new Map<string, Connection>();
   const originWindow = { start: originWindowStart, end: originWindowEnd };
+  const scanner = createConnectionScanner(
+    from.ids,
+    to.ids,
+    originWindow,
+    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
+  );
   let rpcRequests = 0;
 
   const fetchWindow = async (
@@ -163,42 +168,47 @@ export async function runRailJourneySearch(
     });
   };
 
-  const scan = (): ScanResult => scanConnections(
-    [...allConnections.values()].sort((a, b) => a.dep_seconds - b.dep_seconds || a.arr_seconds - b.arr_seconds),
-    from.ids,
-    to.ids,
-    originWindow,
-    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
-  ) as ScanResult;
-
-  const maxDayOffset = Math.floor((originWindowStart + TOTAL_SCAN_SECONDS) / 86400);
+  const activeByOffset = new Map<number, Set<string>>([[0, dayZeroServices]]);
+  let fetchFailed = false;
   dayLoop:
-  for (let dayOffset = 0; dayOffset <= maxDayOffset; dayOffset++) {
-    let serviceIds: Set<string>;
-    try {
-      serviceIds = dayOffset === 0 ? dayZeroServices : await activeServiceIds(url, key, addDays(date, dayOffset));
-    } catch (error) {
-      diagnostics.connectionsFetchError = `active_service_lookup_failed_day_${dayOffset}: ${String(error)}`;
-      break;
-    }
-    if (!serviceIds.size) continue;
+  for (let absoluteStart = originWindowStart; absoluteStart < originWindowStart + TOTAL_SCAN_SECONDS; absoluteStart += WINDOW_STEP_SECONDS) {
+    const current = scanner.result() as ScanResult;
+    const thirdArrival = current.journeys.at(-1)?.arrival;
+    if (current.journeys.length >= MAX_JOURNEYS && thirdArrival !== undefined && absoluteStart > thirdArrival) break;
 
-    const dayBase = dayOffset * 86400;
-    for (let localStart = dayOffset === 0 ? originWindowStart : 0; localStart < EXTENDED_DAY_CEILING_SECONDS; localStart += WINDOW_STEP_SECONDS) {
-      const absoluteStart = dayBase + localStart;
-      if (absoluteStart >= originWindowStart + TOTAL_SCAN_SECONDS) break dayLoop;
-      const current = scan();
-      const thirdArrival = current.journeys.at(-1)?.arrival;
-      if (current.journeys.length >= MAX_JOURNEYS && thirdArrival !== undefined && absoluteStart > thirdArrival) break dayLoop;
+    diagnostics.windowsScanned++;
+    const absoluteEnd = Math.min(absoluteStart + WINDOW_SECONDS, originWindowStart + TOTAL_SCAN_SECONDS);
+    const firstOffset = Math.max(0, Math.floor(absoluteStart / 86400) - 1);
+    const lastOffset = Math.floor((absoluteEnd - 1) / 86400);
+    const batch: Connection[] = [];
+    const seen = new Set<string>();
+    const frontier = current.reachableStopIds;
 
-      diagnostics.windowsScanned++;
-      const localEnd = Math.min(localStart + WINDOW_SECONDS, EXTENDED_DAY_CEILING_SECONDS);
-      const frontier = current.reachableStopIds;
+    for (let dayOffset = firstOffset; dayOffset <= lastOffset; dayOffset++) {
+      const dayBase = dayOffset * 86400;
+      const localStart = Math.max(0, absoluteStart - dayBase);
+      const localEnd = Math.min(EXTENDED_DAY_CEILING_SECONDS, absoluteEnd - dayBase);
+      if (localStart >= localEnd) continue;
+
+      let serviceIds = activeByOffset.get(dayOffset);
+      if (!serviceIds) {
+        try {
+          serviceIds = await activeServiceIds(url, key, addDays(date, dayOffset));
+          activeByOffset.set(dayOffset, serviceIds);
+        } catch (error) {
+          diagnostics.connectionsFetchError = `active_service_lookup_failed_day_${dayOffset}: ${String(error)}`;
+          fetchFailed = true;
+          break dayLoop;
+        }
+      }
+      if (!serviceIds.size) continue;
+
       let rows: Connection[];
       try {
         rows = await fetchWindow([...serviceIds], localStart, localEnd, frontier);
       } catch (error) {
         diagnostics.connectionsFetchError = String(error);
+        fetchFailed = true;
         break dayLoop;
       }
 
@@ -211,16 +221,20 @@ export async function runRailJourneySearch(
           trip_instance_id: `${row.trip_id}@${dayOffset}`,
         };
         const signature = `${absolute.trip_id}|${absolute.from_stop_id}|${absolute.to_stop_id}|${absolute.dep_seconds}`;
-        if (allConnections.has(signature)) continue;
-        allConnections.set(signature, absolute);
+        if (seen.has(signature)) continue;
+        seen.add(signature);
+        batch.push(absolute);
       }
     }
+
+    batch.sort((a, b) => a.dep_seconds - b.dep_seconds || a.arr_seconds - b.arr_seconds);
+    scanner.addConnections(batch);
+    diagnostics.connectionsScannedTotal += batch.length;
   }
 
-  const finalScan = scan();
-  diagnostics.connectionsScannedTotal = allConnections.size;
+  const finalScan = scanner.result() as ScanResult;
   diagnostics.stationsReached = Math.max(0, finalScan.reachableStopIds.length - from.ids.length);
-  if (diagnostics.connectionsFetchError) return { result: null, diagnostics };
+  if (fetchFailed || diagnostics.connectionsFetchError) return { result: null, diagnostics };
   if (!finalScan.journeys.length) {
     const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 15);
     if (reachedIds.length) {
