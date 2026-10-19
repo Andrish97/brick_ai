@@ -67,9 +67,12 @@ if (expectedLegs === "three_transfers" && !journey.result.journeys?.some((option
 }
 if (routeFound) {
   const options = journey.result.journeys?.length ? journey.result.journeys : [journey.result];
+  const requestedTime = typeof journey.args?.preferred_time === "string" && journey.args.preferred_time.trim()
+    ? journey.args.preferred_time.trim()
+    : time;
   for (const [index, option] of options.entries()) {
-    const issue = validateJourney(option.legs, time);
-    if (issue) throw new Error(`Wariant ${index + 1} ma nieprawidłową chronologię: ${issue}. Odcinki: ${JSON.stringify(option.legs)}`);
+    const issue = validateJourney(option.legs, requestedTime);
+    if (issue) throw new Error(`Wariant ${index + 1} ma nieprawidłową chronologię: ${issue}. Argumenty narzędzia: ${JSON.stringify(journey.args)}. Odcinki: ${JSON.stringify(option.legs)}`);
   }
 }
 if (expectedVariants && variantCount < expectedVariants) throw new Error(`Oczekiwano co najmniej ${expectedVariants} wariantów, zwrócono ${variantCount}.`);
@@ -111,6 +114,7 @@ if (process.env.GITHUB_STEP_SUMMARY) {
 console.log(`PASS: ${from} -> ${to}; route_source=${source}; parts=${result.parts}/${grantedParts}`);
 console.log(`Search tool elapsed: ${journey.duration_ms ?? "unavailable"} ms`);
 console.log(`PKP API verification: ${liveVerification ? `${liveVerification.verified_candidates}/${liveVerification.checked_candidates}; ${liveVerification.duration_ms} ms` : "skipped/not applicable"}`);
+console.log(`Tool arguments: ${JSON.stringify(journey.args)}`);
 console.log(`Legs: ${JSON.stringify(journey.result?.legs || [])}`);
 console.log(`Reply: ${result.reply}`);
 
