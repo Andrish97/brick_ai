@@ -33,6 +33,7 @@ export type RouteSearchDiagnostics = {
   destinationHasCoordinates?: boolean;
   reachedStationNames?: string[];
   reachedStopIds?: string[];
+  rpcResultSizes?: number[];
 };
 
 const WINDOW_SECONDS = 4 * 3600;
@@ -159,7 +160,7 @@ export async function runRailJourneySearch(
   ): Promise<Connection[]> => {
     if (rpcRequests >= MAX_RPC_REQUESTS) throw new Error("rail_rpc_budget_exhausted");
     rpcRequests++;
-    return await sbRpc<Connection>(url, key, "rail_connections_in_window_compact", {
+    const rows = await sbRpc<Connection>(url, key, "rail_connections_in_window_compact", {
       p_service_ids: serviceIds,
       p_dep_from: localStart,
       p_dep_to: localEnd,
@@ -170,6 +171,9 @@ export async function runRailJourneySearch(
       p_dest_lon: to.lon,
       p_max_detour_km: maxDetourKm(from, to),
     });
+    diagnostics.rpcResultSizes ??= [];
+    diagnostics.rpcResultSizes.push(rows.length);
+    return rows;
   };
 
   const activeByOffset = new Map<number, Set<string>>([[0, dayZeroServices]]);
