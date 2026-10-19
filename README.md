@@ -40,6 +40,7 @@ Nie ma już technicznych komend do zapamiętania. Piszesz zwykłym zdaniem, a mo
 | „poprowadź mnie z domu do pracy rowerem” | AI pobiera trasę krok po kroku |
 | „jak dojadę tramwajem do rynku?” | AI pobiera trasę komunikacją miejską |
 | „o której najszybciej będę w pracy?” | AI porównuje dostępne środki transportu |
+| „o której wyjść z domu, żeby być w Przemyślu przed 20?” | AI planuje trasę od adresu do adresu wstecz od godziny przyjazdu |
 
 Model nigdy nie zgaduje — jeśli intencja nie jest jednoznaczna (np. słowo „koniec” użyte w innym sensie), zwyczajnie odpowiada dalej w rozmowie zamiast wywoływać narzędzie.
 
@@ -69,7 +70,7 @@ Wymaga sekretu `GOOGLE_MAPS_API_KEY` z włączonym **Directions API**.
 
 Nie ma już komendy `nav` — poproś zwykłym zdaniem, np. „jak dojdę z domu do pracy?”, „poprowadź mnie rowerem na dworzec”. Skróty „dom” i „praca” są rozwijane po stronie serwera z profilu użytkownika — adres nigdy nie trafia do modelu.
 
-**Obsługiwane środki transportu:** pieszo, rower, hulajnoga, komunikacja miejska. **Samochód nie jest obsługiwany** — celowo, aby trasa zawsze mieściła się w rozsądnej liczbie SMS-ów.
+`get_directions` prowadzi krok po kroku pieszo, rowerem, hulajnogą lub komunikacją miejską. Pełny planer `plan_journey` dodatkowo porównuje przejazd samochodem.
 
 **Format odpowiedzi** — jedna linia na krok, ASCII:
 
@@ -107,6 +108,19 @@ Odcinki piesze używają tego samego formatu co nawigacja. Odcinek linią:
 | 0m 4 Dworzec -> Rynek 12:03-12:19
 ```
 
+## Planowanie całej podróży
+
+Narzędzie `plan_journey` planuje trasę wprost (od wskazanej godziny) albo wstecz (na przykład: „o której wyjść, żeby być przed 20?”). Bez wskazania środka porównuje dojście pieszo, rower, komunikację publiczną oraz samochód i wybiera wariant z najwcześniejszym przyjazdem albo najpóźniejszym możliwym wyjściem przed terminem. Rozkładowe trasy publiczne mogą łączyć dojścia, autobusy, tramwaje i pociągi; plan obejmuje adres początkowy i końcowy.
+
+Zasady doboru:
+
+- Początek „dom” i „praca” jest rozwijany z profilu po stronie serwera. Adres docelowy może być adresem lub miejscowością; sama miejscowość oznacza cel wskazany przez Google Maps, nie domyślny adres użytkownika.
+- Przy trasie od 80 km narzędzie preferuje pełny wariant komunikacją publiczną, jeśli Google Directions go zwraca; obejmuje on dojścia i przesiadki oraz może zawierać pociąg. Krótsze trasy porównują wszystkie dostępne tryby. Gdy dane komunikacji publicznej nie obejmują któregoś odcinka, narzędzie nie dopisuje go na podstawie przypuszczeń.
+- Dla „wyjazd o” porównanie bierze pod uwagę trasę dostępną od tej godziny. Dla „być przed” API wyszukuje trasę na godzinę przyjazdu, a dla trybów bez rozkładu wylicza czas wstecz z podanego czasu przejazdu.
+- Datę i godzinę przekazujemy do Google w RFC3339 ze strefą Europe/Warsaw. Obsługiwany zakres planowania to najbliższe 7 dni.
+
+Trasy publiczne w `plan_journey` pochodzą z Google Directions API i nie są potwierdzane przez PKP. Osobny `plan_train_journey` nadal wyszukuje połączenia PKP w lokalnym GTFS i może weryfikować znalezione kursy przez PKP dla bliskich dat. Są to odrębne źródła i należy je tak traktować.
+
 ---
 
 ## Profil użytkownika
@@ -137,6 +151,7 @@ Cała logika komend żyje w prywatnej Edge Function `assistant-tools`, wywoływa
 | `get_directions` | start, cel, opcjonalny transport | Pobiera i formatuje trasę krok po kroku |
 | `get_transit` | start, cel | Pobiera trasę komunikacją miejską z przesiadkami |
 | `get_fastest_arrival` | start, cel | Porównuje dostępne środki transportu i zwraca najszybszy |
+| `plan_journey` | start, cel, opcjonalnie środek i czas | Planuje całą trasę od adresu do adresu, wprost lub wstecz od godziny przyjazdu |
 | `resolve_rail_station` | `point`: 'dom'/'praca'/nazwa | Ustala jednoznaczną stację kolejową PKP PLK dla punktu podróży |
 | `get_train_station_board` | stacja, opcjonalna data | Pobiera planowe odjazdy/przyjazdy pociągów dla stacji |
 | `get_train_status` | numer pociągu, opcjonalna data | Sprawdza rzeczywiste wykonanie i opóźnienie pociągu |
@@ -144,7 +159,7 @@ Cała logika komend żyje w prywatnej Edge Function `assistant-tools`, wywoływa
 
 Wyniki nawigacji, komunikacji miejskiej i danych kolejowych formatuje wyłącznie endpoint — model nigdy nie tworzy własnego formatu trasy ani rozkładu, co gwarantuje spójność i bezpieczeństwo (żadnych zmyślonych ulic, godzin czy opóźnień).
 
-> **Status modułu kolejowego:** fundament (wyszukiwanie stacji, tablica odjazdów, status pociągu, utrudnienia) jest zaimplementowany, ale nieprzetestowany na żywo — sekret `PKP_API_KEY` czekał na aktywację administratora PKP PLK w momencie wdrożenia tego kodu. Dokładny kształt odpowiedzi JSON API nie był możliwy do zweryfikowania z tego środowiska, więc parsowanie próbuje kilku prawdopodobnych nazw pól i loguje pełną surową odpowiedź przy błędzie (`Directions błąd`-podobny wpis `pkp_error` w Logach) — po pierwszym realnym wywołaniu może wymagać drobnej korekty. Planer połączeń z przesiadkami (`plan_train_journey`) nie jest jeszcze zaimplementowany — to osobny, znacznie większy krok (algorytm earliest-arrival na grafie czasowym), celowo odłożony do czasu zweryfikowania fundamentu na żywych danych.
+> **Źródła tras:** `plan_train_journey` szuka połączeń z przesiadkami w zsynchronizowanym lokalnym GTFS. Dla podróży od adresu do adresu `plan_journey` korzysta z Google Directions API; wynik komunikacji publicznej może zawierać autobus, tramwaj, pociąg i dojścia. Te źródła mają odrębne rozkłady i planer adresowy nie wykonuje dodatkowej weryfikacji każdej nogi kolejowej przez PKP.
 >
 > Panel admina → Testy → **Dodatkowe testy → 🚆 Test połączenia PKP** to stały health-check połączenia z API PKP PLK (bez Gemini, bez bazy — bezpośrednie wyszukanie stacji „Katowice”). Jeśli zwróci `PendingActivation`, klucz nadal czeka na ręczną aktywację po stronie PKP PLK — napisz do nich na `pdp-api@plk-sa.pl` z prośbą o sprawdzenie statusu wniosku (deklarowany czas weryfikacji to 3-5 dni roboczych; jeśli minął bez potwierdzenia mailem, wspomnij o tym w wiadomości).
 

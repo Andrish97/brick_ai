@@ -1,0 +1,34 @@
+name: Test multimodal journey planner (no SMS)
+
+on:
+  workflow_run:
+    workflows: ["Deploy Supabase Edge Functions"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test arrival deadline from home (no SMS)
+        env:
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+          EXPECT_DIRECTION: arrive_by
+          EXPECT_MODE: transit
+          EXPECT_TRAIN: "true"
+        run: |
+          monday=$(TZ=Europe/Warsaw date -d 'next monday' +%d.%m.%Y)
+          QUESTION="O której mam wyjść z domu, żeby być w Przemyślu w poniedziałek ${monday} przed 20?" node scripts/test-multimodal-journey.mjs
+      - name: Test departure planning from home (no SMS)
+        env:
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+          EXPECT_DIRECTION: depart_at
+        run: |
+          QUESTION="Jak dojechać z domu do pracy jutro o 8?" node scripts/test-multimodal-journey.mjs

@@ -383,6 +383,22 @@ const TOOLS = [
         },
       },
       {
+        name: "plan_journey",
+        description:
+          "Planuje trasę od adresu do adresu dla pieszo, rowerem, komunikacją miejską (w tym kombinacje bus/tramwaj/pociąg wg danych Google) i samochodem. Obsługuje start o wskazanej godzinie oraz planowanie wstecz od godziny przyjazdu. Gdy użytkownik nie wybiera środka, porównaj wszystkie dostępne tryby. Dla dalekiej trasy komunikacją miejską użyj tej funkcji, która uwzględnia dojścia i przesiadki na całej trasie.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            origin: { type: "STRING", description: "Adres startowy albo 'dom'/'praca'." },
+            destination: { type: "STRING", description: "Adres lub miejscowość docelowa." },
+            mode: { type: "STRING", enum: ["wszystkie", "pieszo", "rower", "hulajnoga", "komunikacja miejska", "samochodem"], description: "Tryb transportu; domyślnie wszystkie dostępne." },
+            time_direction: { type: "STRING", enum: ["depart_at", "arrive_by"], description: "depart_at: wyjazd o podanej godzinie; arrive_by: dotarcie najpóźniej o podanej godzinie." },
+            datetime: { type: "STRING", description: "Opcjonalny czas lokalny w ISO 8601 z przesunięciem strefy, np. 2026-10-26T19:45:00+01:00." },
+          },
+          required: ["origin", "destination"],
+        },
+      },
+      {
         name: "get_directions",
         description:
           "Pobiera i formatuje trasę krok po kroku między dwoma punktami (bez samochodu — tylko pieszo, rower, hulajnoga lub komunikacja miejska). Słowa 'dom' i 'praca' zostaną automatycznie rozwinięte z profilu użytkownika po stronie serwera — przekaż je dosłownie, nie pytaj o adres.",
@@ -416,7 +432,7 @@ const TOOLS = [
       {
         name: "get_fastest_arrival",
         description:
-          "Porównuje dostępne środki transportu (pieszo, rower, komunikacja miejska — bez samochodu) i zwraca najszybszy sposób dotarcia do celu wraz z przewidywaną godziną przyjazdu, licząc od teraz.",
+          "Porównuje dostępne środki transportu (pieszo, rower, komunikacja miejska, samochód) i zwraca najszybszy sposób dotarcia do celu wraz z przewidywaną godziną przyjazdu, licząc od teraz.",
         parameters: {
           type: "OBJECT",
           properties: {
@@ -496,7 +512,7 @@ const TOOLS = [
 ];
 
 const DETERMINISTIC_ACTIONS = new Set([
-  "get_directions", "get_transit", "get_fastest_arrival",
+  "get_directions", "get_transit", "get_fastest_arrival", "plan_journey",
   "get_train_station_board", "get_train_status", "plan_train_journey", "get_train_disruptions",
 ]);
 
@@ -582,13 +598,18 @@ function directionsErrorMessage(toolResult: Record<string, unknown>): string {
   if (error === "missing_address") return `Brak adresu "${toolResult.missing ?? "?"}" w profilu. Uzupełnij go w panelu admina.`;
   if (error === "unsupported_transport") return String(toolResult.message ?? "Ustaw obsługiwany transport w profilu.");
   if (error === "route_too_long") return `Trasa jest zbyt długa na SMS (limit ${toolResult.max_sms_parts ?? 6} części). Wybierz bliższy cel.`;
+  if (error === "no_route_before_deadline") return "Nie ma dostępnej trasy, która zdąży przed podaną godziną.";
+  if (error === "datetime_out_of_range") return "Termin podróży musi przypadać w ciągu najbliższych 7 dni.";
+  if (error === "invalid_datetime") return "Nie udało się odczytać daty i godziny podróży. Podaj je ponownie.";
+  if (error === "missing_datetime") return "Podaj godzinę, przed którą mam zaplanować przyjazd.";
   if (error === "no_route") return "Nie udało się znaleźć trasy. Sprawdź adresy i spróbuj ponownie.";
   return "Nie udało się pobrać trasy. Spróbuj ponownie.";
 }
 
 function formatFastestArrival(toolResult: Record<string, unknown>): string {
   if (toolResult.error) return directionsErrorMessage(toolResult);
-  const mode = String(toolResult.best_mode ?? "?");
+  const modeNames: Record<string, string> = { walking: "pieszo", bicycling: "rowerem", transit: "komunikacją miejską", driving: "samochodem" };
+  const mode = modeNames[String(toolResult.best_mode ?? "")] ?? String(toolResult.best_mode ?? "?");
   const minutes = toolResult.minutes;
   const arrival = toolResult.arrival_time;
   return `Najszybciej: ${mode}, ${minutes} min (przyjazd ~${arrival}).`;
@@ -750,14 +771,15 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
     }
 
     if (DETERMINISTIC_ACTIONS.has(name)) {
-      const toolStartedAt = name === "plan_train_journey" ? performance.now() : 0;
+      const isJourneyTool = name === "plan_train_journey" || name === "plan_journey";
+      const toolStartedAt = isJourneyTool ? performance.now() : 0;
       const toolResult = await callAssistantTool(name, toolArgs, ctx.userId, ctx.convId, name === "plan_train_journey" ? {
         localOnly: ctx.localOnlyTest,
       } : undefined);
-      if (name === "plan_train_journey") {
+      if (isJourneyTool) {
         const durationMs = Math.round(performance.now() - toolStartedAt);
         ctx.journeyTrace?.push({ args: toolArgs, result: toolResult, duration_ms: durationMs });
-        log("rail_search_duration", { convId: ctx.convId, durationMs });
+        log(name === "plan_train_journey" ? "rail_search_duration" : "journey_search_duration", { convId: ctx.convId, durationMs });
       }
       log("tool_result", { convId: ctx.convId, name, result: toolResult });
 
@@ -899,7 +921,8 @@ async function handleEndpointTest(SB: string, KEY: string, rawMsg: string, histo
 
   const settingsRows = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
   let systemPrompt = settingsRows[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
-  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${grantedParts} SMS (${SMS_PART_CHARS * grantedParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, plan_journey, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. plan_journey, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${grantedParts} SMS (${SMS_PART_CHARS * grantedParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nZasady planowania podróży: dla pytania o wyjazd użyj plan_journey z time_direction=depart_at; dla pytania "o której wyjść, żeby być przed/na godzinę" użyj time_direction=arrive_by i podanej godziny jako datetime. Domyślnie porównaj pieszo, rower, komunikację miejską (pełna trasa door-to-door, w tym dojścia i przesiadki) oraz samochód. Przy trasie >=80 km preferuj wariant komunikacją publiczną (w tym pociągiem, jeśli wynik go zawiera); lokalny transport lub dojście ma doprowadzić do stacji i od stacji tylko wtedy, gdy wynik trasy to uzasadnia. Zawsze przekaż adres lub skrót dom/praca; nie zgaduj niepodanego adresu końcowego. `;
 
   log("endpoint_test_start", { convId, content, historyLen: history.length, grantedParts });
   const journeyTrace: JourneyTraceEntry[] = [];
@@ -1171,7 +1194,8 @@ Deno.serve(async (req: Request) => {
     const settings = await sbGet(SB, KEY, `settings?key=eq.system_prompt_default&select=value`) as Array<{ value: string }>;
     systemPrompt = settings[0]?.value ?? `Jesteś asystentem SMS. WAŻNE: ODPOWIADAJ MAKSYMALNIE ${SMS_PART_CHARS} ZNAKÓW. Żadnych linków URL. Tylko fakty, zero wstępów.`;
   }
-  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nAktualna data i godzina: ${warsawNowLabel()}. Używaj tego do przeliczania względnych określeń czasu ("jutro", "pojutrze", "za 20 minut", "dzisiaj wieczorem") na konkretne daty (YYYY-MM-DD) i godziny (HH:MM) przekazywane do narzędzi.\n\nMasz dostęp do narzędzi: allow_long_reply, close_conversation, get_user_profile, plan_journey, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status, plan_train_journey, get_train_disruptions. Wywołuj je tylko gdy intencja użytkownika jest jednoznaczna — nigdy nie zgaduj. plan_journey, get_directions, get_transit, get_fastest_arrival, resolve_rail_station, get_train_station_board, get_train_status i plan_train_journey same rozwiązują 'dom'/'praca' na podstawie profilu — nie wywołuj przed nimi get_user_profile, to niepotrzebna dodatkowa runda. Wyniki nawigacji i danych kolejowych formatuje sam endpoint; nie twórz własnego formatu trasy ani rozkładu. Bieżący limit długości Twojej odpowiedzi tekstowej to ${replySmsParts} SMS (${SMS_PART_CHARS * replySmsParts} znaków). To zwykły SMS, nie czat: nigdy, w żadnej odpowiedzi, nie używaj żadnego markdownu ani jego elementów — bez **pogrubienia**, _kursywy_, \`kodu\`, nagłówków #, cytatów >, list (- lub 1.), linków [tekst](url), przekreśleń ~~ ani linii poziomych ---. Sam zwykły tekst, cudzysłowy pisz normalnie jako " lub '. Telefon odbiorcy nie wyświetla emoji ani symboli specjalnych (strzałki, gwiazdki-ozdobniki, ptaszki itp.) — pokazują się jako puste kwadraciki, więc nigdy ich nie używaj.`;
+  systemPrompt += `\n\nZasady planowania podróży: dla pytania o wyjazd użyj plan_journey z time_direction=depart_at; dla pytania "o której wyjść, żeby być przed/na godzinę" użyj time_direction=arrive_by i podanej godziny jako datetime. Domyślnie porównaj pieszo, rower, komunikację miejską (pełna trasa door-to-door, w tym dojścia i przesiadki) oraz samochód. Przy trasie >=80 km preferuj wariant komunikacją publiczną (w tym pociągiem, jeśli wynik go zawiera); lokalny transport lub dojście ma doprowadzić do stacji i od stacji tylko wtedy, gdy wynik trasy to uzasadnia. Zawsze przekaż adres lub skrót dom/praca; nie zgaduj niepodanego adresu końcowego. `;
 
   const outcome: AssistantOutcome = await runAssistant(aiContents, systemPrompt, TOKENS_FOR_PARTS[replySmsParts], { userId, convId, replyParts: replySmsParts });
 

@@ -1,6 +1,7 @@
 import { resolveStationGroupSmart, hasFreshLocalData } from "./rail-stations.ts";
 import { runRailJourneySearch, type JourneySearchResult } from "./rail-route-search.ts";
 import { loadRailSearchSettings } from "./rail-settings.ts";
+import { parseJourneyDateTime, rankJourneyRoutes } from "./journey-time.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -15,6 +16,7 @@ type ToolAction =
   | "get_directions"
   | "get_transit"
   | "get_fastest_arrival"
+  | "plan_journey"
   | "resolve_rail_station"
   | "get_train_station_board"
   | "get_train_status"
@@ -126,7 +128,49 @@ const TRANSPORT_MODE: Record<string, string> = {
   "rower": "bicycling",
   "hulajnoga": "bicycling",
   "komunikacja miejska": "transit",
+  "samochodem": "driving",
 };
+
+const PLANNABLE_MODES = ["walking", "bicycling", "transit", "driving"] as const;
+
+async function fetchPlannedRoute(
+  apiKey: string, origin: string, destination: string, mode: string, when: number | null, direction: string,
+): Promise<PlannedRoute | null> {
+  const params = new URLSearchParams({ origin, destination, mode, language: "pl", key: apiKey });
+  if (when !== null && (mode === "transit" || mode === "driving")) {
+    params.set(direction === "arrive_by" ? "arrival_time" : "departure_time", String(when));
+  } else if (mode === "transit") params.set("departure_time", "now");
+  const res = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const leg = data.routes?.[0]?.legs?.[0];
+  if (data.status !== "OK" || !leg || typeof leg.duration?.value !== "number") {
+    log("directions_error", { googleStatus: data.status, mode, action: "plan_journey" });
+    return null;
+  }
+  const clock = (value: unknown) => typeof value === "string" ? value.replace(/\s?[AP]M/i, "") : "";
+  const parts = (leg.steps ?? []).map((step: Record<string, any>) => {
+    if (step.travel_mode === "WALKING") return `pieszo ${step.distance?.text ?? ""}`.trim();
+    if (step.travel_mode !== "TRANSIT") return String(step.html_instructions ?? "").replace(/<[^>]+>/g, "");
+    const td = step.transit_details ?? {};
+    const line = td.line?.short_name || td.line?.name || "transport publiczny";
+    return `${line} ${td.departure_stop?.name ?? "?"} ${clock(td.departure_time?.text)}-${td.arrival_stop?.name ?? "?"} ${clock(td.arrival_time?.text)}`;
+  }).filter(Boolean);
+  const hasTrain = (leg.steps ?? []).some((step: Record<string, any>) => {
+    const type = step.transit_details?.line?.vehicle?.type;
+    return typeof type === "string" && /TRAIN|RAIL/i.test(type);
+  });
+  return {
+    mode, durationSeconds: leg.duration.value, distanceMeters: leg.distance?.value ?? 0, hasTrain,
+    depart: clock(leg.departure_time?.text) || "",
+    arrive: clock(leg.arrival_time?.text) || "",
+    departEpoch: typeof leg.departure_time?.value === "number" ? leg.departure_time.value : null,
+    arriveEpoch: typeof leg.arrival_time?.value === "number" ? leg.arrival_time.value : null,
+    summary: parts.length ? parts.join("; ") : `${leg.start_address ?? origin} - ${leg.end_address ?? destination}`,
+  };
+}
+
+type PlannedRoute = { mode: string; durationSeconds: number; distanceMeters: number; hasTrain: boolean; depart: string; arrive: string; departEpoch: number | null; arriveEpoch: number | null; summary: string };
 
 // 160 znaków SMS - "\n" - 6-cyfrowy kod rozmowy dopisywany przez webhook do każdej części
 const SMS_PART_CHARS = 153;
@@ -623,9 +667,7 @@ Deno.serve(async (req: Request) => {
         return json({ error: "missing_address", missing: origin.missing ?? destination.missing }, 200);
       }
 
-      const candidateModes = user.profile_transport && TRANSPORT_MODE[user.profile_transport]
-        ? [user.profile_transport]
-        : ["pieszo", "rower", "komunikacja miejska"];
+      const candidateModes = ["pieszo", "rower", "komunikacja miejska", "samochodem"];
 
       const results: Array<{ mode: string; minutes: number }> = [];
       for (const mode of candidateModes) {
@@ -661,6 +703,54 @@ Deno.serve(async (req: Request) => {
         arrival_time: arrivalTime,
         alternatives: results.slice(1),
       });
+    }
+
+    if (input.action === "plan_journey") {
+      const apiKey = Deno.env.get("GOOGLE_MAPS_API_KEY");
+      if (!apiKey) return json({ error: "no_api_key" }, 200);
+      const user = await getUser(url, key, input.user_id);
+      if (!user) return json({ error: "User not found" }, 404);
+      const fromArg = typeof input.args?.origin === "string" ? input.args.origin.trim() : "";
+      const toArg = typeof input.args?.destination === "string" ? input.args.destination.trim() : "";
+      if (!fromArg || !toArg) return json({ error: "origin and destination are required" }, 400);
+      const origin = resolveAddress(fromArg, user);
+      const destination = resolveAddress(toArg, user);
+      if (origin.missing || destination.missing) return json({ error: "missing_address", missing: origin.missing ?? destination.missing }, 200);
+      const direction = input.args?.time_direction === "arrive_by" ? "arrive_by" : "depart_at";
+      const rawDateTime = input.args?.datetime;
+      const when = rawDateTime === undefined || rawDateTime === null || rawDateTime === "" ? null : parseJourneyDateTime(rawDateTime);
+      if (rawDateTime && when === null) return json({ error: "invalid_datetime", expected: "RFC3339 z przesunięciem strefy, np. 2026-10-26T19:45:00+01:00" }, 200);
+      if (direction === "arrive_by" && when === null) return json({ error: "missing_datetime" }, 200);
+      if (when !== null && (when < Math.floor(Date.now() / 1000) - 60 || when > Math.floor(Date.now() / 1000) + 7 * 86400)) {
+        return json({ error: "datetime_out_of_range", max_days: 7 }, 200);
+      }
+      const modeArg = typeof input.args?.mode === "string" ? input.args.mode : "wszystkie";
+      const requested = TRANSPORT_MODE[modeArg];
+      if (modeArg !== "wszystkie" && !requested) return json({ error: "unsupported_transport" }, 200);
+      const modes = requested ? [requested] : PLANNABLE_MODES;
+      const routes = (await Promise.all(modes.map((mode) => fetchPlannedRoute(
+        apiKey, origin.address!, destination.address!, mode, when, direction,
+      )))).filter((route): route is NonNullable<typeof route> => route !== null);
+      if (!routes.length) return json({ error: "no_route" }, 200);
+      const targetMs = when === null ? Date.now() : when * 1000;
+      const longDistance = routes.some((route) => route.distanceMeters >= 80_000);
+      const timed = rankJourneyRoutes(routes, direction, targetMs, modeArg === "wszystkie" && longDistance) as Array<PlannedRoute & { departAt: number; arriveAt: number }>;
+      if (!timed.length) return json({ error: "no_route_before_deadline" }, 200);
+      const best = timed[0];
+      const time = (ms: number) => {
+        const date = new Date(ms);
+        const anchor = new Date(targetMs);
+        const clock = date.toLocaleTimeString("pl-PL", { timeZone: "Europe/Warsaw", hour: "2-digit", minute: "2-digit" });
+        const dateLabel = date.toLocaleDateString("pl-PL", { timeZone: "Europe/Warsaw", day: "2-digit", month: "2-digit" });
+        const dateKey = (value: Date) => value.toLocaleDateString("sv-SE", { timeZone: "Europe/Warsaw" });
+        return dateKey(date) === dateKey(anchor) ? clock : `${clock} ${dateLabel}`;
+      };
+      const modeNames: Record<string, string> = { walking: "pieszo", bicycling: "rowerem", transit: "komunikacją miejską", driving: "samochodem" };
+      const transferSummary = best.mode === "transit" ? `; ${best.summary}` : "";
+      const route = direction === "arrive_by"
+        ? `Wyjdź ${time(best.departAt)}, ${modeNames[best.mode]}, dotrzesz ${time(best.arriveAt)}${transferSummary}.`
+        : `Wyjazd ${time(best.departAt)}, ${modeNames[best.mode]}, przyjazd ${time(best.arriveAt)}${transferSummary}.`;
+      return json({ route, mode: best.mode, has_train: best.hasTrain, duration_minutes: Math.round(best.durationSeconds / 60), depart_at: time(best.departAt), arrive_at: time(best.arriveAt), alternatives: timed.slice(1).map((candidate) => ({ mode: candidate.mode, has_train: candidate.hasTrain, duration_minutes: Math.round(candidate.durationSeconds / 60), depart_at: time(candidate.departAt), arrive_at: time(candidate.arriveAt) })), route_source: "Google Directions API" });
     }
 
     if (input.action === "resolve_rail_station") {
