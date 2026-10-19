@@ -214,7 +214,6 @@ export async function runRailJourneySearch(
         if (allConnections.has(signature)) continue;
         allConnections.set(signature, absolute);
       }
-      scan();
     }
   }
 
