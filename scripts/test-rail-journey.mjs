@@ -83,7 +83,7 @@ if (routeFound) {
 }
 if (expectedVariants && variantCount < expectedVariants) throw new Error(`Oczekiwano co najmniej ${expectedVariants} wariantów, zwrócono ${variantCount}.`);
 if (typeof result.reply !== "string" || !result.reply.trim()) throw new Error("Brak tekstowej odpowiedzi asystenta.");
-const normalize = (text) => text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase("pl");
+const normalize = (text) => text.normalize("NFD").replace(/\p{Diacritic}/gu, "").replace(/ł/g, "l").toLocaleLowerCase("pl");
 if (expectedIntent === "departure_only") {
   const firstLeg = journey.result.legs?.[0];
   const expectedReply = firstLeg && `${firstLeg.from} ${firstLeg.departure}`;
