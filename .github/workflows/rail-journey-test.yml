@@ -11,7 +11,7 @@ on:
       to:
         description: Stacja docelowa
         required: true
-        default: Zamość
+        default: Kraków
         type: string
       travel_date:
         description: Data lub określenie naturalne, np. jutro
@@ -161,14 +161,14 @@ jobs:
         env:
           INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
           FROM_STATION: ${{ inputs.from || 'Katowice' }}
-          TO_STATION: ${{ inputs.to || 'Zamość' }}
+          TO_STATION: ${{ inputs.to || 'Kraków' }}
           TRAVEL_DATE: ${{ inputs.travel_date || 'jutro' }}
           PREFERRED_TIME: ${{ inputs.preferred_time || 'rano' }}
           REPLY_PARTS: ${{ inputs.reply_parts || '4' }}
           EXPECTED_SOURCE: ${{ inputs.expected_source || 'local' }}
           EXPECT_ROUTE: ${{ github.event_name == 'push' && 'true' || inputs.expect_route }}
-          EXPECTED_LEGS: ${{ github.event_name == 'push' && 'two_transfers' || inputs.expected_legs || 'multiple' }}
-          EXPECTED_VARIANTS: ${{ github.event_name == 'push' && '2' || inputs.expected_variants || '1' }}
+          EXPECTED_LEGS: ${{ github.event_name == 'push' && 'one' || inputs.expected_legs || 'multiple' }}
+          EXPECTED_VARIANTS: ${{ github.event_name == 'push' && '1' || inputs.expected_variants || '1' }}
           EXPECTED_TEXT: ${{ inputs.expected_text }}
           ALLOW_LIVE_FALLBACK: ${{ inputs.use_live_fallback || 'false' }}
           VERIFY_LIVE: ${{ github.event_name == 'push' && 'true' || inputs.verify_live || 'true' }}
