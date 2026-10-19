@@ -94,10 +94,23 @@ if (expectedIntent === "departure_only") {
 if (["journey", "transfer"].includes(expectedIntent)) {
   const legs = journey.result.journeys?.[0]?.legs || journey.result.legs || [];
   if (legs.length < 2) throw new Error(`Test ${expectedIntent} wymaga trasy z przesiadką; otrzymano ${legs.length} odcinków.`);
+  const transferCount = legs.length - 1;
+  const transferLabel = `${transferCount} ${transferCount === 1 ? "przesiadka" : transferCount < 5 ? "przesiadki" : "przesiadek"}`;
   if (expectedIntent === "transfer") {
-    const expectedReply = legs.slice(0, -1).map((leg, index) => `${leg.arrival} ${leg.to} ${legs[index + 1].departure}`).join("-");
+    const expectedReply = `${transferLabel}: ${legs.slice(0, -1).map((leg, index) => `${leg.arrival} ${leg.to} ${legs[index + 1].departure}`).join("-")}`;
     if (normalize(result.reply) !== normalize(expectedReply)) {
       throw new Error(`Odpowiedź o przesiadce powinna zawierać wyłącznie "${expectedReply}". Odpowiedź: ${result.reply}`);
+    }
+  }
+  if (expectedIntent === "journey") {
+    const route = [`${legs[0].from} ${legs[0].departure}`];
+    for (let index = 0; index < legs.length - 1; index++) {
+      route.push(`${legs[index].arrival} ${legs[index].to} ${legs[index + 1].departure}`);
+    }
+    route.push(`${legs.at(-1).arrival} ${legs.at(-1).to}`);
+    const expectedReply = `${transferLabel}: ${route.join("-")}`;
+    if (normalize(result.reply) !== normalize(expectedReply)) {
+      throw new Error(`Odpowiedź o całym połączeniu powinna zawierać "${expectedReply}". Odpowiedź: ${result.reply}`);
     }
   }
   const transferIndices = expectedIntent === "transfer" ? [0] : legs.slice(0, -1).map((_, index) => index);

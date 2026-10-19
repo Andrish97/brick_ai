@@ -1,9 +1,10 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { broadRailTimeOverride, departureOnlyReply, transferTimesReply } from "../supabase/functions/zadarma-sms-webhook/rail-answer.ts";
+import { broadRailTimeOverride, departureOnlyReply, journeyReply, transferTimesReply } from "../supabase/functions/zadarma-sms-webhook/rail-answer.ts";
 
 const result = { journeys: [{ legs: [
   { from: "Tomaszów Mazowiecki", to: "Koluszki", departure: "15:22", arrival: "15:46" },
-  { from: "Koluszki", to: "Żary", departure: "16:17", arrival: "18:30" },
+  { from: "Koluszki", to: "Legnica", departure: "16:17", arrival: "20:03" },
+  { from: "Legnica", to: "Żary", departure: "21:10", arrival: "22:20" },
 ] }] };
 
 Deno.test("prośba o samą godzinę odjazdu zwraca stację i pierwszy odjazd", () => {
@@ -22,7 +23,14 @@ Deno.test("pytanie o połączenie lub przesiadkę używa pełnego formatu", () =
 Deno.test("pytanie o godziny przesiadki zwraca tylko przyjazd, stację i odjazd", () => {
   assertEquals(
     transferTimesReply("O której przyjazd na przesiadkę i o której odjazd dalej?", result),
-    "15:46 Koluszki 16:17",
+    "2 przesiadki: 15:46 Koluszki 16:17-20:03 Legnica 21:10",
+  );
+});
+
+Deno.test("pełna trasa jasno podaje liczbę przesiadek", () => {
+  assertEquals(
+    journeyReply("Chcę jechać pociągiem z Tomaszowa Mazowieckiego do Żar", result),
+    "2 przesiadki: Tomaszów Mazowiecki 15:22-15:46 Koluszki 16:17-20:03 Legnica 21:10-22:20 Żary",
   );
 });
 
