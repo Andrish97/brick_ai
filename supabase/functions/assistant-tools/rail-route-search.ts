@@ -250,7 +250,7 @@ export async function runRailJourneySearch(
   diagnostics.stationsReached = Math.max(0, finalScan.reachableStopIds.length - from.ids.length);
   if (fetchFailed || diagnostics.connectionsFetchError) return { result: null, diagnostics };
   if (!finalScan.journeys.length) {
-    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 300);
+    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 1000);
     diagnostics.reachedStopIds = reachedIds;
     if (reachedIds.length) {
       try {
