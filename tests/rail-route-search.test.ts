@@ -58,3 +58,63 @@ Deno.test("ładuje GTFS przez mock PostgREST i zwraca trzy najlepsze warianty be
     globalThis.fetch = originalFetch;
   }
 });
+
+Deno.test("ładuje kolejne pociągi po stacjach osiągniętych w poprzednim oknie", async () => {
+  const originalFetch = globalThis.fetch;
+  const stops = [
+    { id: "A", name: "Tomaszów Mazowiecki", lat: 51.5, lon: 20 },
+    { id: "B", name: "Koluszki", lat: 51.7, lon: 19.8 },
+    { id: "C", name: "Legnica", lat: 51.2, lon: 16.2 },
+    { id: "D", name: "Żary", lat: 51.6, lon: 15.1 },
+  ];
+  const trips = ["ŁKA 21220", "IC 1644 ŁUŻYCE", "KD 67103 KD SPRINTER KEPLER"];
+  const connections = [
+    { trip_id: "trip-1", service_id: "service-1", from_stop_id: "A", to_stop_id: "B", dep_seconds: hour(15) + 22 * 60, arr_seconds: hour(15) + 46 * 60 },
+    { trip_id: "trip-2", service_id: "service-1", from_stop_id: "B", to_stop_id: "C", dep_seconds: hour(16) + 17 * 60, arr_seconds: hour(20) + 3 * 60 },
+    { trip_id: "trip-3", service_id: "service-1", from_stop_id: "C", to_stop_id: "D", dep_seconds: hour(21) + 10 * 60, arr_seconds: hour(22) + 20 * 60 },
+  ];
+  let rpcCalls = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const requestUrl = new URL(String(input));
+    const table = requestUrl.pathname.split("/").at(-1);
+    if (table === "rail_calendar") return Response.json([{ id: "service-1" }]);
+    if (table === "rail_calendar_dates") return Response.json([]);
+    if (table === "rail_connections_in_window_compact") {
+      rpcCalls++;
+      const args = JSON.parse(String(init?.body));
+      const candidates = new Set(connections.filter((row) =>
+        args.p_service_ids.includes(row.service_id) &&
+        row.dep_seconds >= args.p_dep_from && row.dep_seconds < args.p_dep_to &&
+        (args.p_from_stop_ids === null || args.p_from_stop_ids.includes(row.from_stop_id))
+      ).map((row) => row.trip_id));
+      const rows = connections.filter((row) =>
+        args.p_service_ids.includes(row.service_id) &&
+        row.dep_seconds >= args.p_dep_from && row.dep_seconds < args.p_dep_to &&
+        (args.p_from_stop_ids === null || candidates.has(row.trip_id))
+      );
+      return Response.json(rows);
+    }
+    if (table === "rail_stops") return Response.json(stops);
+    if (table === "rail_trips") return Response.json(trips.map((short_name, i) => ({ id: `trip-${i + 1}`, short_name, route_id: `route-${i + 1}` })));
+    if (table === "rail_routes") return Response.json(trips.map((_, i) => ({ id: `route-${i + 1}`, short_name: "IC" })));
+    throw new Error(`Nieoczekiwane żądanie w teście: ${requestUrl}`);
+  }) as typeof fetch;
+
+  try {
+    const { result } = await runRailJourneySearch(
+      "https://supabase.test",
+      "test-key",
+      { name: "Tomaszów Mazowiecki", ids: ["A"], lat: 51.5, lon: 20 },
+      { name: "Żary", ids: ["D"], lat: 51.6, lon: 15.1 },
+      "2026-10-19",
+      hour(15) + 22 * 60,
+      hour(19) + 22 * 60,
+    );
+    if (!result) throw new Error("Nie znaleziono trasy z dwiema przesiadkami przez kolejne okna DB");
+    if (result.legs.length !== 3) throw new Error(`Oczekiwano 3 odcinków, otrzymano ${result.legs.length}`);
+    if (result.legs.map((leg) => leg.train).join("|") !== trips.join("|")) throw new Error("Planer nie zachował trzech właściwych pociągów");
+    if (rpcCalls < 8) throw new Error(`Oczekiwano skanu po małych oknach, wykonano ${rpcCalls} zapytań`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

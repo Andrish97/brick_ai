@@ -32,18 +32,19 @@ export type RouteSearchDiagnostics = {
   originHasCoordinates?: boolean;
   destinationHasCoordinates?: boolean;
   reachedStationNames?: string[];
-  reachedStopIds?: string[];
-  rpcResultSizes?: number[];
 };
 
-const WINDOW_SECONDS = 4 * 3600;
+// Skanuj po maks. 30 minutach naraz. Ponieważ minimalna przesiadka też trwa
+// 30 minut, każda poprawna przesiadka zaczyna się w kolejnym oknie, którego
+// frontier zawiera już stację osiągniętą poprzednim pociągiem.
+const WINDOW_SECONDS = 30 * 60;
 // The four-hour limit applies to the first departure from the origin. Keep
 // looking at later connections long enough for cross-country trips and up to
 // three transfers to reach their destination.
 const WINDOW_STEP_SECONDS = WINDOW_SECONDS;
 const TOTAL_SCAN_SECONDS = 20 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
-const MAX_RPC_REQUESTS = 8;
+const MAX_RPC_REQUESTS = 80;
 const MIN_TRANSFER_SECONDS = 30 * 60;
 const MAX_TRANSFER_SECONDS = 2.5 * 3600;
 const MAX_JOURNEYS = 4;
@@ -171,8 +172,6 @@ export async function runRailJourneySearch(
       p_dest_lon: to.lon,
       p_max_detour_km: maxDetourKm(from, to),
     });
-    diagnostics.rpcResultSizes ??= [];
-    diagnostics.rpcResultSizes.push(rows.length);
     return rows;
   };
 
@@ -250,8 +249,7 @@ export async function runRailJourneySearch(
   diagnostics.stationsReached = Math.max(0, finalScan.reachableStopIds.length - from.ids.length);
   if (fetchFailed || diagnostics.connectionsFetchError) return { result: null, diagnostics };
   if (!finalScan.journeys.length) {
-    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 1000);
-    diagnostics.reachedStopIds = reachedIds;
+    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 15);
     if (reachedIds.length) {
       try {
         const rows = await sbGet<{ id: string; name: string }>(url, key, `rail_stops?id=in.(${inList(reachedIds)})&select=id,name`);
