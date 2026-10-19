@@ -149,7 +149,7 @@ export async function runRailJourneySearch(
     from.ids,
     to.ids,
     originWindow,
-    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
+    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 48 },
   );
   let rpcRequests = 0;
 
