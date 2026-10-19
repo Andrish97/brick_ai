@@ -1,5 +1,16 @@
 type RailLeg = { from?: unknown; departure?: unknown };
 
+/** Normalize broad time-of-day requests before the journey tool applies its search window. */
+export function broadRailTimeOverride(question: string): string | null {
+  // Keep a clock time or a phrase such as "od 9" supplied by the user authoritative.
+  if (/\b(?:[01]?\d|2[0-3]):[0-5]\d\b/.test(question) || /\b(?:od|około|ok\.)\s+[01]?\d\b/i.test(question)) return null;
+  const normalized = question.toLocaleLowerCase("pl-PL");
+  if (/\b(?:rano|rankiem|porank(?:iem|u))\b/.test(normalized)) return "08:00";
+  if (/\bpo\s+południu\b/.test(normalized)) return "12:00";
+  if (/\bwieczor(?:em|e)\b/.test(normalized)) return "18:00";
+  return null;
+}
+
 /** A deterministic compact format for an explicit request for only the first departure. */
 export function departureOnlyReply(question: string, result: Record<string, unknown>): string | null {
   const normalized = question.toLocaleLowerCase("pl-PL");

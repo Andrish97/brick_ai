@@ -1,5 +1,5 @@
 import { createHmac, createHash } from "node:crypto";
-import { departureOnlyReply } from "./rail-answer.ts";
+import { broadRailTimeOverride, departureOnlyReply } from "./rail-answer.ts";
 
 // Globalny w środowisku Supabase Edge Functions (Deno Deploy) — pozwala kontynuować
 // pracę w tle po zwróceniu odpowiedzi HTTP. Brak w standardowych typach Deno.
@@ -731,7 +731,14 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
     }
 
     const { name, args } = turn.functionCall;
-    log("tool_call", { convId: ctx.convId, name, args, round });
+    const toolArgs = { ...args };
+    if (name === "plan_train_journey") {
+      const question = [...currentContents].reverse().find((content) => content.role === "user")?.parts
+        .map((part) => typeof part.text === "string" ? part.text : "").join(" ") ?? "";
+      const preferredTime = broadRailTimeOverride(question);
+      if (preferredTime) toolArgs.preferred_time = preferredTime;
+    }
+    log("tool_call", { convId: ctx.convId, name, args: toolArgs, round });
 
     if (name === "close_conversation") {
       await callAssistantTool("close_conversation", {}, ctx.userId, ctx.convId);
@@ -740,12 +747,12 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
 
     if (DETERMINISTIC_ACTIONS.has(name)) {
       const toolStartedAt = name === "plan_train_journey" ? performance.now() : 0;
-      const toolResult = await callAssistantTool(name, args, ctx.userId, ctx.convId, name === "plan_train_journey" ? {
+      const toolResult = await callAssistantTool(name, toolArgs, ctx.userId, ctx.convId, name === "plan_train_journey" ? {
         localOnly: ctx.localOnlyTest,
       } : undefined);
       if (name === "plan_train_journey") {
         const durationMs = Math.round(performance.now() - toolStartedAt);
-        ctx.journeyTrace?.push({ args, result: toolResult, duration_ms: durationMs });
+        ctx.journeyTrace?.push({ args: toolArgs, result: toolResult, duration_ms: durationMs });
         log("rail_search_duration", { convId: ctx.convId, durationMs });
       }
       log("tool_result", { convId: ctx.convId, name, result: toolResult });
@@ -759,7 +766,7 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
             : name === "plan_train_journey"
               ? () => formatTrainJourney(toolResult, currentReplyParts === 1 ? 1 : 3)
               : () => formatTrainDisruptions(toolResult);
-        const text = await formatRailAnswer(currentContents, turn.functionCallPart, name, args, toolResult, systemPrompt, currentMax, fallback);
+        const text = await formatRailAnswer(currentContents, turn.functionCallPart, name, toolArgs, toolResult, systemPrompt, currentMax, fallback);
         return { kind: "text", text, grantedParts };
       }
 

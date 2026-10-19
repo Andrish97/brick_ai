@@ -73,9 +73,9 @@ if (expectedLegs === "three_transfers" && !journey.result.journeys?.some((option
 }
 if (routeFound) {
   const options = journey.result.journeys?.length ? journey.result.journeys : [journey.result];
-  const requestedTime = typeof journey.args?.preferred_time === "string" && journey.args.preferred_time.trim()
-    ? journey.args.preferred_time.trim()
-    : time;
+  // Validate against the time window asked by the test, not the model's tool args.
+  // Otherwise an incorrect interpretation of "rano" as 04:00 would pass unnoticed.
+  const requestedTime = time;
   for (const [index, option] of options.entries()) {
     const issue = validateJourney(option.legs, requestedTime, minTransferMinutes, maxTransferMinutes, originWindowHours);
     if (issue) throw new Error(`Wariant ${index + 1} ma nieprawidłową chronologię: ${issue}. Argumenty narzędzia: ${JSON.stringify(journey.args)}. Odcinki: ${JSON.stringify(option.legs)}`);
