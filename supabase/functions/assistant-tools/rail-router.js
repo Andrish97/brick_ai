@@ -121,9 +121,31 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
   }
 
   function result() {
-    const journeys = [...results.values()]
+    const candidates = [...results.values()]
+      .sort((a, b) => a.arrival - b.arrival || a.legs.length - b.legs.length || a.firstDeparture - b.firstDeparture);
+    const selected = [];
+    const selectedKeys = new Set();
+    const journeyKey = (journey) => `${journey.firstDeparture}|${journey.legs.map((leg) => leg.trip_instance_id).join(",")}`;
+    // Reserve an option for one, two, and three transfers when those routes exist.
+    // Otherwise the three fastest direct/one-change options could hide every route
+    // that needs more changes, even though the scan had found it.
+    for (const transferCount of [1, 2, 3]) {
+      const candidate = candidates.find((journey) => journey.legs.length === transferCount + 1);
+      if (candidate) {
+        selected.push(candidate);
+        selectedKeys.add(journeyKey(candidate));
+      }
+    }
+    for (const candidate of candidates) {
+      if (selected.length >= cfg.maxJourneys) break;
+      const key = journeyKey(candidate);
+      if (!selectedKeys.has(key)) {
+        selected.push(candidate);
+        selectedKeys.add(key);
+      }
+    }
+    const journeys = selected
       .sort((a, b) => a.arrival - b.arrival || a.legs.length - b.legs.length || a.firstDeparture - b.firstDeparture)
-      .slice(0, cfg.maxJourneys)
       .map((journey) => ({
         departure: journey.firstDeparture,
         arrival: journey.arrival,

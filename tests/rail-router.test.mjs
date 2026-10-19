@@ -106,6 +106,22 @@ test("zwraca najwyżej trzy warianty, posortowane po czasie przyjazdu", () => {
   assert.deepEqual(result.map((x) => x.arrival), [t(10, 30), t(10, 45), t(11)]);
 });
 
+test("zachowuje najlepsze warianty z jedną, dwiema i trzema przesiadkami", () => {
+  const result = findJourneyCandidates([
+    c("DIRECT", "A", "Z", t(8), t(9)),
+    c("ONE1", "A", "B", t(8, 5), t(8, 30)),
+    c("ONE2", "B", "Z", t(9), t(10)),
+    c("TWO1", "A", "C", t(8, 10), t(8, 30)),
+    c("TWO2", "C", "D", t(9), t(9, 30)),
+    c("TWO3", "D", "Z", t(10), t(10, 30)),
+    c("THREE1", "A", "E", t(8, 20), t(8, 30)),
+    c("THREE2", "E", "F", t(9), t(9, 10)),
+    c("THREE3", "F", "G", t(9, 40), t(9, 50)),
+    c("THREE4", "G", "Z", t(10, 20), t(10, 30)),
+  ], ["A"], ["Z"], window);
+  assert.deepEqual(result.map((journey) => journey.legs.length), [2, 3, 4]);
+});
+
 test("nie rozpoczyna podróży poza czterogodzinnym oknem pierwszego odjazdu", () => {
   const result = findJourneyCandidates([
     c("IC1", "A", "Z", t(12), t(13)),

@@ -177,7 +177,9 @@ export async function runRailJourneySearch(
       const segmentEnd = Math.min(absoluteWindowEnd, (Math.floor(segmentStart / 86400) + 1) * 86400);
       const current = scanner.result() as ScanResult;
       const thirdArrival = current.journeys.at(-1)?.arrival;
-      if (current.journeys.length >= MAX_JOURNEYS && thirdArrival !== undefined && segmentStart > thirdArrival) break scanLoop;
+      const coveredTransferCounts = new Set(current.journeys.map((journey) => journey.legs.length - 1));
+      const allTransferCountsFound = [1, 2, 3].every((count) => coveredTransferCounts.has(count));
+      if (allTransferCountsFound && thirdArrival !== undefined && segmentStart > thirdArrival) break scanLoop;
 
       diagnostics.windowsScanned++;
       const firstOffset = Math.max(0, Math.floor(segmentStart / 86400) - 1);
