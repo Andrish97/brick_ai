@@ -1,4 +1,5 @@
 import { createHmac, createHash } from "node:crypto";
+import { departureOnlyReply } from "./rail-answer.ts";
 
 // Globalny w środowisku Supabase Edge Functions (Deno Deploy) — pozwala kontynuować
 // pracę w tle po zwróceniu odpowiedzi HTTP. Brak w standardowych typach Deno.
@@ -671,6 +672,12 @@ async function formatRailAnswer(
   fallback: () => string,
 ): Promise<string> {
   if (toolResult.error) return pkpErrorMessage(toolResult);
+  if (name === "plan_train_journey") {
+    const question = [...contents].reverse().find((content) => content.role === "user")?.parts
+      .map((part) => typeof part.text === "string" ? part.text : "").join(" ") ?? "";
+    const departureReply = departureOnlyReply(question, toolResult);
+    if (departureReply) return departureReply;
+  }
   const callPart = functionCallPart ?? { functionCall: { name, args } };
   const formatContents: GeminiContent[] = [
     ...contents,

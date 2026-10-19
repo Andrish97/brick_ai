@@ -9,12 +9,14 @@ const expectRoute = process.env.EXPECT_ROUTE === "true";
 const expectedLegs = (process.env.EXPECTED_LEGS || "any").trim();
 const expectedVariants = Number(process.env.EXPECTED_VARIANTS || 0);
 const expectedText = (process.env.EXPECTED_TEXT || "").trim();
+const expectedIntent = (process.env.EXPECTED_INTENT || "any").trim();
 const minTransferMinutes = Number(process.env.RAIL_MIN_TRANSFER_MINUTES || 30);
 const maxTransferMinutes = Number(process.env.RAIL_MAX_TRANSFER_MINUTES || 150);
 const originWindowHours = Number(process.env.RAIL_ORIGIN_WINDOW_HOURS || 4);
 const verifyLive = process.env.VERIFY_LIVE !== "false";
 
 if (![1, 3, 4].includes(grantedParts)) throw new Error("REPLY_PARTS musi wynosić 1, 3 albo 4.");
+if (!["any", "departure_only", "journey", "transfer"].includes(expectedIntent)) throw new Error("EXPECTED_INTENT musi wynosić any, departure_only, journey albo transfer.");
 if (!["any", "local"].includes(expectedSource)) throw new Error("EXPECTED_SOURCE musi wynosić any albo local.");
 if (!["any", "one", "multiple", "two_transfers", "three_transfers"].includes(expectedLegs)) throw new Error("EXPECTED_LEGS musi wynosić any, one, multiple, two_transfers albo three_transfers.");
 if (!Number.isInteger(expectedVariants) || expectedVariants < 0 || expectedVariants > 3) throw new Error("EXPECTED_VARIANTS musi wynosić 0–3.");
@@ -82,6 +84,27 @@ if (routeFound) {
 if (expectedVariants && variantCount < expectedVariants) throw new Error(`Oczekiwano co najmniej ${expectedVariants} wariantów, zwrócono ${variantCount}.`);
 if (typeof result.reply !== "string" || !result.reply.trim()) throw new Error("Brak tekstowej odpowiedzi asystenta.");
 const normalize = (text) => text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase("pl");
+if (expectedIntent === "departure_only") {
+  const firstLeg = journey.result.legs?.[0];
+  const expectedReply = firstLeg && `${firstLeg.from} ${firstLeg.departure}`;
+  if (!expectedReply || normalize(result.reply) !== normalize(expectedReply)) {
+    throw new Error(`Odpowiedź o samym odjeździe powinna brzmieć "${expectedReply}". Odpowiedź: ${result.reply}`);
+  }
+}
+if (["journey", "transfer"].includes(expectedIntent)) {
+  const legs = journey.result.journeys?.[0]?.legs || journey.result.legs || [];
+  if (legs.length < 2) throw new Error(`Test ${expectedIntent} wymaga trasy z przesiadką; otrzymano ${legs.length} odcinków.`);
+  const transferIndices = expectedIntent === "transfer" ? [0] : legs.slice(0, -1).map((_, index) => index);
+  for (const index of transferIndices) {
+    const previous = legs[index];
+    const next = legs[index + 1];
+    for (const detail of [previous.arrival, previous.to, next.departure]) {
+      if (!normalize(result.reply).includes(normalize(String(detail)))) {
+        throw new Error(`Odpowiedź ${expectedIntent} pomija element przesiadki "${detail}". Odpowiedź: ${result.reply}`);
+      }
+    }
+  }
+}
 if (expectedText && !normalize(result.reply).includes(normalize(expectedText))) {
   throw new Error(`Odpowiedź nie zawiera oczekiwanego tekstu "${expectedText}". Odpowiedź: ${result.reply}`);
 }

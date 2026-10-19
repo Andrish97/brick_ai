@@ -100,8 +100,10 @@ on:
       - "supabase/functions/assistant-tools/rail-settings.ts"
       - "supabase/functions/assistant-tools/rail-stations.ts"
       - "supabase/functions/assistant-tools/index.ts"
+      - "supabase/functions/zadarma-sms-webhook/**"
       - "scripts/sync-rail-gtfs.mjs"
       - "scripts/test-rail-journey.mjs"
+      - "tests/rail-answer.test.ts"
       - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
       - "supabase/migrations/20240144000000_rail_connections_smaller_batches.sql"
       - "supabase/migrations/20240145000000_rail_connections_replace_in_place.sql"
@@ -129,6 +131,9 @@ jobs:
     steps:
       - name: Pobierz repozytorium
         uses: actions/checkout@v4
+
+      - name: Test jednostkowy formatu odpowiedzi
+        run: npx deno test tests/rail-answer.test.ts tests/rail-route-search.test.ts
 
       - name: Poczekaj na wdrożenie zmian funkcji i bazy
         if: ${{ github.event_name == 'push' }}
@@ -235,4 +240,14 @@ jobs:
           RAIL_MAX_TRANSFER_MINUTES: ${{ steps.rail_search_settings.outputs.max_transfer }}
           RAIL_ORIGIN_WINDOW_HOURS: ${{ steps.rail_search_settings.outputs.origin_window }}
           VERIFY_LIVE: ${{ (github.event_name == 'push' && 'false') || (inputs.verify_live == true && 'true') || 'false' }}
-        run: node scripts/test-rail-journey.mjs
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            export FROM_STATION="Kłodzko Miasto" TO_STATION="Elbląg" TRAVEL_DATE="jutro" PREFERRED_TIME="rano"
+            export REPLY_PARTS="4" EXPECTED_SOURCE="local" EXPECT_ROUTE="true" EXPECTED_LEGS="multiple" EXPECTED_VARIANTS="1"
+            export VERIFY_LIVE="false"
+            QUESTION="O której odjeżdża pierwszy pociąg z Kłodzka Miasta do Elbląga jutro rano? Podaj tylko godzinę odjazdu." EXPECTED_INTENT="departure_only" node scripts/test-rail-journey.mjs
+            QUESTION="Pokaż całe połączenie pociągiem z Kłodzka Miasta do Elbląga jutro rano, wraz z godzinami przesiadek." EXPECTED_INTENT="journey" node scripts/test-rail-journey.mjs
+            QUESTION="Jak wygląda przesiadka w podróży pociągiem z Kłodzka Miasta do Elbląga jutro rano? Podaj przyjazd na stację i dalszy odjazd." EXPECTED_INTENT="transfer" node scripts/test-rail-journey.mjs
+          else
+            node scripts/test-rail-journey.mjs
+          fi
