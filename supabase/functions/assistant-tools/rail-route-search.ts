@@ -53,7 +53,10 @@ function maxDetourKm(from: RailStationGroup, to: RailStationGroup): number | nul
   const meanLat = (from.lat + to.lat) / 2;
   const dx = (to.lon - from.lon) * 111.0 * Math.cos(meanLat * Math.PI / 180);
   const dy = (to.lat - from.lat) * 111.0;
-  return Math.max(100, Math.hypot(dx, dy) * 1.3 + 20);
+  // Jest to wyłącznie bezpiecznik rozmiaru skanu, nie kryterium jakości trasy.
+  // Przy ciasnym limicie 1.3x odrzucaliśmy prawidłowe korytarze przesiadkowe,
+  // m.in. Tomaszów Mazowiecki–Wrocław–Legnica–Żary.
+  return Math.max(150, Math.hypot(dx, dy) * 1.6 + 30);
 }
 
 async function sbGet<T>(url: string, key: string, path: string): Promise<T[]> {
