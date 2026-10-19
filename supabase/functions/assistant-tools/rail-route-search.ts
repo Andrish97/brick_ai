@@ -156,7 +156,7 @@ export async function runRailJourneySearch(
     from.ids,
     to.ids,
     originWindow,
-    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 48 },
+    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
   );
   let rpcRequests = 0;
 
@@ -189,7 +189,7 @@ export async function runRailJourneySearch(
     const absoluteWindowEnd = Math.min(absoluteStart + WINDOW_SECONDS, originWindowStart + TOTAL_SCAN_SECONDS);
     for (let segmentStart = absoluteStart; segmentStart < absoluteWindowEnd;) {
       const segmentEnd = Math.min(absoluteWindowEnd, (Math.floor(segmentStart / 86400) + 1) * 86400);
-      const current = scanner.result() as ScanResult;
+      const current = scanner.result(segmentStart) as ScanResult;
       // Once the scan has passed the latest arrival among the best options found,
       // no later departure can improve them. Do not keep scanning the whole day
       // just to prove that every possible transfer count exists: that made even a

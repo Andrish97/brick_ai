@@ -157,7 +157,7 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
     }
   }
 
-  function result() {
+  function result(frontierTime) {
     const candidates = [...results.values()]
       .sort((a, b) => a.arrival - b.arrival || a.legs.length - b.legs.length || a.firstDeparture - b.firstDeparture);
     const selected = [];
@@ -189,8 +189,14 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
         direct: journey.legs.length === 1,
         legs: journey.legs,
       }));
-    const reachableStopIds = new Set(origins);
-    for (const stopId of byStop.keys()) {
+    const reachableStopIds = new Set();
+    if (frontierTime === undefined || frontierTime < originWindow.end) {
+      for (const origin of origins) reachableStopIds.add(origin);
+    }
+    for (const [stopId, labels] of byStop) {
+      if (frontierTime !== undefined && !labels.some((label) =>
+        label.arrival <= frontierTime && label.arrival >= frontierTime - cfg.maxTransferSeconds
+      )) continue;
       for (const rawId of idsByStopKey.get(stopId) ?? [stopId]) reachableStopIds.add(rawId);
     }
     return { journeys, reachableStopIds: [...reachableStopIds] };

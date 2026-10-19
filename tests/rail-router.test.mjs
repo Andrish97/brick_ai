@@ -88,6 +88,16 @@ test("skan przyrostowy łączy okna bez ponownego liczenia wcześniejszych poł�
   assert.equal(scanner.result().journeys[0].legs.length, 3);
 });
 
+test("frontier pomija stacje z przeterminowaną przesiadką", () => {
+  const scanner = createConnectionScanner(["A"], ["Z"], window);
+  scanner.addConnections([
+    c("OLD", "A", "B", t(8), t(9)),
+    c("FRESH", "A", "C", t(10), t(10, 30)),
+  ]);
+  const frontier = scanner.result(t(12)).reachableStopIds;
+  assert.deepEqual(frontier, ["C"]);
+});
+
 test("nie przekracza limitu trzech przesiadek", () => {
   const result = findJourneyCandidates([
     c("T1", "A", "B", t(8), t(8, 20)),
