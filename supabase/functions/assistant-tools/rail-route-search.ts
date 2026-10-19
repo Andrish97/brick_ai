@@ -11,6 +11,12 @@ type Connection = {
   to_stop_id: string;
   dep_seconds: number;
   arr_seconds: number;
+  from_station_name?: string | null;
+  from_lat?: number | string | null;
+  from_lon?: number | string | null;
+  to_station_name?: string | null;
+  to_lat?: number | string | null;
+  to_lon?: number | string | null;
   service_day_offset?: number;
   trip_instance_id?: string;
 };

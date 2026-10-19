@@ -44,6 +44,18 @@ test("akceptuje przesiadkę od 30 minut do 2,5 godziny", () => {
   assert.equal(result[0].legs.length, 2);
 });
 
+test("łączy identyfikatory peronów tej samej stacji przy przesiadce", () => {
+  const result = findJourneyCandidates([
+    { ...c("ŁKA 21220", "T", "K-ŁKA", t(15, 22), t(15, 46)), to_station_name: "Koluszki", to_lat: 51.7434, to_lon: 19.8184 },
+    { ...c("IC 1644", "K-IC", "L", t(16, 17), t(20, 3)), from_station_name: "Koluszki", from_lat: 51.7434, from_lon: 19.8184 },
+    c("KD 67103", "L", "Z", t(21, 10), t(22, 20)),
+  ], ["T"], ["Z"], { start: t(15, 22), end: t(19, 22) });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].legs.length, 3);
+  assert.equal(result[0].legs[0].to_stop_id, "K-ŁKA");
+  assert.equal(result[0].legs[1].from_stop_id, "K-IC");
+});
+
 test("ten sam szablon GTFS następnego dnia nie jest kontynuacją wczorajszego pociągu", () => {
   const result = findJourneyCandidates([
     { ...c("DAILY", "A", "B", t(8), t(9)), service_day_offset: 0 },

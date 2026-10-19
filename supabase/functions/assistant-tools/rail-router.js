@@ -21,8 +21,40 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
   const byStop = new Map();
   const aboard = new Map();
   const results = new Map();
+  const stopKeyById = new Map();
+  const idsByStopKey = new Map();
+  const stationGroups = new Map();
   let lastDeparture = -Infinity;
   for (const origin of origins) byStop.set(origin, []);
+
+  function stopKey(stopId, name, lat, lon) {
+    let key = stopKeyById.get(stopId);
+    if (key) return key;
+    const normalizedName = typeof name === "string" ? name.trim().normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase("pl") : "";
+    const latitude = lat === null || lat === undefined ? NaN : Number(lat);
+    const longitude = lon === null || lon === undefined ? NaN : Number(lon);
+    let candidates = stationGroups.get(normalizedName) ?? [];
+    if (normalizedName && Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      const existing = candidates.find((group) => {
+        const meanLat = (latitude + group.lat) / 2;
+        return Math.hypot(
+          (longitude - group.lon) * 111 * Math.cos(meanLat * Math.PI / 180),
+          (latitude - group.lat) * 111,
+        ) <= 0.25;
+      });
+      if (existing) key = existing.key;
+      else {
+        key = stopId;
+        candidates = [...candidates, { key, lat: latitude, lon: longitude }];
+        stationGroups.set(normalizedName, candidates);
+      }
+    } else key = stopId;
+    stopKeyById.set(stopId, key);
+    const ids = idsByStopKey.get(key) ?? new Set();
+    ids.add(stopId);
+    idsByStopKey.set(key, ids);
+    return key;
+  }
 
   const keyFor = (label) => `${label.firstDeparture}|${label.tripIds.join(",")}`;
   const sortLabels = (labels) => labels.sort((a, b) =>
@@ -58,6 +90,8 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
       lastDeparture = connection.dep_seconds;
       const from = connection.from_stop_id;
       const to = connection.to_stop_id;
+      const fromKey = stopKey(from, connection.from_station_name, connection.from_lat, connection.from_lon);
+      const toKey = stopKey(to, connection.to_station_name, connection.to_lat, connection.to_lon);
       const trip = connection.trip_id;
       // GTFS trip IDs identify a template and repeat on every active service day.
       // Keep each day's physical train instance separate in scans spanning midnight.
@@ -73,10 +107,10 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
         });
       }
 
-      const throughAtStop = aboard.get(tripInstance)?.get(from) ?? [];
+      const throughAtStop = aboard.get(tripInstance)?.get(fromKey) ?? [];
       boardings.push(...throughAtStop);
 
-      const transfersAtStop = byStop.get(from) ?? [];
+      const transfersAtStop = byStop.get(fromKey) ?? [];
       for (const label of transfersAtStop) {
         if (label.tripIds.at(-1) === tripInstance) continue;
         // The origin boarding is not a transfer, so N transfers permit N+1 trains.
@@ -89,8 +123,9 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
         const continuing = previous.tripIds.at(-1) === tripInstance;
         const legs = previous.legs.map((leg) => ({ ...leg }));
         const currentLeg = legs.at(-1);
-        if (continuing && currentLeg?.to_stop_id === from) {
+        if (continuing && currentLeg?.to_stop_key === fromKey) {
           currentLeg.to_stop_id = to;
+          currentLeg.to_stop_key = toKey;
           currentLeg.arrival = connection.arr_seconds;
         } else {
           legs.push({
@@ -98,6 +133,8 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
             trip_instance_id: tripInstance,
             from_stop_id: from,
             to_stop_id: to,
+            from_stop_key: fromKey,
+            to_stop_key: toKey,
             departure: connection.dep_seconds,
             arrival: connection.arr_seconds,
             train: connection.train ?? connection.short_name ?? "?",
@@ -112,9 +149,9 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
           legs,
         };
         const byTrip = aboard.get(tripInstance) ?? new Map();
-        keepLabel(byTrip, to, next);
+        keepLabel(byTrip, toKey, next);
         aboard.set(tripInstance, byTrip);
-        keepLabel(byStop, to, next);
+        keepLabel(byStop, toKey, next);
         if (destinations.has(to)) saveResult(next);
       }
     }
@@ -152,13 +189,17 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
         direct: journey.legs.length === 1,
         legs: journey.legs,
       }));
-    return { journeys, reachableStopIds: [...byStop.keys()] };
+    const reachableStopIds = new Set(origins);
+    for (const stopId of byStop.keys()) {
+      for (const rawId of idsByStopKey.get(stopId) ?? [stopId]) reachableStopIds.add(rawId);
+    }
+    return { journeys, reachableStopIds: [...reachableStopIds] };
   }
 
   function inspectStops(stopIds) {
     return stopIds.map((stopId) => ({
       stopId,
-      labels: (byStop.get(stopId) ?? []).map((label) => ({
+      labels: (byStop.get(stopKeyById.get(stopId) ?? stopId) ?? []).map((label) => ({
         arrival: label.arrival,
         firstDeparture: label.firstDeparture,
         trainCount: label.tripIds.length,

@@ -63,14 +63,15 @@ Deno.test("ładuje kolejne pociągi po stacjach osiągniętych w poprzednim okni
   const originalFetch = globalThis.fetch;
   const stops = [
     { id: "A", name: "Tomaszów Mazowiecki", lat: 51.5, lon: 20 },
-    { id: "B", name: "Koluszki", lat: 51.7, lon: 19.8 },
+    { id: "B-in", name: "Koluszki", lat: 51.7434, lon: 19.8184 },
+    { id: "B-out", name: "Koluszki", lat: 51.7434, lon: 19.8184 },
     { id: "C", name: "Legnica", lat: 51.2, lon: 16.2 },
     { id: "D", name: "Żary", lat: 51.6, lon: 15.1 },
   ];
   const trips = ["ŁKA 21220", "IC 1644 ŁUŻYCE", "KD 67103 KD SPRINTER KEPLER"];
   const connections = [
-    { trip_id: "trip-1", service_id: "service-1", from_stop_id: "A", to_stop_id: "B", dep_seconds: hour(15) + 22 * 60, arr_seconds: hour(15) + 46 * 60 },
-    { trip_id: "trip-2", service_id: "service-1", from_stop_id: "B", to_stop_id: "C", dep_seconds: hour(16) + 17 * 60, arr_seconds: hour(20) + 3 * 60 },
+    { trip_id: "trip-1", service_id: "service-1", from_stop_id: "A", to_stop_id: "B-in", dep_seconds: hour(15) + 22 * 60, arr_seconds: hour(15) + 46 * 60 },
+    { trip_id: "trip-2", service_id: "service-1", from_stop_id: "B-out", to_stop_id: "C", dep_seconds: hour(16) + 17 * 60, arr_seconds: hour(20) + 3 * 60 },
     { trip_id: "trip-3", service_id: "service-1", from_stop_id: "C", to_stop_id: "D", dep_seconds: hour(21) + 10 * 60, arr_seconds: hour(22) + 20 * 60 },
   ];
   let rpcCalls = 0;
@@ -82,16 +83,28 @@ Deno.test("ładuje kolejne pociągi po stacjach osiągniętych w poprzednim okni
     if (table === "rail_connections_in_window_compact") {
       rpcCalls++;
       const args = JSON.parse(String(init?.body));
+      const reached = stops.filter((stop) => args.p_from_stop_ids?.includes(stop.id));
+      const aliases = new Set(stops.filter((stop) => reached.some((station) => station.name === stop.name &&
+        Math.hypot((station.lat - stop.lat) * 111, (station.lon - stop.lon) * 111) <= 0.25
+      )).map((stop) => stop.id));
       const candidates = new Set(connections.filter((row) =>
         args.p_service_ids.includes(row.service_id) &&
         row.dep_seconds >= args.p_dep_from && row.dep_seconds < args.p_dep_to &&
-        (args.p_from_stop_ids === null || args.p_from_stop_ids.includes(row.from_stop_id))
+        (args.p_from_stop_ids === null || aliases.has(row.from_stop_id))
       ).map((row) => row.trip_id));
       const rows = connections.filter((row) =>
         args.p_service_ids.includes(row.service_id) &&
         row.dep_seconds >= args.p_dep_from && row.dep_seconds < args.p_dep_to &&
         (args.p_from_stop_ids === null || candidates.has(row.trip_id))
-      );
+      ).map((row) => {
+        const fromStop = stops.find((stop) => stop.id === row.from_stop_id)!;
+        const toStop = stops.find((stop) => stop.id === row.to_stop_id)!;
+        return {
+          ...row,
+          from_station_name: fromStop.name, from_lat: fromStop.lat, from_lon: fromStop.lon,
+          to_station_name: toStop.name, to_lat: toStop.lat, to_lon: toStop.lon,
+        };
+      });
       return Response.json(rows);
     }
     if (table === "rail_stops") return Response.json(stops);

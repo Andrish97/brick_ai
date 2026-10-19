@@ -107,6 +107,7 @@ on:
       - "supabase/migrations/20240151000000_rail_connections_geo_window.sql"
       - "supabase/migrations/20240152000000_rail_connections_trip_window.sql"
       - "supabase/migrations/20240153000000_rail_connections_compact_rpc.sql"
+      - "supabase/migrations/20240154000000_rail_connection_station_aliases.sql"
 
 permissions:
   actions: read
