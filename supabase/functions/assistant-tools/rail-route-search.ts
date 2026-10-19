@@ -32,6 +32,7 @@ export type RouteSearchDiagnostics = {
   originHasCoordinates?: boolean;
   destinationHasCoordinates?: boolean;
   reachedStationNames?: string[];
+  reachedStopIds?: string[];
 };
 
 const WINDOW_SECONDS = 4 * 3600;
@@ -243,6 +244,7 @@ export async function runRailJourneySearch(
   if (fetchFailed || diagnostics.connectionsFetchError) return { result: null, diagnostics };
   if (!finalScan.journeys.length) {
     const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 300);
+    diagnostics.reachedStopIds = reachedIds;
     if (reachedIds.length) {
       try {
         const rows = await sbGet<{ id: string; name: string }>(url, key, `rail_stops?id=in.(${inList(reachedIds)})&select=id,name`);
