@@ -179,8 +179,8 @@ jobs:
             select d.service_id from public.rail_calendar_dates d, params p
             where d.date = p.travel_date and d.exception_type = 2
           )
-          select tr.short_name as train, f.id as from_id, f.name as from_station, c.dep_seconds,
-                 t.id as to_id, t.name as to_station, c.arr_seconds
+          select tr.short_name as train, f.id as from_id, f.name as from_station, f.lat as from_lat, f.lon as from_lon, c.dep_seconds,
+                 t.id as to_id, t.name as to_station, t.lat as to_lat, t.lon as to_lon, c.arr_seconds
           from public.rail_connections c
           join public.rail_stops f on f.id = c.from_stop_id
           join public.rail_stops t on t.id = c.to_stop_id
