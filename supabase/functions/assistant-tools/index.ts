@@ -1,5 +1,6 @@
 import { resolveStationGroupSmart, hasFreshLocalData } from "./rail-stations.ts";
 import { runRailJourneySearch, type JourneySearchResult } from "./rail-route-search.ts";
+import { loadRailSearchSettings } from "./rail-settings.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -912,14 +913,13 @@ async function verifyJourneysLive(
 // przy JAKIMKOLWIEK niepowodzeniu (brak świeżych danych, stacja nierozpoznana/
 // niejednoznaczna lokalnie, skan nie znajduje trasy, rozbieżność z żywym API dla bliskiej
 // daty, dowolny wyjątek), co dispatcher wyżej zwraca jako brak znalezionej trasy.
-// Okno startowe (typowo 4h) wyliczone z preferred_time (jeśli AI je podało), inaczej
+// Okno startowe wyliczone z preferred_time (jeśli AI je podało), inaczej
 // bieżąca godzina dla dziś, albo sensowny poranek (8:00-12:00) dla przyszłej daty —
 // zastępuje dawne sztywne "start=0 dla nie-dziś" (dawało bezsensowny origin window od
 // północy zamiast realnej pory podróży).
-const ORIGIN_WINDOW_SECONDS = 4 * 3600;
 const DEFAULT_FUTURE_MORNING_HOUR = 8;
 
-function computeOriginWindow(dateArg: string, preferredTimeArg: string): { date: string; start: number; end: number } {
+function computeOriginWindow(dateArg: string, preferredTimeArg: string, windowHours: number): { date: string; start: number; end: number } {
   const date = dateArg || todayDateStr();
   const isToday = date === todayDateStr();
   let startSeconds: number;
@@ -931,7 +931,7 @@ function computeOriginWindow(dateArg: string, preferredTimeArg: string): { date:
   } else {
     startSeconds = DEFAULT_FUTURE_MORNING_HOUR * 3600;
   }
-  return { date, start: startSeconds, end: startSeconds + ORIGIN_WINDOW_SECONDS };
+  return { date, start: startSeconds, end: startSeconds + windowHours * 3600 };
 }
 
 async function tryPlanTrainJourneyLocal(
@@ -981,9 +981,14 @@ async function tryPlanTrainJourneyLocal(
       return { result: null, failure: { reason: "station_not_resolved_locally", from: fromResolved.query, to: toResolved.query } };
     }
 
-    const { date, start: originWindowStart, end: originWindowEnd } = computeOriginWindow(dateArg, preferredTimeArg);
+    const railSettings = await loadRailSearchSettings(url, key);
+    const { date, start: originWindowStart, end: originWindowEnd } = computeOriginWindow(
+      dateArg, preferredTimeArg, railSettings.originWindowHours,
+    );
 
-    const { result, diagnostics } = await runRailJourneySearch(url, key, fromLookup.station, toLookup.station, date, originWindowStart, originWindowEnd);
+    const { result, diagnostics } = await runRailJourneySearch(
+      url, key, fromLookup.station, toLookup.station, date, originWindowStart, originWindowEnd, railSettings,
+    );
     if (!result) {
       log("rail_local_skip", {
         reason: "csa_found_nothing",

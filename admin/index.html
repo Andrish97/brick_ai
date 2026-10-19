@@ -3069,6 +3069,19 @@ async function saveCustomPrompt() {
 const SETTING_LABELS = {
   system_prompt_default:  'Prompt systemowy (własny)',
   max_reply_sms_parts:    'Limit SMS-ów odpowiedzi rozszerzonej (1, 3 lub 4)',
+  rail_min_transfer_minutes: 'Minimalny czas przesiadki',
+  rail_max_transfer_minutes: 'Maksymalne oczekiwanie na przesiadkę',
+  rail_origin_window_hours: 'Okno odjazdów z pierwszej stacji',
+};
+const SETTING_HELP = {
+  rail_min_transfer_minutes: 'Co najmniej 30 minut; wybierz wartość uwzględniającą przejście między peronami.',
+  rail_max_transfer_minutes: 'Najdłuższa przerwa między pociągami brana pod uwagę przy wyszukiwaniu.',
+  rail_origin_window_hours: 'Zakres odjazdów z pierwszej stacji liczony od podanej godziny.',
+};
+const SETTING_OPTIONS = {
+  rail_min_transfer_minutes: [30, 45, 60],
+  rail_max_transfer_minutes: [90, 120, 150, 180],
+  rail_origin_window_hours: [1, 2, 3, 4],
 };
 // Keys hidden from Settings UI (managed elsewhere).
 // sms_count: zamrożony punkt odniesienia sprzed monitoringu salda — edycja ręczna
@@ -3085,10 +3098,14 @@ async function renderSettings() {
 
   const rowsHtml = (rows || []).filter(r => !SETTING_HIDDEN.has(r.key)).map(r => {
     const label = SETTING_LABELS[r.key] || r.key;
+    const allowed = SETTING_OPTIONS[r.key];
+    const control = allowed
+      ? `<select id="setting-${escHtml(r.key)}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px">${allowed.map(value => `<option value="${value}" ${String(value) === String(r.value) ? 'selected' : ''}>${value}${r.key.endsWith('_hours') ? ' godz.' : ' min'}</option>`).join('')}</select>`
+      : `<input type="text" value="${escHtml(r.value)}" id="setting-${escHtml(r.key)}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px" />`;
     return `
       <tr>
-        <td style="white-space:nowrap">${escHtml(label)}<br><code style="font-size:10px;color:var(--muted)">${escHtml(r.key)}</code></td>
-        <td><input type="text" value="${escHtml(r.value)}" id="setting-${escHtml(r.key)}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px" /></td>
+        <td style="white-space:nowrap">${escHtml(label)}<br><code style="font-size:10px;color:var(--muted)">${escHtml(r.key)}</code>${SETTING_HELP[r.key] ? `<br><small style="color:var(--muted)">${escHtml(SETTING_HELP[r.key])}</small>` : ''}</td>
+        <td>${control}</td>
         <td><button class="btn btn-primary btn-sm" onclick="saveSetting('${escHtml(r.key)}')">Zapisz</button></td>
       </tr>
     `;
@@ -3110,6 +3127,10 @@ async function renderSettings() {
 
 async function saveSetting(key) {
   const value = document.getElementById(`setting-${key}`).value.trim();
+  if (SETTING_OPTIONS[key] && !SETTING_OPTIONS[key].includes(Number(value))) {
+    await alertModal('Wybierz jedną z dozwolonych wartości.');
+    return;
+  }
   const { error } = await sb.from('settings').update({ value, updated_at: new Date().toISOString() }).eq('key', key);
   if (error) await alertModal('Błąd: ' + error.message);
   else renderSettings();

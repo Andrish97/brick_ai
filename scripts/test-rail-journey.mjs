@@ -9,17 +9,23 @@ const expectRoute = process.env.EXPECT_ROUTE === "true";
 const expectedLegs = (process.env.EXPECTED_LEGS || "any").trim();
 const expectedVariants = Number(process.env.EXPECTED_VARIANTS || 0);
 const expectedText = (process.env.EXPECTED_TEXT || "").trim();
+const minTransferMinutes = Number(process.env.RAIL_MIN_TRANSFER_MINUTES || 30);
+const maxTransferMinutes = Number(process.env.RAIL_MAX_TRANSFER_MINUTES || 150);
+const originWindowHours = Number(process.env.RAIL_ORIGIN_WINDOW_HOURS || 4);
 const verifyLive = process.env.VERIFY_LIVE !== "false";
 
 if (![1, 3, 4].includes(grantedParts)) throw new Error("REPLY_PARTS musi wynosić 1, 3 albo 4.");
 if (!["any", "local"].includes(expectedSource)) throw new Error("EXPECTED_SOURCE musi wynosić any albo local.");
 if (!["any", "one", "multiple", "two_transfers", "three_transfers"].includes(expectedLegs)) throw new Error("EXPECTED_LEGS musi wynosić any, one, multiple, two_transfers albo three_transfers.");
 if (!Number.isInteger(expectedVariants) || expectedVariants < 0 || expectedVariants > 3) throw new Error("EXPECTED_VARIANTS musi wynosić 0–3.");
+if (![30, 45, 60].includes(minTransferMinutes)) throw new Error("RAIL_MIN_TRANSFER_MINUTES ma nieobsługiwaną wartość.");
+if (![90, 120, 150, 180].includes(maxTransferMinutes) || maxTransferMinutes <= minTransferMinutes) throw new Error("RAIL_MAX_TRANSFER_MINUTES ma nieobsługiwaną wartość.");
+if (![1, 2, 3, 4].includes(originWindowHours)) throw new Error("RAIL_ORIGIN_WINDOW_HOURS ma nieobsługiwaną wartość.");
 
 const supabaseUrl = (process.env.SUPABASE_URL || `https://${projectRef}.supabase.co`).replace(/\/$/, "");
 const internalSecret = required("INTERNAL_SECRET");
 const url = process.env.TEST_ENDPOINT_URL || `${supabaseUrl}/functions/v1/zadarma-sms-webhook?endpoint_test=1`;
-const question = `Jak dojadę pociągiem z ${from} do ${to} ${date} ${time}?`;
+const question = (process.env.QUESTION || `Jak dojadę pociągiem z ${from} do ${to} ${date} ${time}?`).trim();
 const response = await fetch(url, {
   method: "POST",
   headers: { "Content-Type": "application/json", "X-Internal-Secret": internalSecret },
@@ -69,7 +75,7 @@ if (routeFound) {
     ? journey.args.preferred_time.trim()
     : time;
   for (const [index, option] of options.entries()) {
-    const issue = validateJourney(option.legs, requestedTime);
+    const issue = validateJourney(option.legs, requestedTime, minTransferMinutes, maxTransferMinutes, originWindowHours);
     if (issue) throw new Error(`Wariant ${index + 1} ma nieprawidłową chronologię: ${issue}. Argumenty narzędzia: ${JSON.stringify(journey.args)}. Odcinki: ${JSON.stringify(option.legs)}`);
   }
 }
@@ -85,6 +91,7 @@ const summary = [
   "## Test planera kolejowego (bez wysyłki SMS)",
   "",
   `- Trasa: ${from} → ${to}`,
+  `- Pytanie: ${question}`,
   `- Kiedy: ${date} ${time}`,
   `- Ścieżka planera: **${source}**`,
   `- Weryfikacja API PKP: ${verifyLive ? "tylko po znalezieniu trasy lokalnej" : "wyłączona"}`,
@@ -117,7 +124,7 @@ console.log(`Tool result: ${JSON.stringify(journey.result)}`);
 console.log(`Legs: ${JSON.stringify(journey.result?.legs || [])}`);
 console.log(`Reply: ${result.reply}`);
 
-function validateJourney(legs, preferredTime) {
+function validateJourney(legs, preferredTime, minTransferMinutes, maxTransferMinutes, originWindowHours) {
   if (!Array.isArray(legs) || !legs.length) return "brak odcinków";
   const parse = (value) => {
     const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ""));
@@ -133,15 +140,15 @@ function validateJourney(legs, preferredTime) {
     while (arrival <= departure) arrival += 24 * 60;
     if (index > 0) {
       const wait = departure - previousArrival;
-      if (wait < 30 || wait > 150) return `oczekiwanie na przesiadkę wynosi ${wait} min`;
+      if (wait < minTransferMinutes || wait > maxTransferMinutes) return `oczekiwanie na przesiadkę wynosi ${wait} min`;
     }
     if (index === 0) firstDeparture = departure;
     previousArrival = arrival;
   }
   if (legs.length > 4) return `więcej niż trzy przesiadki (${legs.length - 1})`;
   const windowStart = preferredWindowStart(preferredTime);
-  if (windowStart !== null && (firstDeparture < windowStart || firstDeparture >= windowStart + 240)) {
-    return `pierwszy odjazd ${String(legs[0].departure)} poza czterogodzinnym oknem od ${preferredTime}`;
+  if (windowStart !== null && (firstDeparture < windowStart || firstDeparture >= windowStart + originWindowHours * 60)) {
+    return `pierwszy odjazd ${String(legs[0].departure)} poza ${originWindowHours}-godzinnym oknem od ${preferredTime}`;
   }
   return null;
 }

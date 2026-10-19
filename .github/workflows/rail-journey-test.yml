@@ -85,6 +85,10 @@ on:
         description: Opcjonalny tekst, który ma się pojawić w odpowiedzi SMS
         required: false
         type: string
+      question:
+        description: Opcjonalne własne sformułowanie pytania do testu bez wysyłki SMS
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -92,6 +96,8 @@ on:
       - ".github/workflows/rail-journey-test.yml"
       - "supabase/functions/rail-gtfs-sync/index.ts"
       - "supabase/functions/assistant-tools/rail-route-search.ts"
+      - "supabase/functions/assistant-tools/rail-router.js"
+      - "supabase/functions/assistant-tools/rail-settings.ts"
       - "supabase/functions/assistant-tools/rail-stations.ts"
       - "supabase/functions/assistant-tools/index.ts"
       - "scripts/sync-rail-gtfs.mjs"
@@ -108,6 +114,8 @@ on:
       - "supabase/migrations/20240152000000_rail_connections_trip_window.sql"
       - "supabase/migrations/20240153000000_rail_connections_compact_rpc.sql"
       - "supabase/migrations/20240154000000_rail_connection_station_aliases.sql"
+      - "supabase/migrations/20240155000000_rail_search_settings.sql"
+      - "tests/rail-settings.test.ts"
 
 permissions:
   actions: read
@@ -192,6 +200,23 @@ jobs:
           limit 200;
           SQL
 
+      - name: Odczytaj aktywne limity wyszukiwania
+        id: rail_search_settings
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          values=$(psql "$SUPABASE_DB_URL" -At -F '|' -v ON_ERROR_STOP=1 -c "
+            select
+              coalesce(max(value) filter (where key = 'rail_min_transfer_minutes'), '30'),
+              coalesce(max(value) filter (where key = 'rail_max_transfer_minutes'), '150'),
+              coalesce(max(value) filter (where key = 'rail_origin_window_hours'), '4')
+            from public.settings
+          ")
+          IFS='|' read -r min_transfer max_transfer origin_window <<<"$values"
+          echo "min_transfer=$min_transfer" >> "$GITHUB_OUTPUT"
+          echo "max_transfer=$max_transfer" >> "$GITHUB_OUTPUT"
+          echo "origin_window=$origin_window" >> "$GITHUB_OUTPUT"
+
       - name: Uruchom test end-to-end
         env:
           INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
@@ -205,5 +230,9 @@ jobs:
           EXPECTED_LEGS: ${{ github.event_name == 'push' && 'one' || inputs.expected_legs || 'multiple' }}
           EXPECTED_VARIANTS: ${{ github.event_name == 'push' && '1' || inputs.expected_variants || '1' }}
           EXPECTED_TEXT: ${{ inputs.expected_text }}
+          QUESTION: ${{ inputs.question }}
+          RAIL_MIN_TRANSFER_MINUTES: ${{ steps.rail_search_settings.outputs.min_transfer }}
+          RAIL_MAX_TRANSFER_MINUTES: ${{ steps.rail_search_settings.outputs.max_transfer }}
+          RAIL_ORIGIN_WINDOW_HOURS: ${{ steps.rail_search_settings.outputs.origin_window }}
           VERIFY_LIVE: ${{ (github.event_name == 'push' && 'false') || (inputs.verify_live == true && 'true') || 'false' }}
         run: node scripts/test-rail-journey.mjs

@@ -2,6 +2,7 @@
 // synthetic GTFS connections; this module is responsible only for loading active
 // service-day connections and resolving display names.
 import { createConnectionScanner } from "./rail-router.js";
+import { RAIL_SEARCH_DEFAULTS, type RailSearchSettings } from "./rail-settings.ts";
 
 type RailStationGroup = { name: string; ids: string[]; lat: number | null; lon: number | null };
 type Connection = {
@@ -50,8 +51,6 @@ const WINDOW_STEP_SECONDS = WINDOW_SECONDS;
 const TOTAL_SCAN_SECONDS = 20 * 3600;
 const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
 const MAX_RPC_REQUESTS = 80;
-const MIN_TRANSFER_SECONDS = 30 * 60;
-const MAX_TRANSFER_SECONDS = 2.5 * 3600;
 const MAX_JOURNEYS = 4;
 const IN_LIST_LIMIT = 500;
 
@@ -116,7 +115,7 @@ function secondsToHHMM(seconds: number): string {
 }
 
 /**
- * Fetch and process each four-hour connection window once. The router retains its CSA
+ * Fetch and process each connection window once. The router retains its CSA
  * state between windows, so adding a longer search horizon does not repeatedly rescan
  * the entire timetable.
  */
@@ -128,6 +127,7 @@ export async function runRailJourneySearch(
   date: string,
   originWindowStart: number,
   originWindowEnd: number,
+  settings: RailSearchSettings = RAIL_SEARCH_DEFAULTS,
 ): Promise<{ result: JourneySearchResult | null; diagnostics: RouteSearchDiagnostics }> {
   const diagnostics: RouteSearchDiagnostics = {
     activeServiceCount: 0,
@@ -154,7 +154,13 @@ export async function runRailJourneySearch(
     from.ids,
     to.ids,
     originWindow,
-    { minTransferSeconds: MIN_TRANSFER_SECONDS, maxTransferSeconds: MAX_TRANSFER_SECONDS, maxTransfers: 3, maxJourneys: MAX_JOURNEYS, maxLabelsPerStop: 12 },
+    {
+      minTransferSeconds: settings.minTransferMinutes * 60,
+      maxTransferSeconds: settings.maxTransferMinutes * 60,
+      maxTransfers: 3,
+      maxJourneys: MAX_JOURNEYS,
+      maxLabelsPerStop: 12,
+    },
   );
   let rpcRequests = 0;
 
