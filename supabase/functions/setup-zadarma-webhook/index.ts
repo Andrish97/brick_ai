@@ -51,7 +51,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const webhookUrl = `${supabaseUrl}/functions/v1/zadarma-sms-webhook`;
+  const webhookUrl = `${supabaseUrl}/functions/v1/zadarma-sms-webhook?sms_token=${encodeURIComponent(secret)}`;
 
   const getResult = await zadarmaReq("GET", "/v1/pbx/webhooks/", {});
   const current = getResult.body as { url?: string; hooks?: { sms?: string } };
@@ -67,7 +67,10 @@ Deno.serve(async (req: Request) => {
     ? { status: 200, body: { status: "skipped", message: "SMS hooks already enabled" } }
     : await zadarmaReq("POST", "/v1/pbx/webhooks/hooks/", { sms: "true" });
 
-  return new Response(JSON.stringify({ webhookUrl, urlResult, hooksResult }, null, 2), {
+  const safeWebhookUrl = `${supabaseUrl}/functions/v1/zadarma-sms-webhook?sms_token=***`;
+  const safeResultsJson = JSON.stringify({ webhookUrl: safeWebhookUrl, urlResult, hooksResult })
+    .replaceAll(secret, "***").replaceAll(encodeURIComponent(secret), "***");
+  return new Response(JSON.stringify(JSON.parse(safeResultsJson), null, 2), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
