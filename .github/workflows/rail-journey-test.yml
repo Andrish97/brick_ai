@@ -180,18 +180,13 @@ jobs:
             where d.date = p.travel_date and d.exception_type = 2
           )
           select tr.short_name as train, f.name as from_station, c.dep_seconds,
-                 t.name as to_station, c.arr_seconds, c.service_id in (select service_id from active) as active
+                 t.name as to_station, c.arr_seconds
           from public.rail_connections c
           join public.rail_stops f on f.id = c.from_stop_id
           join public.rail_stops t on t.id = c.to_stop_id
           join public.rail_trips tr on tr.id = c.trip_id
-          where c.dep_seconds between 14*3600 and 23*3600
-            and ((f.name ilike '%Tomaszów Mazowiecki%' and c.dep_seconds between 15*3600 and 16*3600)
-              or (f.name ilike '%Koluszki%' and c.dep_seconds between 16*3600 and 17*3600)
-              or (f.name ilike '%Legnica%' and c.dep_seconds between 20*3600 and 22*3600)
-              or (t.name ilike '%Koluszki%' and c.arr_seconds between 15*3600 and 17*3600)
-              or (t.name ilike '%Legnica%' and c.arr_seconds between 19*3600 and 21*3600)
-              or (t.name ilike '%Żary%' and c.arr_seconds between 21*3600 and 23*3600))
+          where c.service_id in (select service_id from active)
+            and (tr.short_name ilike '%21220%' or tr.short_name ilike '%1644%' or tr.short_name ilike '%67103%')
           order by c.dep_seconds
           limit 200;
           SQL
@@ -209,5 +204,5 @@ jobs:
           EXPECTED_LEGS: ${{ github.event_name == 'push' && 'one' || inputs.expected_legs || 'multiple' }}
           EXPECTED_VARIANTS: ${{ github.event_name == 'push' && '1' || inputs.expected_variants || '1' }}
           EXPECTED_TEXT: ${{ inputs.expected_text }}
-          VERIFY_LIVE: ${{ github.event_name == 'push' && 'false' || inputs.verify_live || 'true' }}
+          VERIFY_LIVE: ${{ (github.event_name == 'push' && 'false') || (inputs.verify_live == true && 'true') || 'false' }}
         run: node scripts/test-rail-journey.mjs

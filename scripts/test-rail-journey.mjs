@@ -49,7 +49,7 @@ const routeFound = Array.isArray(journey.result?.legs) && journey.result.legs.le
 const legCount = Array.isArray(journey.result?.legs) ? journey.result.legs.length : 0;
 const variantCount = Array.isArray(journey.result?.journeys) ? journey.result.journeys.length : (routeFound ? 1 : 0);
 const liveVerification = journey.result?.live_verification;
-if (verifyLive && source === "local" && !liveVerification) {
+if (verifyLive && routeFound && source === "local" && !liveVerification) {
   throw new Error(`Lokalny wynik nie zawiera potwierdzenia przez PKP /schedules. Wynik: ${JSON.stringify(journey.result)}`);
 }
 if (expectRoute && !routeFound) {
