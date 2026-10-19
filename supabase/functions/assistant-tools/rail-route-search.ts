@@ -190,10 +190,12 @@ export async function runRailJourneySearch(
     for (let segmentStart = absoluteStart; segmentStart < absoluteWindowEnd;) {
       const segmentEnd = Math.min(absoluteWindowEnd, (Math.floor(segmentStart / 86400) + 1) * 86400);
       const current = scanner.result() as ScanResult;
-      const thirdArrival = current.journeys.at(-1)?.arrival;
-      const coveredTransferCounts = new Set(current.journeys.map((journey) => journey.legs.length - 1));
-      const allTransferCountsFound = [1, 2, 3].every((count) => coveredTransferCounts.has(count));
-      if (allTransferCountsFound && thirdArrival !== undefined && segmentStart > thirdArrival) break scanLoop;
+      // Once the scan has passed the latest arrival among the best options found,
+      // no later departure can improve them. Do not keep scanning the whole day
+      // just to prove that every possible transfer count exists: that made even a
+      // valid two-change route exhaust Edge Function resources.
+      const latestSelectedArrival = current.journeys.at(-1)?.arrival;
+      if (latestSelectedArrival !== undefined && segmentStart > latestSelectedArrival) break scanLoop;
 
       diagnostics.windowsScanned++;
       const firstOffset = Math.max(0, Math.floor(segmentStart / 86400) - 1);
