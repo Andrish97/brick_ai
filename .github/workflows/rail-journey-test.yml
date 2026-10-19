@@ -104,6 +104,7 @@ on:
       - "scripts/sync-rail-gtfs.mjs"
       - "scripts/test-rail-journey.mjs"
       - "tests/rail-answer.test.ts"
+      - "tests/rail-stations.test.ts"
       - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
       - "supabase/migrations/20240144000000_rail_connections_smaller_batches.sql"
       - "supabase/migrations/20240145000000_rail_connections_replace_in_place.sql"
@@ -133,7 +134,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Test jednostkowy formatu odpowiedzi
-        run: npx deno test tests/rail-answer.test.ts tests/rail-route-search.test.ts
+        run: npx deno test tests/rail-answer.test.ts tests/rail-route-search.test.ts tests/rail-stations.test.ts
 
       - name: Poczekaj na wdrożenie zmian funkcji i bazy
         if: ${{ github.event_name == 'push' }}

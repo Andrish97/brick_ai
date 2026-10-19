@@ -117,6 +117,19 @@ export async function resolveStationGroupSmart(
   } catch {
     return { ok: false, body: { error: "local_lookup_failed", query: q } };
   }
+  // Gemini can produce the wrong grammatical form of a station suffix (for example,
+  // "Kłodzko Główny" while GTFS stores "Kłodzko Główne"). Retry that city against
+  // its base name so the normal main-station selection can resolve a real GTFS name.
+  if (!rows.length) {
+    const cityName = q.replace(/\s+(?:główny|główna|główne|glowny|glowna|glowne)$/i, "").trim();
+    if (cityName && cityName !== q) {
+      try {
+        rows = await sbGet<RailStation>(url, key, `rail_stops?name=ilike.*${encodeURIComponent(cityName)}*&select=id,name,lat,lon&limit=200`);
+      } catch {
+        return { ok: false, body: { error: "local_lookup_failed", query: q } };
+      }
+    }
+  }
   if (!rows.length) return { ok: false, body: { error: "station_not_found", query: q } };
 
   const uniqueNames = [...new Set(rows.map((r) => r.name))];

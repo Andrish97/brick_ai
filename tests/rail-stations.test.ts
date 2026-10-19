@@ -1,34 +1,36 @@
-import { hasFreshLocalData } from "../supabase/functions/assistant-tools/rail-stations.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { resolveStationGroupSmart } from "../supabase/functions/assistant-tools/rail-stations.ts";
 
-Deno.test("uznaje codzienną kontrolę niezmienionego feedu za świeżą weryfikację danych", async () => {
+Deno.test("rozwiązuje błędną odmianę sufiksu stacji przez nazwę miasta", async () => {
   const originalFetch = globalThis.fetch;
-  const now = new Date();
-  const recentCheck = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-  const oldImport = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString();
-  globalThis.fetch = (() => Promise.resolve(Response.json([
-    { finished_at: oldImport, feed_checked_at: recentCheck },
-  ]))) as typeof fetch;
-  try {
-    if (!(await hasFreshLocalData("https://supabase.test", "test-key"))) {
-      throw new Error("Niedawna kontrola niezmienionego feedu powinna odświeżyć ważność danych");
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    requests.push(url.toString());
+    if (url.pathname.endsWith("/rail_stops")) {
+      const filter = url.searchParams.get("name") || "";
+      if (filter === "ilike.*Kłodzko Główny*") return Response.json([]);
+      if (filter === "ilike.*Kłodzko*") {
+        return Response.json([
+          { id: "main", name: "Kłodzko Główne", lat: 50.44, lon: 16.65 },
+          { id: "city", name: "Kłodzko Miasto", lat: 50.44, lon: 16.65 },
+        ]);
+      }
     }
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
+    if (url.pathname.endsWith("/rail_station_candidate_stats")) {
+      return Response.json([
+        { stop_id: "main", departure_count: 100 },
+        { stop_id: "city", departure_count: 10 },
+      ]);
+    }
+    throw new Error(`Nieoczekiwane żądanie: ${url}`);
+  }) as typeof fetch;
 
-Deno.test("nie uznaje świeżego importu za świeży po zbyt dawnej kontroli feedu", async () => {
-  const originalFetch = globalThis.fetch;
-  const now = new Date();
-  const recentImport = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-  const oldCheck = new Date(now.getTime() - 72 * 60 * 60 * 1000).toISOString();
-  globalThis.fetch = (() => Promise.resolve(Response.json([
-    { finished_at: recentImport, feed_checked_at: oldCheck },
-  ]))) as typeof fetch;
   try {
-    if (await hasFreshLocalData("https://supabase.test", "test-key")) {
-      throw new Error("Stara kontrola feedu nie powinna uznać danych za świeże");
-    }
+    const result = await resolveStationGroupSmart("https://supabase.test", "key", undefined, "Kłodzko Główny");
+    if (!result.ok) throw new Error(`Stacja nie została rozpoznana: ${JSON.stringify(result.body)}`);
+    assertEquals(result.station.name, "Kłodzko Główne");
+    assertEquals(requests.length, 3);
   } finally {
     globalThis.fetch = originalFetch;
   }
