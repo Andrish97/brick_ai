@@ -93,9 +93,10 @@ test("frontier pomija stacje z przeterminowaną przesiadką", () => {
   scanner.addConnections([
     c("OLD", "A", "B", t(8), t(9)),
     c("FRESH", "A", "C", t(10), t(10, 30)),
+    c("FUTURE", "A", "D", t(11, 50), t(12, 20)),
   ]);
   const frontier = scanner.result(t(12)).reachableStopIds;
-  assert.deepEqual(frontier, ["C"]);
+  assert.deepEqual(frontier, ["C", "D"]);
 });
 
 test("nie przekracza limitu trzech przesiadek", () => {

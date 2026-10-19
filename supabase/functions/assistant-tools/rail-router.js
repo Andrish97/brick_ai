@@ -195,7 +195,10 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
     }
     for (const [stopId, labels] of byStop) {
       if (frontierTime !== undefined && !labels.some((label) =>
-        label.arrival <= frontierTime && label.arrival >= frontierTime - cfg.maxTransferSeconds
+        // Connections fetched in the previous time window may arrive later than
+        // its end. Keep those future arrivals in the frontier so the next window
+        // can fetch onward trains from that station.
+        label.arrival >= frontierTime - cfg.maxTransferSeconds
       )) continue;
       for (const rawId of idsByStopKey.get(stopId) ?? [stopId]) reachableStopIds.add(rawId);
     }
