@@ -155,7 +155,19 @@ export function createConnectionScanner(originStopIds, destinationStopIds, origi
     return { journeys, reachableStopIds: [...byStop.keys()] };
   }
 
-  return { addConnections, result };
+  function inspectStops(stopIds) {
+    return stopIds.map((stopId) => ({
+      stopId,
+      labels: (byStop.get(stopId) ?? []).map((label) => ({
+        arrival: label.arrival,
+        firstDeparture: label.firstDeparture,
+        trainCount: label.tripIds.length,
+        lastTrip: label.tripIds.at(-1) ?? null,
+      })),
+    }));
+  }
+
+  return { addConnections, result, inspectStops };
 }
 
 export function scanConnections(connections, originStopIds, destinationStopIds, originWindow, options = {}) {

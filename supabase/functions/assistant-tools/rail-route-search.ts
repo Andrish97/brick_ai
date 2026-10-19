@@ -33,6 +33,7 @@ export type RouteSearchDiagnostics = {
   destinationHasCoordinates?: boolean;
   reachedStationNames?: string[];
   reachedStopIds?: string[];
+  debugStationLabels?: Array<{ name: string; stopId: string; labels: Array<{ arrival: number; firstDeparture: number; trainCount: number; lastTrip: string | null }> }>;
 };
 
 // Skanuj po maks. 30 minutach naraz. Ponieważ minimalna przesiadka też trwa
@@ -252,6 +253,19 @@ export async function runRailJourneySearch(
   if (!finalScan.journeys.length) {
     const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 2000);
     diagnostics.reachedStopIds = reachedIds;
+    try {
+      const debugNames = ["Koluszki", "Wrocław Główny", "Legnica", "Żary"];
+      const nameFilter = debugNames.map((name) => `"${name}"`).join(",");
+      const debugStops = await sbGet<{ id: string; name: string }>(
+        url, key,
+        `rail_stops?name=in.${encodeURIComponent(`(${nameFilter})`)}&select=id,name&limit=200`,
+      );
+      const labels = scanner.inspectStops(debugStops.map((stop) => stop.id)) as Array<{
+        stopId: string;
+        labels: Array<{ arrival: number; firstDeparture: number; trainCount: number; lastTrip: string | null }>;
+      }>;
+      diagnostics.debugStationLabels = debugStops.map((stop, index) => ({ name: stop.name, ...labels[index] }));
+    } catch { /* optional route debugging */ }
     if (reachedIds.length) {
       try {
         const rows = await sbGet<{ id: string; name: string }>(url, key, `rail_stops?id=in.(${inList(reachedIds)})&select=id,name`);
