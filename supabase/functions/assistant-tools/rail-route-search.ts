@@ -32,7 +32,6 @@ export type RouteSearchDiagnostics = {
   originHasCoordinates?: boolean;
   destinationHasCoordinates?: boolean;
   reachedStationNames?: string[];
-  reachedStopIds?: string[];
   debugStationLabels?: Array<{ name: string; stopId: string; labels: Array<{ arrival: number; firstDeparture: number; trainCount: number; lastTrip: string | null }> }>;
 };
 
@@ -251,8 +250,7 @@ export async function runRailJourneySearch(
   diagnostics.stationsReached = Math.max(0, finalScan.reachableStopIds.length - from.ids.length);
   if (fetchFailed || diagnostics.connectionsFetchError) return { result: null, diagnostics };
   if (!finalScan.journeys.length) {
-    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 2000);
-    diagnostics.reachedStopIds = reachedIds;
+    const reachedIds = finalScan.reachableStopIds.filter((id) => !from.ids.includes(id)).slice(0, 15);
     try {
       const debugNames = ["Koluszki", "Wrocław Główny", "Legnica", "Żary"];
       const nameFilter = debugNames.map((name) => `"${name}"`).join(",");
