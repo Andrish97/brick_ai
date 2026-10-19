@@ -44,7 +44,7 @@ const EXTENDED_DAY_CEILING_SECONDS = 30 * 3600;
 const MAX_RPC_REQUESTS = 8;
 const MIN_TRANSFER_SECONDS = 30 * 60;
 const MAX_TRANSFER_SECONDS = 2.5 * 3600;
-const MAX_JOURNEYS = 3;
+const MAX_JOURNEYS = 4;
 const IN_LIST_LIMIT = 500;
 
 function maxDetourKm(from: RailStationGroup, to: RailStationGroup): number | null {
