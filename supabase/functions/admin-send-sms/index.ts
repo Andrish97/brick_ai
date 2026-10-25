@@ -157,6 +157,9 @@ Deno.serve(async (req: Request) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const logSend = (type: string, data: object) => {
+    sbPost(supabaseUrl, serviceRoleKey, "logs", { type, data: { source: "admin", ...data } }).catch(() => {});
+  };
 
   // Saldo tuż przed wysyłką — gęstszy strumień obserwacji zmniejsza ryzyko, że
   // doładowanie/opłata trafi w to samo okno co ta wysyłka (patrz zadarma-sms-webhook).
@@ -181,6 +184,7 @@ Deno.serve(async (req: Request) => {
 
     const bodyText = await res.text();
     if (!res.ok) {
+      logSend("sms_error", { to: phone, from: caller_id, message, error: `Zadarma error: ${res.status} ${bodyText}` });
       return new Response(JSON.stringify({ error: `Zadarma error: ${res.status} ${bodyText}` }), {
         status: 502,
         headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
@@ -191,12 +195,14 @@ Deno.serve(async (req: Request) => {
     try { data = JSON.parse(bodyText); } catch { /* nie JSON — ufamy HTTP 200 */ }
     // HTTP 200 z treścią jawnie mówiącą o błędzie — nie liczymy jako sukces mimo statusu.
     if (data && typeof data === "object" && (data as { status?: string }).status === "error") {
+      logSend("sms_error", { to: phone, from: caller_id, message, error: `Zadarma error: HTTP 200 ale status=error: ${bodyText}` });
       return new Response(JSON.stringify({ error: `Zadarma error: HTTP 200 ale status=error: ${bodyText}` }), {
         status: 502,
         headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
       });
     }
 
+    logSend("sms_sent", { to: phone, from: caller_id, parts: countSmsSegments(message), messages: [message] });
     sbPost(supabaseUrl, serviceRoleKey, "sms_sends", { parts_sent: countSmsSegments(message), source: "admin" }).catch(() => {});
     const afterCheck = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -212,6 +218,7 @@ Deno.serve(async (req: Request) => {
       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   } catch (err) {
+    logSend("sms_error", { to: phone, from: caller_id, message, error: String(err) });
     return new Response(JSON.stringify({ error: String(err) }), {
       status: 500,
       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
