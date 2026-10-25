@@ -166,7 +166,7 @@ jobs:
           exit 1
 
       - name: Sprawdź i odśwież GTFS
-        if: ${{ inputs.refresh_gtfs || (github.event_name == 'push' && (contains(toJSON(github.event.head_commit.added), 'supabase/functions/rail-gtfs-sync/index.ts') || contains(toJSON(github.event.head_commit.modified), 'supabase/functions/rail-gtfs-sync/index.ts') || contains(toJSON(github.event.head_commit.added), 'scripts/sync-rail-gtfs.mjs') || contains(toJSON(github.event.head_commit.modified), 'scripts/sync-rail-gtfs.mjs') || contains(toJSON(github.event.head_commit.added), '20240143000000_rail_connections_from_raw_gtfs.sql') || contains(toJSON(github.event.head_commit.modified), '20240143000000_rail_connections_from_raw_gtfs.sql') || contains(toJSON(github.event.head_commit.added), '20240144000000_rail_connections_smaller_batches.sql') || contains(toJSON(github.event.head_commit.modified), '20240144000000_rail_connections_smaller_batches.sql') || contains(toJSON(github.event.head_commit.added), '20240145000000_rail_connections_replace_in_place.sql') || contains(toJSON(github.event.head_commit.modified), '20240145000000_rail_connections_replace_in_place.sql') || contains(toJSON(github.event.head_commit.added), '20240146000000_rail_calendar_cleanup_foreign_key.sql') || contains(toJSON(github.event.head_commit.modified), '20240146000000_rail_calendar_cleanup_foreign_key.sql')) ) }}
+        if: ${{ inputs.refresh_gtfs || github.event_name == 'push' }}
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}

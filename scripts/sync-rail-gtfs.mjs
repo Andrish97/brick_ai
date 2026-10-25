@@ -27,7 +27,7 @@ for (let tick = 1; tick <= 1800; tick++) {
   // Pojedynczy błąd może być przejściowy; funkcja sama ponawia krok do pięciu razy.
   if (!result.ok && result.error) console.error(`Przejściowy błąd ticka: ${result.error}`);
 }
-throw new Error("Sync GTFS nie zakończył się po 600 krokach.");
+throw new Error("Sync GTFS nie zakończył się po 1800 krokach.");
 
 async function callWithRetry(action) {
   const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 30_000];
