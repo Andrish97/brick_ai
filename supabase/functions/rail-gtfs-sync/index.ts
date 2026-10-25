@@ -32,8 +32,9 @@ const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rz
 const MAX_CHUNKS_PER_TICK = 1;
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
-// Etap B jest jedną atomową publikacją po zakończeniu wznowialnego importu raw.
-const TRANSFORM_STEPS = ["atomic_publish"] as const;
+// Wynikowe połączenia budujemy partiami w izolacji przez sync_run_id.
+// Dopiero krótki końcowy commit przełącza aktywny snapshot.
+const TRANSFORM_STEPS = ["stops", "routes", "calendar", "calendar_dates", "trips", "connections", "publish"] as const;
 type TransformStep = typeof TRANSFORM_STEPS[number];
 
 // Mapowanie: nazwa pliku GTFS -> {tabela raw, mapowanie kolumna GTFS -> kolumna raw}.
@@ -662,9 +663,9 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
     }[]>`select id, current_file, current_offset, current_header, current_total_bytes, extract_progress_bytes, transform_step, transform_cursor from rail_sync_runs where status = 'running' order by started_at asc limit 1`;
     if (!run) { return json({ ok: true, skipped: "nothing_running" }); }
     if (!run.current_file) {
-      // Wszystkie pliki rozpakowane i sparsowane — jeśli Etap B jeszcze trwa
-      // (transform_step ustawiony), zrób następny jego krok; inaczej nic do zrobienia.
-      if (run.transform_step) return await handleAtomicTransform(sql, run.id);
+      // Każdy krok transformacji commitowany osobno; nowe połączenia pozostają
+      // niewidoczne dla wyszukiwarki do czasu końcowego przełączenia snapshotu.
+      if (run.transform_step) return await handleTransformTick(sql, run.id, run.transform_step, run.transform_cursor);
       return json({ ok: true, skipped: "no_current_file" });
     }
 
@@ -830,16 +831,37 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
   }
 }
 
-// Publikacja w jednej transakcji jest ograniczona statement_timeout połączenia do 5 minut.
-// Połączenia budujemy w małych porcjach wewnątrz tej transakcji; jeśli całość nie zmieści
-// się w limicie, PostgreSQL wycofa ją w całości, a następny tick spróbuje ponownie.
-async function handleAtomicTransform(sql: SqlClient, runId: string): Promise<Response> {
-  const [row] = await sql<{ result: { connectionBatches?: number } }[]>`
-    select public.rail_gtfs_transform_atomic(${runId}::uuid) as result
-  `;
-  // Dane wynikowe i status success zostały zatwierdzone razem; blob można usunąć później.
-  await sql`delete from rail_sync_blobs where run_id = ${runId}`;
-  return json({ ok: true, done: true, atomic: true, ...row?.result });
+async function handleTransformTick(sql: SqlClient, runId: string, step: string, cursor: string | null): Promise<Response> {
+  if (step === "connections") {
+    const [batch] = await sql<{ next_trip: string | null; done: boolean }[]>`
+      select * from public.rail_gtfs_transform_connections_batch(${runId}::uuid, ${cursor})
+    `;
+    if (!batch) throw new Error("rail_connections_batch_returned_no_result");
+    if (batch.done) {
+      await sql`update rail_sync_runs set transform_step = 'publish', transform_cursor = null, consecutive_errors = 0 where id = ${runId}`;
+    }
+    return json({ ok: true, done: false, transformStep: batch.done ? "publish" : "connections", nextTrip: batch.next_trip });
+  }
+
+  if (step === "publish") {
+    const [row] = await sql<{ result: { connectionBatches?: number } }[]>`
+      select public.rail_gtfs_publish_atomic(${runId}::uuid) as result
+    `;
+    await sql`delete from rail_sync_blobs where run_id = ${runId}`;
+    return json({ ok: true, done: true, atomic: true, ...row?.result });
+  }
+
+  const next = TRANSFORM_STEPS[TRANSFORM_STEPS.indexOf(step as typeof TRANSFORM_STEPS[number]) + 1];
+  if (!next) throw new Error(`rail_transform_unknown_step:${step}`);
+  await sql.begin(async (tx) => {
+    if (step === "stops") await tx`select public.rail_gtfs_transform_stops(${runId}::uuid)`;
+    else if (step === "routes") await tx`select public.rail_gtfs_transform_routes(${runId}::uuid)`;
+    else if (step === "calendar") await tx`select public.rail_gtfs_transform_calendar(${runId}::uuid)`;
+    else if (step === "calendar_dates") await tx`select public.rail_gtfs_transform_calendar_dates(${runId}::uuid)`;
+    else if (step === "trips") await tx`select public.rail_gtfs_transform_trips(${runId}::uuid)`;
+    await tx`update rail_sync_runs set transform_step = ${next}, transform_cursor = null, consecutive_errors = 0 where id = ${runId}`;
+  });
+  return json({ ok: true, done: false, transformStep: next });
 }
 
 function getSql() {
