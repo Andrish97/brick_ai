@@ -2305,10 +2305,9 @@ function renderRailFileChecklist(s) {
   return `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${zipItem}${items.join('')}</div>`;
 }
 
-const RAIL_SYNC_TRANSFORM_STEPS = ['stops', 'routes', 'calendar', 'calendar_dates', 'trips', 'stop_times', 'connections', 'cleanup'];
+const RAIL_SYNC_TRANSFORM_STEPS = ['atomic_publish'];
 const RAIL_SYNC_TRANSFORM_STEP_LABEL = {
-  stops: 'przystanki', routes: 'linie', calendar: 'kalendarz', calendar_dates: 'wyjątki kalendarza',
-  trips: 'kursy', stop_times: 'rozkłady przystanków', connections: 'połączenia (CSA)', cleanup: 'sprzątanie starych danych',
+  atomic_publish: 'atomowe opublikowanie kompletnego rozkładu',
 };
 function renderTransformStepBadge(s) {
   if (!s.transform_step) return '';
@@ -2412,23 +2411,8 @@ async function resetStuckRailSync() {
   await refreshRailSyncStatus();
 }
 
-// Jedno kliknięcie robi całość: najpierw "start" (tani no-op, jeśli feed się nie
-// zmienił albo sync już trwa — bezpiecznie wywoływać zawsze), potem seria "ticków" w
-// pętli TU, W PRZEGLĄDARCE — nie przez RPC rail_gtfs_drive_ticks() (tamta droga okazała
-// się realnie zepsuta: PostgREST/rola `authenticated` ma własny, krótki statement_timeout,
-// a ustawienie SET statement_timeout NA POZIOMIE FUNKCJI go nie nadpisuje — Postgres
-// uzbraja ten limit raz, na starcie zapytania najwyższego poziomu, zanim funkcja w ogóle
-// zdąży zmienić GUC; zweryfikowane lokalnie, że nawet "SET statement_timeout" wewnątrz
-// funkcji nie ratuje wywołania trwającego dłużej niż limit sesji wołającego). Zwykłe
-// zapytania HTTP do samej Edge Function (jak tutaj) nie przechodzą przez ten limit wcale.
-//
-// Uwaga: cron nadal woła rail_gtfs_drive_ticks() bezpośrednio (pg_cron nie idzie przez
-// PostgREST, więc ten limit go nie dotyczy) — to wciąż działa i ma własną blokadę
-// (advisory lock) chroniącą przed dwoma równoległymi CRONOWYMI przebiegami. Teoretyczne
-// nałożenie się pętli z tej karty z pętlą crona w tym samym momencie nie jest tu
-// zablokowane — w najgorszym razie skutkuje kilkoma zdublowanymi wierszami w tabelach
-// rail_raw_* (nieszkodliwe dla CSA: zbędny duplikat połączenia, nie błędna trasa), nie
-// utratą postępu ani błędną odpowiedzią.
+// Jedno kliknięcie rozpoczyna sync i robi krótki postęp od razu. Jeśli cały feed
+// wymaga więcej kroków, wznowi go cron co 2 minuty. Worker lock serializuje oba źródła.
 const RAIL_SYNC_MAX_TICKS = 60;
 const RAIL_SYNC_TICK_DELAY_MS = 500;
 

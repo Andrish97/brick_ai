@@ -171,8 +171,10 @@ export async function hasFreshLocalData(url: string, key: string, maxAgeHours = 
   try {
     const rows = await sbGet<{ finished_at: string | null; feed_checked_at: string | null }>(
       url, key,
-      `rail_sync_runs?status=eq.success&order=finished_at.desc&limit=1&select=finished_at,feed_checked_at`,
+      `rail_sync_runs?status=eq.success&atomic_published=eq.true&order=finished_at.desc&limit=1&select=finished_at,feed_checked_at`,
     );
+    // Tylko pełny atomowy publish może być użyty. Bieżący import buduje raw staging;
+    // poprzednia opublikowana wersja pozostaje niezmieniona i czytelna do 48 godzin.
     const lastVerifiedAt = rows[0]?.feed_checked_at ?? rows[0]?.finished_at;
     if (!lastVerifiedAt) return false;
     return Date.now() - new Date(lastVerifiedAt).getTime() < maxAgeHours * 3600 * 1000;

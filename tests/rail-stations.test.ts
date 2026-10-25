@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { resolveStationGroupSmart } from "../supabase/functions/assistant-tools/rail-stations.ts";
+import { hasFreshLocalData, resolveStationGroupSmart } from "../supabase/functions/assistant-tools/rail-stations.ts";
 
 Deno.test("rozwiązuje błędną odmianę sufiksu stacji przez nazwę miasta", async () => {
   const originalFetch = globalThis.fetch;
@@ -31,6 +31,41 @@ Deno.test("rozwiązuje błędną odmianę sufiksu stacji przez nazwę miasta", a
     if (!result.ok) throw new Error(`Stacja nie została rozpoznana: ${JSON.stringify(result.body)}`);
     assertEquals(result.station.name, "Kłodzko Główne");
     assertEquals(requests.length, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("zachowuje ostatni atomowy rozkład podczas budowania nowego", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requestedUrl = String(input);
+    return Response.json([{ finished_at: new Date().toISOString(), feed_checked_at: null }]);
+  }) as typeof fetch;
+  try {
+    assertEquals(await hasFreshLocalData("https://supabase.test", "key"), true);
+    if (!requestedUrl.includes("atomic_published=eq.true")) throw new Error(`Brak filtra atomowej publikacji: ${requestedUrl}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("odrzuca świeży run, który nie został opublikowany atomowo", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json([])) as typeof fetch;
+  try {
+    assertEquals(await hasFreshLocalData("https://supabase.test", "key"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("udostępnia dane po ukończonej, świeżej synchronizacji atomowej", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json([{ finished_at: new Date().toISOString(), feed_checked_at: null }])) as typeof fetch;
+  try {
+    assertEquals(await hasFreshLocalData("https://supabase.test", "key"), true);
   } finally {
     globalThis.fetch = originalFetch;
   }

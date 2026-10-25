@@ -1,41 +1,14 @@
 import postgres from "npm:postgres@3.4.5";
 import { Entry, Reader, Writer, ZipReader } from "npm:@zip.js/zip.js@2.8.59";
 
-// Synchronizacja lokalnej kopii rozkładu kolejowego z darmowego feedu GTFS
-// (https://mkuran.pl/gtfs/polish_trains.zip, zbudowanego z tego samego źródła co
-// nasze API PKP PLK — zob. supabase/migrations/20240118000000_rail_gtfs.sql).
-//
-// Dwie akcje, wywoływane przez pg_cron (nie GitHub Actions — Actions w tym repo jest
-// wyłącznie do deployu) albo ręcznie z panelu admina:
-//   "start" (raz dziennie) — sprawdza Last-Modified feedu, jeśli zmieniony: pobiera cały
-//     zip (skompresowany, bez rozpakowywania) i odkłada go w całości do tabeli
-//     rail_sync_blobs, zakłada nowy wiersz rail_sync_runs.
-//   "tick" — wznawia pracę od miejsca zapisanego w rail_sync_runs (current_file/
-//     current_offset). Dla każdego pliku GTFS pierwszy tick go rozpakowuje z _source.zip
-//     (jeden plik na jedno wywołanie — zob. extractOneFile), kolejne go parsują: małe
-//     pliki (stops/routes/calendar/calendar_dates/trips) w całości w jednym ticku,
-//     stop_times.txt (jedyny spodziewany duży plik) w ograniczonych kawałkach bajtowych
-//     czytanych z rail_sync_blobs, kilka kawałków na tick (zob. MAX_CHUNKS_PER_TICK). Po
-//     ostatnim kawałku ostatniego pliku: wywołuje Etap B (czysty SQL, funkcja
-//     rail_gtfs_transform w bazie — patrz migracja) i "mark and sweep" starych wierszy.
-//
-// Plik między krokami trzymany jest wprost w Postgresie (tabela rail_sync_blobs), nie w
-// Supabase Storage — Storage okazało się mieć realną, powtarzalną niespójność odczytu-
-// -tuż-po-zapisie; zwykłe zapytanie SQL do tej samej bazy, z którą ta funkcja i tak już
-// rozmawia do wszystkich innych operacji, tej klasy problemów strukturalnie nie ma.
-//
-// Powód dzielenia pracy na małe kroki w ogóle: twardy limit 2s czasu CPU na jedno
-// wywołanie Supabase Edge Function — nie da się tego obejść, tylko obejść PRACĄ, robiąc
-// mało na raz. Rozpakowanie WSZYSTKICH plików naraz albo sparsowanie całego stop_times.txt
-// (kilkadziesiąt MB) w jednym wywołaniu przekracza ten limit.
-//
-// Kto woła: pg_cron (nagłówek Authorization z INTERNAL_SECRET z Vault) albo zalogowany
-// admin z panelu (JWT Supabase). Rozróżnienie tego (isAutomatic w Deno.serve niżej) steruje
-// WYŁĄCZNIE tym, czy przebieg zostawia ślad w ogólnej tabeli `logs` (zakładka "Logi" w
-// panelu) — cron nie ma nikogo "przed ekranem", więc to jedyny sposób sprawdzenia po
-// fakcie, czy się odbył i jak poszedł. Kliknięcia z panelu mają już własny, żywy podgląd
-// postępu w tej samej karcie (percent + checklist plików), więc dublowanie ich w Logi
-// byłoby czystym szumem.
+// Synchronizacja lokalnej kopii rozkładu kolejowego z feedu GTFS.
+// `start` sprawdza feed i tworzy wznawialny run; `tick` wykonuje jeden mały krok
+// pobierania/rozpakowania/parsowania. pg_cron uruchamia start co 6 godzin i tick co
+// 2 minuty, więc import może trwać dłużej niż pojedyncze zadanie harmonogramu.
+// Po zebraniu plików GTFS Etap B publikuje wszystkie tabele w jednej transakcji
+// PostgreSQL. Czytelnicy widzą poprzedni kompletny rozkład aż do atomowego COMMIT.
+// Pliki stagingowe są trzymane w rail_sync_blobs i rail_raw_*; stop_times parsujemy
+// porcjami, bo Edge Functions mają ograniczony czas CPU.
 
 const FEED_URL = "https://mkuran.pl/gtfs/polish_trains.zip";
 const SOURCE_ZIP = "_source.zip";
@@ -59,13 +32,8 @@ const MAX_CONSECUTIVE_ERRORS = 5; // po tylu kolejnych nieudanych tickach pod rz
 const MAX_CHUNKS_PER_TICK = 1;
 const INSERT_BATCH = 2000; // wierszy na jedno zapytanie bulk-insert
 
-// Etap B (transformacja raw -> docelowe + rail_connections + mark-and-sweep) rozbity na
-// osobne kroki, po jednym na tick — zob. duży komentarz przy handleTransformStep. Kolejność
-// ma znaczenie (FK: routes/calendar przed trips przed connections). Połączenia są
-// budowane bezpośrednio z rail_raw_stop_times; nie materializujemy tabeli pośredniej.
-const TRANSFORM_STEPS = [
-  "stops", "routes", "calendar", "calendar_dates", "trips", "connections", "cleanup",
-] as const;
+// Etap B jest jedną atomową publikacją po zakończeniu wznowialnego importu raw.
+const TRANSFORM_STEPS = ["atomic_publish"] as const;
 type TransformStep = typeof TRANSFORM_STEPS[number];
 
 // Mapowanie: nazwa pliku GTFS -> {tabela raw, mapowanie kolumna GTFS -> kolumna raw}.
@@ -317,9 +285,8 @@ async function getBlobRange(sql: SqlClient, runId: string, fileName: string, sta
 // problem z kolejką na blokadach wierszy co opisany wyżej, tylko wywołany przez wygasłą
 // blokadę zamiast przez nadmiarowe klikanie. Potwierdzone w logach: wiele wywołań
 // wystartowanych w ciągu kilku sekund od siebie, każde trwające niemal identyczne ~75s.
-// 180s daje bezpieczny margines nad realnym najgorszym przypadkiem, wciąż daleko poniżej
-// twardego limitu 400s czasu ściany Edge Function.
-const WORKER_LOCK_HOLD_SECONDS = 180;
+// 360s pokrywa 300s statement_timeout atomowej publikacji z marginesem na połączenie.
+const WORKER_LOCK_HOLD_SECONDS = 360;
 
 async function tryAcquireWorkerLock(sql: SqlClient): Promise<boolean> {
   const [row] = await sql<{ id: boolean }[]>`
@@ -337,7 +304,7 @@ async function releaseWorkerLock(sql: SqlClient): Promise<void> {
 
 // Jedyny log tego mechanizmu, i tylko dla przebiegów automatycznych — zob. komentarz na
 // górze pliku. Jeden typ w tabeli `logs` ("rail_sync"), rozróżniany polem data.event.
-async function logRailSync(sql: SqlClient, event: "started" | "finished" | "failed", data: Record<string, unknown>): Promise<void> {
+async function logRailSync(sql: SqlClient, event: "started" | "finished" | "failed" | "retry", data: Record<string, unknown>): Promise<void> {
   try {
     // sql.json(...), NIE ręczny JSON.stringify(...)::jsonb — ten drugi podwójnie koduje
     // wynik (jsonb string opakowujący cały tekst JSON zamiast właściwego obiektu),
@@ -373,20 +340,16 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
       return json({ ok: true, skipped: "unchanged" });
     }
 
-    // WORKER_RESOURCE_LIMIT potrafi ubić wywołanie tak brutalnie, że nie zdąży nawet
-    // wykonać własnego catch-bloku (status zostaje 'running' na zawsze) — bez tego
-    // sprawdzenia taki porzucony bieg blokowałby każdy kolejny "start" w nieskończoność.
-    // Sprawdzamy WSZYSTKIE wiersze 'running' (mogło ich się uzbierać kilka z kolejnych
-    // nieudanych prób), nie tylko pierwszy z brzegu.
+    // Nie porzucaj importu tylko dlatego, że wymaga wielu ticków. Osobny cron
+    // wznawia go co kilka minut; po 5 błędach z rzędu tick oznacza go jako failed.
     const runningRows = await sql<{ id: string; started_at: string }[]>`select id, started_at from rail_sync_runs where status = 'running' order by started_at desc`;
     if (runningRows.length) {
       const freshest = runningRows[0];
       const ageMs = Date.now() - new Date(freshest.started_at).getTime();
-      // Normalny pełny przebieg mieści się dużo poniżej godziny, więc jeśli nawet
-      // najświeższy 'running' jest starszy — wszystkie są porzucone.
-      if (ageMs < 60 * 60 * 1000) {
+      if (ageMs < 24 * 60 * 60 * 1000) {
         return json({ ok: true, skipped: "already_running" });
       }
+      if (isAutomatic) await logRailSync(sql, "failed", { runId: freshest.id, stage: "start", error: "stale_abandoned_run" });
       await sql`update rail_sync_runs set status = 'failed', finished_at = now(), error = 'stale_abandoned_run' where status = 'running'`;
     }
 
@@ -701,7 +664,7 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
     if (!run.current_file) {
       // Wszystkie pliki rozpakowane i sparsowane — jeśli Etap B jeszcze trwa
       // (transform_step ustawiony), zrób następny jego krok; inaczej nic do zrobienia.
-      if (run.transform_step) return await handleTransformStep(sql, run.id, run.transform_step as TransformStep, run.transform_cursor, isAutomatic);
+      if (run.transform_step) return await handleAtomicTransform(sql, run.id);
       return json({ ok: true, skipped: "no_current_file" });
     }
 
@@ -848,16 +811,17 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
     // RETURNING mówi od razu, czy TA aktualizacja przekroczyła próg — bez osobnego
     // zapytania sprawdzającego z góry.
     try {
-      const [updated] = await sql<{ status: string }[]>`
+      const [updated] = await sql<{ status: string; consecutive_errors: number }[]>`
         update rail_sync_runs
         set consecutive_errors = consecutive_errors + 1,
             error = ${String(e)},
             status = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then 'failed' else status end,
             finished_at = case when consecutive_errors + 1 >= ${MAX_CONSECUTIVE_ERRORS} then now() else finished_at end
         where status = 'running'
-        returning status
+        returning status, consecutive_errors
       `;
-      if (isAutomatic && updated?.status === "failed") await logRailSync(sql, "failed", { stage: "tick", error: String(e) });
+      if (isAutomatic && updated?.status === "failed") await logRailSync(sql, "failed", { stage: "tick", error: String(e), consecutiveErrors: updated.consecutive_errors });
+      else if (isAutomatic && updated) await logRailSync(sql, "retry", { stage: "tick", error: String(e), consecutiveErrors: updated.consecutive_errors });
     } catch { /* baza sama niedostępna — nic więcej nie da się tu zrobić */ }
     return json({ ok: false, error: String(e) }, 500);
   } finally {
@@ -866,58 +830,16 @@ async function handleTick(isAutomatic: boolean): Promise<Response> {
   }
 }
 
-// Etap B: transformacja raw -> docelowe + rail_connections + mark-and-sweep. Realny dowód
-// z produkcji: nawet po naprawieniu rail_connections (funkcja okna zamiast skorelowanego
-// podzapytania) i po jawnym wydłużeniu statement_timeout do 5 minut, cała transformacja w
-// JEDNYM wywołaniu i tak przekroczyła limit (~295s, tuż pod nowym 5-minutowym sufitem) —
-// prawdziwa baza produkcyjna jest wolniejsza niż środowisko testowe, a i tak nie ma sensu
-// podkręcać limitu wyżej niż twardy sufit czasu ściany Edge Function (~400s). Jedyna
-// prawdziwa naprawa: ten sam wzorzec co reszta tego pliku (pobieranie, ekstrakcja,
-// parsowanie) — rozbić na osobne kroki, po jednym na tick, stan w
-// rail_sync_runs.transform_step (zob. TRANSFORM_STEPS). Każdy krok to osobna, samodzielna
-// funkcja Postgres (zob. migracja) — zero pracy JS/CPU po stronie Edge Function, tylko
-// jedno zapytanie na tick.
-async function runTransformStep(sql: SqlClient, runId: string, step: TransformStep): Promise<void> {
-  switch (step) {
-    case "stops": await sql`select rail_gtfs_transform_stops(${runId}::uuid)`; return;
-    case "routes": await sql`select rail_gtfs_transform_routes(${runId}::uuid)`; return;
-    case "calendar": await sql`select rail_gtfs_transform_calendar(${runId}::uuid)`; return;
-    case "calendar_dates": await sql`select rail_gtfs_transform_calendar_dates(${runId}::uuid)`; return;
-    case "trips": await sql`select rail_gtfs_transform_trips(${runId}::uuid)`; return;
-    case "connections": await sql`select rail_gtfs_transform_connections(${runId}::uuid)`; return;
-    case "cleanup": await sql`select rail_gtfs_transform_cleanup(${runId}::uuid)`; return;
-  }
-}
-
-async function handleTransformStep(sql: SqlClient, runId: string, step: TransformStep, cursor: string | null, isAutomatic: boolean): Promise<Response> {
-  if (step === "connections") {
-    const [batch] = await sql<{ next_trip: string | null; done: boolean }[]>`
-      select * from rail_gtfs_transform_connections_batch(${runId}::uuid, ${cursor}::text)
-    `;
-    if (!batch) throw new Error("rail_connections_batch_no_result");
-    if (!batch.done) return json({ ok: true, transformStep: step, nextTrip: batch.next_trip });
-    // Kursor zapisuje funkcja SQL w tej samej transakcji co INSERT, więc awaria Edge
-    // Function nie powoduje ponownego dodania tej samej porcji połączeń.
-    await sql`update rail_sync_runs set transform_step = 'cleanup', transform_cursor = null, consecutive_errors = 0 where id = ${runId}`;
-    return json({ ok: true, transformStep: step, nextTransformStep: "cleanup" });
-  }
-  await runTransformStep(sql, runId, step);
-  const nextStep = TRANSFORM_STEPS[TRANSFORM_STEPS.indexOf(step) + 1] ?? null;
-  if (nextStep) {
-    await sql`update rail_sync_runs set transform_step = ${nextStep}, consecutive_errors = 0 where id = ${runId}`;
-    return json({ ok: true, transformStep: step, nextTransformStep: nextStep });
-  }
-  // Ostatni krok (cleanup) właśnie się skończył — cały sync faktycznie gotowy dopiero teraz.
-  await sql`update rail_sync_runs set status = 'success', transform_step = null, finished_at = now() where id = ${runId}`;
-  // ZIP źródłowy i rozpakowane pliki zajmują miejsce w Postgresie, a po sukcesie
-  // nie są już potrzebne. Zachowujemy tylko metadane biegu; następny import nie musi
-  // czekać do startu, żeby zwolnić przestrzeń po poprzedniej synchronizacji.
+// Publikacja w jednej transakcji jest ograniczona statement_timeout połączenia do 5 minut.
+// Połączenia budujemy w małych porcjach wewnątrz tej transakcji; jeśli całość nie zmieści
+// się w limicie, PostgreSQL wycofa ją w całości, a następny tick spróbuje ponownie.
+async function handleAtomicTransform(sql: SqlClient, runId: string): Promise<Response> {
+  const [row] = await sql<{ result: { connectionBatches?: number } }[]>`
+    select public.rail_gtfs_transform_atomic(${runId}::uuid) as result
+  `;
+  // Dane wynikowe i status success zostały zatwierdzone razem; blob można usunąć później.
   await sql`delete from rail_sync_blobs where run_id = ${runId}`;
-  if (isAutomatic) {
-    const [row] = await sql<{ rows_processed: number }[]>`select rows_processed from rail_sync_runs where id = ${runId}`;
-    await logRailSync(sql, "finished", { runId, rowsProcessed: row?.rows_processed ?? null });
-  }
-  return json({ ok: true, transformStep: step, done: true });
+  return json({ ok: true, done: true, atomic: true, ...row?.result });
 }
 
 function getSql() {
