@@ -1223,7 +1223,14 @@ Deno.serve(async (req: Request) => {
     pending_reply: null,
   });
 
-  log("ai_response", { convId, convCode: convCodeFinal, kind: outcome.kind, chars: cleanReply.length, parts: parts.length });
+  log("ai_response", {
+    convId,
+    convCode: convCodeFinal,
+    kind: outcome.kind,
+    chars: cleanReply.length,
+    parts: parts.length,
+    content: cleanReply,
+  });
 
   if (dryRun) {
     return new Response(JSON.stringify({ ok: true, dry_run: true, reply: parts.map((p) => `${p}${suffix}`).join("\n---\n"), parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
@@ -1268,10 +1275,26 @@ Deno.serve(async (req: Request) => {
   }
 
   if (sendError) {
-    log("sms_error", { to: senderPhone, from: recipientDid, error: String(sendError), successfulParts });
+    log("sms_error", {
+      to: senderPhone,
+      from: recipientDid,
+      error: String(sendError),
+      successfulParts,
+      messagesSent: parts.slice(0, successfulParts).map((part) => `${part}${suffix}`),
+      failedMessage: parts[successfulParts] ? `${parts[successfulParts]}${suffix}` : null,
+      convId,
+      convCode: convCodeFinal,
+    });
     return new Response(JSON.stringify({ ok: false, error: String(sendError), successfulParts }), { status: 500, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
-  log("sms_sent", { to: senderPhone, from: recipientDid, parts: parts.length });
+  log("sms_sent", {
+    to: senderPhone,
+    from: recipientDid,
+    parts: parts.length,
+    messages: parts.map((part) => `${part}${suffix}`),
+    convId,
+    convCode: convCodeFinal,
+  });
   return new Response(JSON.stringify({ ok: true, parts: parts.length }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
 });

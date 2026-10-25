@@ -2822,6 +2822,67 @@ async function renderLogs() {
   renderLogsContent();
 }
 
+async function exportDiagnosticLogs() {
+  const button = document.getElementById('export-diagnostic-logs-btn');
+  if (button) { button.disabled = true; button.textContent = 'Przygotowuję…'; }
+
+  try {
+    const exportedAt = new Date();
+    const since = new Date(exportedAt.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const fetchRecentRows = async (table, columns, timestampColumn = 'created_at') => {
+      const rows = [];
+      const pageSize = 1000;
+      for (let offset = 0; ; offset += pageSize) {
+        const { data, error } = await sb.from(table)
+          .select(columns)
+          .gte(timestampColumn, since)
+          .order(timestampColumn, { ascending: true })
+          .range(offset, offset + pageSize - 1);
+        if (error) throw new Error(`${table}: ${error.message}`);
+        rows.push(...(data || []));
+        if (!data || data.length < pageSize) break;
+      }
+      return rows;
+    };
+
+    const [logs, webhookLogs, messages, conversations] = await Promise.all([
+      fetchRecentRows('logs', '*'),
+      fetchRecentRows('webhook_logs', '*'),
+      fetchRecentRows('messages', 'id,conversation_id,direction,content,created_at'),
+      fetchRecentRows('conversations', 'id,code,status,summary,last_activity_at', 'last_activity_at'),
+    ]);
+    const bundle = {
+      format: 'brick-ai-diagnostic-export-v1',
+      exported_at: exportedAt.toISOString(),
+      period: { from: since, to: exportedAt.toISOString() },
+      privacy_note: 'Eksport zawiera treści wiadomości, numery telefonów oraz surowe payloady webhooków. Przed udostępnieniem usuń dane, których nie chcesz przekazywać.',
+      logs,
+      webhook_logs: webhookLogs,
+      messages,
+      conversations,
+      counts: {
+        logs: logs.length,
+        webhook_logs: webhookLogs.length,
+        messages: messages.length,
+        conversations: conversations.length,
+      },
+    };
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = `brick-ai-diagnostyka-${exportedAt.toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch (error) {
+    await alertModal(`Nie udało się wyeksportować logów: ${error.message}`);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = 'Pobierz eksport diagnostyczny'; }
+  }
+}
+
 function renderLogsContent() {
   // Merge logs + webhook_logs into one unified list
   const webhookEntries = _webhooksCache.map(w => ({
@@ -2899,8 +2960,12 @@ function renderLogsContent() {
             <button class="btn ${logViewMode === 'full' ? 'btn-primary' : 'btn-ghost'} btn-sm" style="border-radius:0" onclick="applyLogsViewMode('full')">Pełne logi</button>
           </div>
         </div>
-        <button class="btn btn-danger btn-sm" onclick="clearAllLogs()">🗑 Wyczyść wszystko</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" id="export-diagnostic-logs-btn" onclick="exportDiagnosticLogs()">Pobierz eksport diagnostyczny</button>
+          <button class="btn btn-danger btn-sm" onclick="clearAllLogs()">🗑 Wyczyść wszystko</button>
+        </div>
       </div>
+      <div style="font-size:12px;color:var(--muted);margin:-2px 0 14px">Eksportuje zdarzenia, webhooki, rozmowy i wiadomości z ostatnich 30 dni jako JSON. Plik zawiera treść SMS-ów i numery telefonów.</div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -2919,8 +2984,8 @@ function renderLogsContent() {
           ${Object.entries(LOG_TYPE_STYLE).map(([key, s]) => {
             const desc = {
               sms_in:       'przychodzący SMS zaakceptowany — nadawca, treść, metoda dopasowania (code/phone)',
-              sms_sent:     'SMS wysłany do użytkownika — odbiorca, nadawca, długość',
-              sms_error:    'błąd wysyłki SMS przez API Zadarma',
+              sms_sent:     'SMS wysłany do użytkownika — odbiorca, nadawca, treść każdej wysłanej części',
+              sms_error:    'błąd wysyłki SMS przez API Zadarma — błąd, wysłane części i część, na której wystąpił problem',
               sms_debug:    'diagnostyka przed wysyłką — obecność kluczy API, długość wiadomości',
               sms_parsed:   'wynik parsowania SMS — co system zrozumiał: kod, kod rozmowy, treść',
               ai_response:  'odpowiedź AI — treść, id rozmowy, liczba znaków',
