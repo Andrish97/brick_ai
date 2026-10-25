@@ -2412,7 +2412,7 @@ async function resetStuckRailSync() {
 }
 
 // Jedno kliknięcie rozpoczyna sync i robi krótki postęp od razu. Jeśli cały feed
-// wymaga więcej kroków, wznowi go cron co 2 minuty. Worker lock serializuje oba źródła.
+// wymaga więcej kroków, wznowi go cron co minutę. Worker lock serializuje oba źródła.
 const RAIL_SYNC_MAX_TICKS = 60;
 const RAIL_SYNC_TICK_DELAY_MS = 500;
 

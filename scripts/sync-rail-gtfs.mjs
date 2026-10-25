@@ -11,7 +11,7 @@ if (start.skipped === "unchanged") {
 }
 if (!start.ok) throw new Error(`Nie udało się uruchomić syncu GTFS: ${JSON.stringify(start)}`);
 
-for (let tick = 1; tick <= 600; tick++) {
+for (let tick = 1; tick <= 1800; tick++) {
   await new Promise((resolve) => setTimeout(resolve, 750));
   const result = await callWithRetry("tick");
   if (tick % 10 === 0 || result.done || result.skipped) {

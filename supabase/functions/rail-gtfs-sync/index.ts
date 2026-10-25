@@ -4,7 +4,7 @@ import { Entry, Reader, Writer, ZipReader } from "npm:@zip.js/zip.js@2.8.59";
 // Synchronizacja lokalnej kopii rozkładu kolejowego z feedu GTFS.
 // `start` sprawdza feed i tworzy wznawialny run; `tick` wykonuje jeden mały krok
 // pobierania/rozpakowania/parsowania. pg_cron uruchamia start co 6 godzin i tick co
-// 2 minuty, więc import może trwać dłużej niż pojedyncze zadanie harmonogramu.
+// minutę, więc import może trwać dłużej niż pojedyncze zadanie harmonogramu.
 // Po zebraniu plików GTFS Etap B publikuje wszystkie tabele w jednej transakcji
 // PostgreSQL. Czytelnicy widzą poprzedni kompletny rozkład aż do atomowego COMMIT.
 // Pliki stagingowe są trzymane w rail_sync_blobs i rail_raw_*; stop_times parsujemy
@@ -346,7 +346,7 @@ async function handleStart(isAutomatic: boolean): Promise<Response> {
     if (runningRows.length) {
       const freshest = runningRows[0];
       const ageMs = Date.now() - new Date(freshest.started_at).getTime();
-      if (ageMs < 24 * 60 * 60 * 1000) {
+      if (ageMs < 48 * 60 * 60 * 1000) {
         return json({ ok: true, skipped: "already_running" });
       }
       if (isAutomatic) await logRailSync(sql, "failed", { runId: freshest.id, stage: "start", error: "stale_abandoned_run" });
