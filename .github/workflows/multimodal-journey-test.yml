@@ -24,8 +24,12 @@ jobs:
           EXPECT_MODE: transit
           EXPECT_TRAIN: "true"
         run: |
-          monday=$(TZ=Europe/Warsaw date -d 'next monday' +%d.%m.%Y)
-          QUESTION="O której mam wyjść z domu, żeby być w Przemyślu w poniedziałek ${monday} przed 20?" node scripts/test-multimodal-journey.mjs
+          # Always 2 days ahead: the planner only accepts trips within the next 7 days,
+          # so "next monday" broke this test whenever it ran on a Monday.
+          day=$(TZ=Europe/Warsaw date -d '+2 days' +%d.%m.%Y)
+          dow=$(TZ=Europe/Warsaw date -d '+2 days' +%u)
+          names=("" "w poniedziałek" "we wtorek" "w środę" "w czwartek" "w piątek" "w sobotę" "w niedzielę")
+          QUESTION="O której mam wyjść z domu, żeby być w Przemyślu ${names[$dow]} ${day} przed 20?" node scripts/test-multimodal-journey.mjs
       - name: Test departure planning from home (no SMS)
         env:
           INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
