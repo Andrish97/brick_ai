@@ -694,7 +694,9 @@ async function formatRailAnswer(
 ): Promise<string> {
   if (toolResult.error) return pkpErrorMessage(toolResult);
   if (name === "plan_train_journey") {
-    const question = [...contents].reverse().find((content) => content.role === "user")?.parts
+    // Function responses are also sent with role "user", so pick the latest user turn that has text.
+    const question = [...contents].reverse()
+      .find((content) => content.role === "user" && content.parts.some((part) => typeof part.text === "string"))?.parts
       .map((part) => typeof part.text === "string" ? part.text : "").join(" ") ?? "";
     const departureReply = departureOnlyReply(question, toolResult);
     if (departureReply) return departureReply;
@@ -707,7 +709,7 @@ async function formatRailAnswer(
   const formatContents: GeminiContent[] = [
     ...contents,
     { role: "model", parts: [callPart] },
-    { role: "function", parts: [{ functionResponse: { name, response: toolResult } }] },
+    { role: "user", parts: [{ functionResponse: { name, response: toolResult } }] },
   ];
   const formatted = await generateContent(formatContents, `${system}${RAIL_SMS_FORMAT_INSTRUCTIONS}`, maxOutputTokens, false);
   if (formatted.text?.trim()) return formatted.text.trim();
@@ -816,7 +818,7 @@ async function runAssistant(contents: GeminiContent[], systemPrompt: string, max
     currentContents = [
       ...currentContents,
       { role: "model", parts: [turn.functionCallPart ?? { functionCall: { name, args } }] },
-      { role: "function", parts: [{ functionResponse: { name, response: toolResult } }] },
+      { role: "user", parts: [{ functionResponse: { name, response: toolResult } }] },
     ];
   }
 
