@@ -89,37 +89,6 @@ on:
         description: Opcjonalne własne sformułowanie pytania do testu bez wysyłki SMS
         required: false
         type: string
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/rail-journey-test.yml"
-      - "supabase/functions/rail-gtfs-sync/index.ts"
-      - "supabase/functions/assistant-tools/rail-route-search.ts"
-      - "supabase/functions/assistant-tools/rail-router.js"
-      - "supabase/functions/assistant-tools/rail-settings.ts"
-      - "supabase/functions/assistant-tools/rail-stations.ts"
-      - "supabase/functions/assistant-tools/index.ts"
-      - "supabase/functions/zadarma-sms-webhook/**"
-      - "scripts/sync-rail-gtfs.mjs"
-      - "scripts/test-rail-journey.mjs"
-      - "tests/rail-answer.test.ts"
-      - "tests/rail-stations.test.ts"
-      - "supabase/migrations/20240143000000_rail_connections_from_raw_gtfs.sql"
-      - "supabase/migrations/20240144000000_rail_connections_smaller_batches.sql"
-      - "supabase/migrations/20240145000000_rail_connections_replace_in_place.sql"
-      - "supabase/migrations/20240146000000_rail_calendar_cleanup_foreign_key.sql"
-      - "supabase/migrations/20240147000000_rail_connections_reverse_search_scope.sql"
-      - "supabase/migrations/20240148000000_rail_connections_corridor_search.sql"
-      - "supabase/migrations/20240149000000_rail_connections_corridor_reverse_search.sql"
-      - "supabase/migrations/20240150000000_rail_connections_batch_corridor.sql"
-      - "supabase/migrations/20240151000000_rail_connections_geo_window.sql"
-      - "supabase/migrations/20240152000000_rail_connections_trip_window.sql"
-      - "supabase/migrations/20240153000000_rail_connections_compact_rpc.sql"
-      - "supabase/migrations/20240154000000_rail_connection_station_aliases.sql"
-      - "supabase/migrations/20240155000000_rail_search_settings.sql"
-      - "tests/rail-settings.test.ts"
-
 permissions:
   actions: read
   contents: read
